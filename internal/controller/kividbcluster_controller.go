@@ -1,7 +1,9 @@
 // Package controller implements the KividbCluster reconciliation loop:
 // rendering ConfigMap/Secret/StatefulSet/Service/CronJob objects from a
-// KividbCluster spec, and driving replication role assignment (including
-// automatic failover) via the per-pod agent sidecar's HTTP API.
+// KividbCluster spec (plus its referenced KividbConfig/KividbAclConfig/
+// KividbSnapshotConfig), driving replication role assignment (including
+// automatic failover) via the per-pod agent sidecar's HTTP API, and
+// recording backup runs as KividbSnapshot objects.
 package controller
 
 import (
@@ -17,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -34,8 +37,9 @@ const reconcileInterval = 10 * time.Second
 // KividbClusterReconciler reconciles a KividbCluster object.
 type KividbClusterReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Agent  *AgentClient
+	Scheme   *runtime.Scheme
+	Agent    *AgentClient
+	Recorder record.EventRecorder
 }
 
 func (r *KividbClusterReconciler) scheme() *runtime.Scheme { return r.Scheme }
@@ -43,6 +47,9 @@ func (r *KividbClusterReconciler) scheme() *runtime.Scheme { return r.Scheme }
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbclusters,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbclusters/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbclusters/finalizers,verbs=update
+//+kubebuilder:rbac:groups=kividb.io,resources=kividbconfigs;kividbaclconfigs;kividbsnapshotconfigs,verbs=get;list;watch
+//+kubebuilder:rbac:groups=kividb.io,resources=kividbsnapshots,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=kividb.io,resources=kividbsnapshots/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
@@ -62,12 +69,27 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	secretValues, err := r.resolveSecretValues(ctx, &c)
+	kdbConfig, err := r.resolveKividbConfig(ctx, &c)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolving configRef: %w", err)
+	}
+	aclConfig, err := r.resolveAclConfig(ctx, &c)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolving aclConfigRef: %w", err)
+	}
+	snapCfg, err := r.resolveSnapshotConfig(ctx, &c)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolving snapshotConfigRef: %w", err)
+	}
+
+	r.emitVariantGuidance(&c, kdbConfig)
+
+	secretValues, err := r.resolveSecretValues(ctx, &c, aclConfig)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolving referenced secrets: %w", err)
 	}
 
-	aclContent, err := renderACLFile(&c, secretValues)
+	aclContent, err := renderACLFile(aclConfig, secretValues)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("rendering ACL file: %w", err)
 	}
@@ -75,20 +97,22 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.reconcileSecret(ctx, &c, aclContent); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling secret: %w", err)
 	}
-	if err := r.reconcileConfigMap(ctx, &c); err != nil {
+	if err := r.reconcileConfigMap(ctx, &c, kdbConfig); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling configmap: %w", err)
 	}
 	if err := r.reconcileServices(ctx, &c); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling services: %w", err)
 	}
-	if err := r.reconcileStatefulSet(ctx, &c); err != nil {
+	if err := r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
 	}
-	if err := r.reconcileBackupCronJob(ctx, &c); err != nil {
+	if err := r.reconcileBackupCronJob(ctx, &c, snapCfg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling backup cronjob: %w", err)
 	}
-	if err := r.reconcileBackupStatus(ctx, &c); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling backup status: %w", err)
+	if snapCfg != nil {
+		if err := r.reconcileSnapshots(ctx, &c, snapCfg.Name); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling snapshots: %w", err)
+		}
 	}
 
 	// Captured before reconcileRoles/updateStatus mutate c.Status, so it
@@ -121,9 +145,77 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
 }
 
-func (r *KividbClusterReconciler) resolveSecretValues(ctx context.Context, c *kividbv1alpha1.KividbCluster) (map[string]string, error) {
+// emitVariantGuidance records Events surfacing the two ways spec.image and
+// spec.variant can silently disagree, since the operator deliberately
+// never derives an image tag from spec.variant (see resolveImage) or
+// validates that the two actually match -- only the person who set
+// spec.image knows what build it actually is. Safe to call every
+// reconcile: client-go's EventRecorder aggregates repeats of the same
+// (object, reason, message) into one Event with an incrementing count
+// rather than creating a new object each time.
+func (r *KividbClusterReconciler) emitVariantGuidance(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) {
+	if r.Recorder == nil {
+		return
+	}
+
+	variant := c.Spec.Variant
+	if variant != "" && variant != kividbv1alpha1.VariantStandard {
+		r.Recorder.Eventf(c, corev1.EventTypeNormal, "VariantGuidance",
+			"spec.variant=%s: the operator does not select or verify images by variant -- make sure spec.image (%s) is actually a %s-capable build.",
+			variant, resolveImage(c), variant)
+	}
+
+	if tls := kividbTLSSpec(kdbConfig); tls != nil && tls.Enabled &&
+		variant != kividbv1alpha1.VariantTLS && variant != kividbv1alpha1.VariantFull {
+		r.Recorder.Event(c, corev1.EventTypeWarning, "TLSVariantMismatch",
+			"the referenced KividbConfig has spec.tls.enabled: true, but spec.variant is not \"tls\" or \"full\" -- "+
+				"set spec.variant accordingly and make sure spec.image points at a TLS-capable build, or the TLS listener will not come up.")
+	}
+}
+
+// resolveKividbConfig fetches the KividbConfig named by spec.configRef, if
+// set. Returns nil (not an error) when the ref is unset.
+func (r *KividbClusterReconciler) resolveKividbConfig(ctx context.Context, c *kividbv1alpha1.KividbCluster) (*kividbv1alpha1.KividbConfig, error) {
+	if c.Spec.ConfigRef == nil {
+		return nil, nil
+	}
+	var cfg kividbv1alpha1.KividbConfig
+	if err := r.Get(ctx, types.NamespacedName{Name: c.Spec.ConfigRef.Name, Namespace: c.Namespace}, &cfg); err != nil {
+		return nil, fmt.Errorf("KividbConfig %q: %w", c.Spec.ConfigRef.Name, err)
+	}
+	return &cfg, nil
+}
+
+// resolveAclConfig fetches the KividbAclConfig named by spec.aclConfigRef,
+// if set. Returns nil (not an error) when the ref is unset.
+func (r *KividbClusterReconciler) resolveAclConfig(ctx context.Context, c *kividbv1alpha1.KividbCluster) (*kividbv1alpha1.KividbAclConfig, error) {
+	if c.Spec.AclConfigRef == nil {
+		return nil, nil
+	}
+	var acl kividbv1alpha1.KividbAclConfig
+	if err := r.Get(ctx, types.NamespacedName{Name: c.Spec.AclConfigRef.Name, Namespace: c.Namespace}, &acl); err != nil {
+		return nil, fmt.Errorf("KividbAclConfig %q: %w", c.Spec.AclConfigRef.Name, err)
+	}
+	return &acl, nil
+}
+
+// resolveSnapshotConfig fetches the KividbSnapshotConfig named by
+// spec.snapshotConfigRef, if set. Returns nil (not an error) when the ref
+// is unset -- that's how scheduled backups are disabled.
+func (r *KividbClusterReconciler) resolveSnapshotConfig(ctx context.Context, c *kividbv1alpha1.KividbCluster) (*kividbv1alpha1.KividbSnapshotConfig, error) {
+	if c.Spec.SnapshotConfigRef == nil {
+		return nil, nil
+	}
+	var snap kividbv1alpha1.KividbSnapshotConfig
+	if err := r.Get(ctx, types.NamespacedName{Name: c.Spec.SnapshotConfigRef.Name, Namespace: c.Namespace}, &snap); err != nil {
+		return nil, fmt.Errorf("KividbSnapshotConfig %q: %w", c.Spec.SnapshotConfigRef.Name, err)
+	}
+	return &snap, nil
+}
+
+func (r *KividbClusterReconciler) resolveSecretValues(ctx context.Context, c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbAclConfig) (map[string]string, error) {
 	values := map[string]string{}
-	for _, ref := range collectSecretRefs(c) {
+	for _, ref := range collectSecretRefs(aclConfig) {
 		key := secretValueKey(ref)
 		if _, ok := values[key]; ok {
 			continue
@@ -153,10 +245,10 @@ func (r *KividbClusterReconciler) reconcileSecret(ctx context.Context, c *kividb
 	return err
 }
 
-func (r *KividbClusterReconciler) reconcileConfigMap(ctx context.Context, c *kividbv1alpha1.KividbCluster) error {
+func (r *KividbClusterReconciler) reconcileConfigMap(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) error {
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: configMapName(c), Namespace: c.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		desired := desiredConfigMap(c)
+		desired := desiredConfigMap(c, kdbConfig)
 		cm.Labels = desired.Labels
 		cm.Data = desired.Data
 		return controllerutil.SetControllerReference(c, cm, r.scheme())
@@ -192,10 +284,10 @@ func (r *KividbClusterReconciler) reconcileServices(ctx context.Context, c *kivi
 	return nil
 }
 
-func (r *KividbClusterReconciler) reconcileStatefulSet(ctx context.Context, c *kividbv1alpha1.KividbCluster) error {
+func (r *KividbClusterReconciler) reconcileStatefulSet(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) error {
 	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: statefulSetName(c), Namespace: c.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
-		desired := desiredStatefulSet(c)
+		desired := desiredStatefulSet(c, kdbConfig, aclConfig, snapCfg)
 		creating := sts.CreationTimestamp.IsZero()
 		sts.Labels = desired.Labels
 		sts.Spec.Replicas = desired.Spec.Replicas
@@ -212,33 +304,6 @@ func (r *KividbClusterReconciler) reconcileStatefulSet(ctx context.Context, c *k
 			sts.Spec.PodManagementPolicy = desired.Spec.PodManagementPolicy
 		}
 		return controllerutil.SetControllerReference(c, sts, r.scheme())
-	})
-	return err
-}
-
-func (r *KividbClusterReconciler) reconcileBackupCronJob(ctx context.Context, c *kividbv1alpha1.KividbCluster) error {
-	name := backupCronJobName(c)
-	if !c.Spec.Backup.Enabled {
-		cj := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: c.Namespace}}
-		err := r.Delete(ctx, cj)
-		if err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-		return nil
-	}
-	if c.Spec.Backup.Schedule == "" {
-		return fmt.Errorf("backup.enabled is true but backup.schedule is empty")
-	}
-	if c.Spec.Backup.S3 == nil {
-		return fmt.Errorf("backup.enabled is true but backup.s3 is unset")
-	}
-
-	cj := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: c.Namespace}}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cj, func() error {
-		desired := desiredBackupCronJob(c)
-		cj.Labels = desired.Labels
-		cj.Spec = desired.Spec
-		return controllerutil.SetControllerReference(c, cj, r.scheme())
 	})
 	return err
 }

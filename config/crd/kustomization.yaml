@@ -1,2 +1,6 @@
 resources:
   - bases/kividb.io_kividbclusters.yaml
+  - bases/kividb.io_kividbconfigs.yaml
+  - bases/kividb.io_kividbaclconfigs.yaml
+  - bases/kividb.io_kividbsnapshotconfigs.yaml
+  - bases/kividb.io_kividbsnapshots.yaml

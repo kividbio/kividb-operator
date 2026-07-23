@@ -1,5 +1,9 @@
 # kividb-operator GUI
 
+<p align="center">
+  <img src="../assets/gui.png" alt="kividb-operator GUI dashboard listing two KividbClusters">
+</p>
+
 A small, read-only web dashboard for `KividbCluster` objects. It is a
 single static Go binary (`cmd/gui`) with the HTML/CSS/JS embedded into it
 at build time via `embed.FS` -- there is no Node/npm build step, no CDN
@@ -21,8 +25,9 @@ one namespace if `WATCH_NAMESPACE` is set -- see below), with:
   `Degraded` / `FailingOver`, red = `Error`, grey = `Pending`/unknown
 - Current master pod name
 - Ready/total pod count against the desired count (`spec.replicas + 1`)
-- Backup last-success time (or "disabled" if `spec.backup.enabled` is
-  false)
+- Backup last-success time, derived from the cluster's own
+  `KividbSnapshot` history (or "disabled" if `spec.snapshotConfigRef` is
+  unset)
 - Age
 
 The page fetches `GET /api/clusters` on load and again every 10 seconds
@@ -31,14 +36,18 @@ without a manual refresh.
 
 ### Cluster detail (`/clusters/{namespace}/{name}`)
 
-- **Spec summary**: image, agent image, port, desired pod count, storage
-  size/class, and the master/replica Service types.
+- **Spec summary**: `spec.image` (or the floating default tag if unset,
+  labeled accordingly) and `spec.variant`, agent image, port, desired pod count,
+  storage size/class, the master/replica Service types, and the names of
+  any referenced `KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig`.
 - **Status**: phase, master pod, ready/total pods, observed generation,
   last failover time, age, and (when reachable) the StatefulSet's own
   ready/current/updated replica counts as a cross-check.
-- **Backup**: schedule, retention, last success/error from
-  `status.backup`, plus the backup CronJob's own `suspended` /
-  last-schedule / last-success bookkeeping when backups are enabled.
+- **Backup**: the referenced `KividbSnapshotConfig`'s schedule/retention,
+  the backup CronJob's own `suspended`/last-schedule bookkeeping, and the
+  cluster's `KividbSnapshot` history (phase, source pod/role, object key,
+  size, duration) -- last success/error are derived from that list, not
+  from a field on `KividbCluster.status` (there isn't one anymore).
 - **Services**: the master and replica Service objects' actual type,
   ClusterIP, external IP/hostname (for `LoadBalancer`), and ports.
 - **Pods**: the full `status.pods[]` list (name, role, ready,
@@ -133,7 +142,8 @@ then open <http://localhost:8090/>.
 `config/gui/rbac.yaml` grants a dedicated `kividb-operator-gui`
 ServiceAccount a `ClusterRole` with `get`/`list`/`watch` on:
 
-- `kividbclusters.kividb.io`
+- `kividbclusters.kividb.io`, `kividbsnapshotconfigs.kividb.io`,
+  `kividbsnapshots.kividb.io`
 - `pods`, `services`, `events` (core)
 - `statefulsets` (`apps`)
 - `cronjobs` (`batch`)

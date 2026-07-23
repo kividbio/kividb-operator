@@ -15,7 +15,6 @@ spec:
     singular: kividbcluster
     shortNames:
       - kdb
-      - kdbc
   scope: Namespaced
   versions:
     - name: v1alpha1
@@ -41,9 +40,11 @@ spec:
           type: object
           description: >-
             KividbCluster describes a single-master, N-replica KiviDB
-            (Redis-compatible) cluster: its configuration, ACL users,
-            storage, scheduling constraints, exposed Services, scheduled S3
-            backups, monitoring and failover behavior.
+            (Redis-compatible) cluster: storage, scheduling constraints,
+            exposed Services, monitoring, and failover behavior.
+            Configuration, ACL users, and scheduled backups are set via
+            separate KividbConfig / KividbAclConfig / KividbSnapshotConfig
+            resources, referenced by name.
           required: [spec]
           properties:
             apiVersion:
@@ -54,7 +55,7 @@ spec:
               type: object
             spec:
               type: object
-              required: [image, storage]
+              required: [storage]
               properties:
                 replicas:
                   type: integer
@@ -63,7 +64,23 @@ spec:
                   description: Number of replica pods in addition to the single master. Total pods = replicas+1.
                 image:
                   type: string
-                  description: 'kividb container image, e.g. "quay.io/kividbio/kividb:v1.0.2".'
+                  description: >-
+                    kividb container image, e.g.
+                    "quay.io/kividbio/kividb:v1.0.2". Defaults to a
+                    floating, unpinned tag if unset -- set this explicitly
+                    to pin a version. Used verbatim; never derived or
+                    modified from variant below.
+                variant:
+                  type: string
+                  default: standard
+                  enum: [standard, tls, lua, full]
+                  description: >-
+                    Declares which build of kividb image actually is:
+                    informational only, does not change which image gets
+                    pulled. Tells the operator whether to wire up
+                    variant-specific configuration (TLS cert mounting/CLI
+                    flags). Not validated against image -- the operator
+                    emits a guidance Event on a likely mismatch instead.
                 imagePullPolicy:
                   type: string
                   enum: [Always, IfNotPresent, Never]
@@ -85,50 +102,32 @@ spec:
                   type: integer
                   default: 6380
                   description: RESP protocol port kividb listens on.
-                kividbConfig:
+                configRef:
                   type: object
-                  additionalProperties:
-                    type: string
+                  required: [name]
                   description: >-
-                    Free-form kividb.conf directives (lower-kebab-case keys,
-                    e.g. maxmemory, threads, aof, loglevel, cluster-enabled,
-                    notify-keyspace-events, slowlog-log-slower-than,
-                    tls-port). Do not set "replicaof", "port" or "aclfile"
-                    here; those are operator-managed.
-                auth:
-                  type: object
-                  description: Authentication configuration (requirepass and/or ACL users).
+                    Names a KividbConfig in the same namespace, providing
+                    kividb.conf directives and TLS settings. Optional.
                   properties:
-                    requirePassSecretRef:
-                      type: object
-                      required: [name, key]
-                      properties:
-                        name: {type: string}
-                        key: {type: string}
-                    users:
-                      type: array
-                      items:
-                        type: object
-                        required: [name]
-                        properties:
-                          name: {type: string}
-                          enabled: {type: boolean}
-                          noPass: {type: boolean}
-                          passwordSecretRef:
-                            type: object
-                            required: [name, key]
-                            properties:
-                              name: {type: string}
-                              key: {type: string}
-                          keyPatterns:
-                            type: array
-                            items: {type: string}
-                          channelPatterns:
-                            type: array
-                            items: {type: string}
-                          commandRules:
-                            type: array
-                            items: {type: string}
+                    name: {type: string}
+                aclConfigRef:
+                  type: object
+                  required: [name]
+                  description: >-
+                    Names a KividbAclConfig in the same namespace, providing
+                    ACL users and/or requirepass. Optional: omit for an
+                    open, passwordless default user.
+                  properties:
+                    name: {type: string}
+                snapshotConfigRef:
+                  type: object
+                  required: [name]
+                  description: >-
+                    Names a KividbSnapshotConfig in the same namespace,
+                    providing the backup schedule and S3 destination.
+                    Optional: omit to disable scheduled backups.
+                  properties:
+                    name: {type: string}
                 storage:
                   type: object
                   required: [size]
@@ -206,40 +205,6 @@ spec:
                         annotations:
                           type: object
                           additionalProperties: {type: string}
-                backup:
-                  type: object
-                  properties:
-                    enabled: {type: boolean}
-                    schedule:
-                      type: string
-                      description: 'Standard cron expression, e.g. "0 * * * *".'
-                    retention:
-                      type: integer
-                      default: 7
-                      description: Number of most-recent snapshots to keep in S3. 0 = keep all.
-                    timeoutSeconds:
-                      type: integer
-                      format: int32
-                    s3:
-                      type: object
-                      required: [endpoint, bucket, credentialsSecretRef]
-                      properties:
-                        endpoint: {type: string}
-                        bucket: {type: string}
-                        region: {type: string}
-                        pathPrefix: {type: string}
-                        forcePathStyle: {type: boolean}
-                        insecureSkipTLSVerify: {type: boolean}
-                        credentialsSecretRef:
-                          type: object
-                          required: [name]
-                          properties:
-                            name: {type: string}
-                            accessKeyIdKey: {type: string}
-                            secretAccessKeyKey: {type: string}
-                    jobResources:
-                      type: object
-                      x-kubernetes-preserve-unknown-fields: true
                 monitoring:
                   type: object
                   properties:
@@ -274,13 +239,6 @@ spec:
                 lastFailoverTime:
                   type: string
                   format: date-time
-                backup:
-                  type: object
-                  properties:
-                    lastRunTime: {type: string, format: date-time}
-                    lastSuccessTime: {type: string, format: date-time}
-                    lastObjectKey: {type: string}
-                    lastError: {type: string}
                 observedGeneration:
                   type: integer
                   format: int64

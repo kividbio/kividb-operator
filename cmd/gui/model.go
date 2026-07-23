@@ -65,13 +65,27 @@ type StatefulSetView struct {
 }
 
 // CronJobView reports the backup CronJob's own schedule bookkeeping,
-// distinct from (and a cross-check on) KividbClusterStatus.Backup.
+// distinct from (and a cross-check on) the cluster's KividbSnapshot history.
 type CronJobView struct {
 	Name               string     `json:"name"`
 	Schedule           string     `json:"schedule"`
 	Suspended          bool       `json:"suspended"`
 	LastScheduleTime   *time.Time `json:"lastScheduleTime,omitempty"`
 	LastSuccessfulTime *time.Time `json:"lastSuccessfulTime,omitempty"`
+}
+
+// SnapshotView is one KividbSnapshot record (one backup run).
+type SnapshotView struct {
+	Name           string     `json:"name"`
+	Phase          string     `json:"phase"`
+	SourcePod      string     `json:"sourcePod,omitempty"`
+	SourceRole     string     `json:"sourceRole,omitempty"`
+	ObjectKey      string     `json:"objectKey,omitempty"`
+	SizeBytes      int64      `json:"sizeBytes,omitempty"`
+	DurationMs     int64      `json:"durationMs,omitempty"`
+	Error          string     `json:"error,omitempty"`
+	StartTime      *time.Time `json:"startTime,omitempty"`
+	CompletionTime *time.Time `json:"completionTime,omitempty"`
 }
 
 // ConditionView mirrors metav1.Condition for JSON display.
@@ -112,10 +126,16 @@ type ClusterDetail struct {
 	ObservedGeneration int64      `json:"observedGeneration"`
 	LastFailoverTime   *time.Time `json:"lastFailoverTime,omitempty"`
 
+	ConfigRef         string `json:"configRef,omitempty"`
+	AclConfigRef      string `json:"aclConfigRef,omitempty"`
+	SnapshotConfigRef string `json:"snapshotConfigRef,omitempty"`
+	Variant           string `json:"variant,omitempty"`
+
 	Pods        []PodView        `json:"pods"`
 	Services    []ServiceView    `json:"services,omitempty"`
 	StatefulSet *StatefulSetView `json:"statefulSet,omitempty"`
 	CronJob     *CronJobView     `json:"cronJob,omitempty"`
 	Conditions  []ConditionView  `json:"conditions,omitempty"`
 	Events      []EventView      `json:"events,omitempty"`
+	Snapshots   []SnapshotView   `json:"snapshots,omitempty"`
 }

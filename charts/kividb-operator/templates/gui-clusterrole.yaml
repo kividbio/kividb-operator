@@ -19,6 +19,8 @@ rules:
       - kividb.io
     resources:
       - kividbclusters
+      - kividbsnapshotconfigs
+      - kividbsnapshots
     verbs:
       - get
       - list

@@ -27,6 +27,36 @@ stringData:
   secretAccessKey: "minioadmin123"
 ---
 apiVersion: kividb.io/v1alpha1
+kind: KividbConfig
+metadata:
+  name: kividb-dev-config
+  namespace: default
+spec:
+  directives:
+    maxmemory: "256mb"
+    loglevel: "notice"
+---
+apiVersion: kividb.io/v1alpha1
+kind: KividbSnapshotConfig
+metadata:
+  name: kividb-dev-backup
+  namespace: default
+spec:
+  schedule: "*/30 * * * *" # every 30 minutes, for quick local testing
+  retention: 5
+  source: master
+  timeoutSeconds: 120
+  s3:
+    endpoint: "http://minio.default.svc.cluster.local:9000"
+    bucket: "kividb-dev-backups"
+    region: "us-east-1"
+    pathPrefix: "dev"
+    forcePathStyle: true
+    insecureSkipTLSVerify: true # local MinIO over plain HTTP
+    credentialsSecretRef:
+      name: kividb-dev-s3-credentials
+---
+apiVersion: kividb.io/v1alpha1
 kind: KividbCluster
 metadata:
   name: kividb-dev
@@ -37,9 +67,10 @@ spec:
   imagePullPolicy: IfNotPresent
   port: 6380
 
-  kividbConfig:
-    maxmemory: "256mb"
-    loglevel: "notice"
+  configRef:
+    name: kividb-dev-config
+  snapshotConfigRef:
+    name: kividb-dev-backup
 
   storage:
     size: 1Gi
@@ -59,21 +90,6 @@ spec:
       type: ClusterIP
     replicas:
       type: ClusterIP
-
-  backup:
-    enabled: true
-    schedule: "*/30 * * * *" # every 30 minutes, for quick local testing
-    retention: 5
-    timeoutSeconds: 120
-    s3:
-      endpoint: "http://minio.default.svc.cluster.local:9000"
-      bucket: "kividb-dev-backups"
-      region: "us-east-1"
-      pathPrefix: "dev"
-      forcePathStyle: true
-      insecureSkipTLSVerify: true # local MinIO over plain HTTP
-      credentialsSecretRef:
-        name: kividb-dev-s3-credentials
 
   monitoring:
     enabled: true

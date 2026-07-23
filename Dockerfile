@@ -5,7 +5,7 @@
 # keeps the final image minimal (no shell, no package manager) and follows
 # the standard kubebuilder/controller-runtime convention.
 
-FROM golang:1.23-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 WORKDIR /workspace
 
 # Cache module downloads separately from source changes.

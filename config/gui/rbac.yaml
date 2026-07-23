@@ -4,10 +4,12 @@
 # ServiceAccount to that role, and do not add "secrets" to this one.
 #
 # The GUI's Go code (cmd/gui/data.go) only ever calls Get/List against:
-#   - kividbclusters.kividb.io   (its own CRD)
-#   - pods                       (core)
-#   - services                   (core)
-#   - events                     (core)
+#   - kividbclusters.kividb.io          (its own CRD)
+#   - kividbsnapshotconfigs.kividb.io   (backup schedule display)
+#   - kividbsnapshots.kividb.io         (backup history)
+#   - pods                              (core)
+#   - services                          (core)
+#   - events                            (core)
 #   - statefulsets.apps
 #   - cronjobs.batch
 # It never calls Watch (it polls every 10s instead of maintaining a
@@ -34,7 +36,7 @@ metadata:
     app.kubernetes.io/part-of: kividb-operator
 rules:
   - apiGroups: ["kividb.io"]
-    resources: ["kividbclusters"]
+    resources: ["kividbclusters", "kividbsnapshotconfigs", "kividbsnapshots"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods", "services", "events"]

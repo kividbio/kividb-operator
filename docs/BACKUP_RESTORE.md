@@ -3,19 +3,24 @@
 ## How scheduled backups work
 
 See [ARCHITECTURE.md](ARCHITECTURE.md#backups) for the full design. In
-short: `spec.backup.enabled: true` makes the operator create a Kubernetes
-`CronJob` named `<cluster>-backup` on `spec.backup.schedule`. Its pod runs
-one command:
+short: a `KividbCluster` with `spec.snapshotConfigRef` set to a
+[`KividbSnapshotConfig`](CONFIGURATION.md#kividbsnapshotconfig) gets a
+Kubernetes `CronJob` named `<snapshotconfig-name>-backup`, running on that
+`KividbSnapshotConfig`'s `spec.schedule`. Its pod runs one command:
 
 ```
-agent backup-trigger --url http://<cluster>-master.<namespace>.svc:8081/backup --timeout <spec.backup.timeoutSeconds>s
+agent backup-trigger --url http://<source-service>.<namespace>.svc:8081/backup --timeout <spec.timeoutSeconds>s
 ```
 
-That's an HTTP POST to whichever pod currently holds the master role. The
-master pod's own `agent` sidecar does the actual work: `BGSAVE`, wait for
-`LASTSAVE` to advance, `tar.gz` `dump.kdb` (+ `appendonly.aof` if AOF is
-enabled), stream it straight into your S3-compatible bucket, then delete
-objects beyond `spec.backup.retention`.
+`<source-service>` is `<cluster>-master` or `<cluster>-replicas`,
+depending on the `KividbSnapshotConfig`'s `spec.source` (`master` by
+default and recommended — see
+[CONFIGURATION.md](CONFIGURATION.md#source-master-or-replica) for the
+trade-off). Whichever pod that Service resolves to does the actual work
+via its own `agent` sidecar: `BGSAVE`, wait for `LASTSAVE` to advance,
+`tar.gz` `dump.kdb` (+ `appendonly.aof` if AOF is enabled), stream it
+straight into your S3-compatible bucket, then delete objects beyond
+`spec.retention`.
 
 Objects are stored at:
 
@@ -25,21 +30,44 @@ s3://<bucket>/<pathPrefix>/<cluster-name>/<pod-name>-<UTC timestamp>.tar.gz
 
 e.g. `s3://my-kividb-backups/prod/my-cluster/my-cluster-1-20260721T000004Z.tar.gz`.
 
+Every run — success or failure — produces a
+[`KividbSnapshot`](CONFIGURATION.md#kividbsnapshot-read-only) object
+recording exactly which pod/role was used, the object key, size, and
+duration. You don't need to scrape Job logs to find any of this.
+
 ## Configuring backups
 
+Create a `KividbSnapshotConfig`:
+
 ```yaml
+apiVersion: kividb.io/v1alpha1
+kind: KividbSnapshotConfig
+metadata:
+  name: my-cluster-backups
 spec:
-  backup:
-    enabled: true
-    schedule: "0 * * * *"
-    retention: 24
-    s3:
-      endpoint: "https://s3.us-east-1.amazonaws.com"
-      bucket: "my-kividb-backups"
-      region: "us-east-1"
-      pathPrefix: "prod"
-      credentialsSecretRef:
-        name: my-cluster-s3-creds
+  schedule: "0 * * * *"
+  retention: 24
+  source: master
+  s3:
+    endpoint: "https://s3.us-east-1.amazonaws.com"
+    bucket: "my-kividb-backups"
+    region: "us-east-1"
+    pathPrefix: "prod"
+    credentialsSecretRef:
+      name: my-cluster-s3-creds
+```
+
+Then reference it from the cluster:
+
+```yaml
+apiVersion: kividb.io/v1alpha1
+kind: KividbCluster
+metadata:
+  name: my-cluster
+spec:
+  # ...
+  snapshotConfigRef:
+    name: my-cluster-backups
 ```
 
 Create the credentials Secret yourself (the operator never generates S3
@@ -59,6 +87,11 @@ For self-hosted MinIO, also set `forcePathStyle: true` (most MinIO
 deployments need path-style addressing) and, for self-signed dev/test
 instances only, `insecureSkipTLSVerify: true`.
 
+A single `KividbSnapshotConfig` can be referenced by more than one
+`KividbCluster` — useful when several clusters should share one bucket
+and schedule; each cluster still gets its own `KividbSnapshot` records
+and its own CronJob.
+
 ## Triggering a backup on demand
 
 The CronJob is just a thin trigger — you can do the same HTTP call
@@ -73,40 +106,49 @@ kubectl run backup-now --rm -i --restart=Never \
 Or trigger the existing CronJob's Job directly:
 
 ```bash
-kubectl create job my-cluster-backup-manual --from=cronjob/my-cluster-backup
-kubectl logs job/my-cluster-backup-manual -f
+kubectl create job my-cluster-backups-manual --from=cronjob/my-cluster-backups-backup
+kubectl get kdbs -l kividb.io/cluster=my-cluster --sort-by=.status.startTime
 ```
+
+Either way, the next reconcile picks up the resulting Job/pod and creates
+a `KividbSnapshot` for it exactly as it would for a scheduled run — there
+is no separate "manual backup" record type.
 
 ## Checking backup status
 
 ```bash
-kubectl get kividbcluster my-cluster -o jsonpath='{.status.backup}'
+kubectl get kdbs -l kividb.io/cluster=my-cluster --sort-by=.status.startTime
 ```
 
-`lastRunTime`/`lastSuccessTime` mirror the CronJob's own
-`status.lastScheduleTime`/`status.lastSuccessfulTime`. `lastError` is
-populated from the most recent backup Job's failure condition and cleared
-on the next success. **`lastObjectKey` is not currently populated** by the
-controller (it would mean scraping Job pod logs, not yet implemented) —
-find the exact S3 key a given run uploaded via
-`kubectl logs job/<job-name>` (the `backup-trigger` client prints
-`backup ok: object=<key> ...` on success) or by listing the bucket
-directly.
+```
+NAME                                      CLUSTER      PHASE       OBJECT KEY
+my-cluster-backups-20260720t230004z       my-cluster   Succeeded   prod/my-cluster/my-cluster-1-20260720T230004Z.tar.gz
+my-cluster-backups-20260721t000004z       my-cluster   Succeeded   prod/my-cluster/my-cluster-1-20260721T000004Z.tar.gz
+```
 
-A populated `lastError` alongside a stale `lastSuccessTime` means the
-*most recent* run failed — check `kubectl get jobs -l kividb.io/cluster=my-cluster` and
-`kubectl logs` on the most recent Job pod for the actual error (auth
-failure, wrong bucket, network egress blocked, etc.).
+For full detail on the most recent run:
+
+```bash
+kubectl get kdbs my-cluster-backups-20260721t000004z -o yaml
+```
+
+`status.phase` is `Pending` → `InProgress` → `Succeeded`/`Failed`.
+`status.error` is populated only when `phase: Failed` — check it first,
+then `kubectl get jobs -l kividb.io/cluster=my-cluster` and `kubectl logs`
+on the most recent Job pod for the underlying cause (auth failure, wrong
+bucket, network egress blocked, etc.) if `status.error` alone isn't
+enough.
 
 ## Restoring a backup
 
-**There is no automated restore.** Restoring means putting a snapshot back
-onto a pod's `/data` volume before kividb starts reading it, which is
-inherently a "the cluster is down for this" operation, so the operator
-deliberately doesn't automate it (an accidental automatic restore would be
-much worse than a manual one). Procedure:
+**There is no automated restore yet** (see [ROADMAP.md](ROADMAP.md) for a
+planned `KividbRestore` CRD). Restoring means putting a snapshot back onto
+a pod's `/data` volume before kividb starts reading it, which is
+inherently a "the cluster is down for this" operation, so today it's a
+manual procedure:
 
-1. **Download and extract the snapshot** you want to restore, locally:
+1. **Find the object key** you want to restore from a `KividbSnapshot`'s
+   `status.objectKey`, then download and extract it locally:
 
    ```bash
    aws s3 cp s3://my-kividb-backups/prod/my-cluster/my-cluster-1-20260721T000004Z.tar.gz .

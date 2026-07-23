@@ -36,6 +36,36 @@ rules:
     verbs:
       - update
   - apiGroups:
+      - kividb.io
+    resources:
+      - kividbconfigs
+      - kividbaclconfigs
+      - kividbsnapshotconfigs
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - kividb.io
+    resources:
+      - kividbsnapshots
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - kividb.io
+    resources:
+      - kividbsnapshots/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
       - apps
     resources:
       - statefulsets

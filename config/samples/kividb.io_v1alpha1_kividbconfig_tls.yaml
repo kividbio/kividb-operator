@@ -1,0 +1,26 @@
+# TLS-enabled KividbConfig. Pair with a KividbCluster whose spec.variant
+# is "tls" or "full" (the base kividb image has no TLS support compiled
+# in -- see docs/CONFIGURATION.md#variants).
+#
+# Prerequisite: a Secret named "kividb-tls-certs" with keys tls.crt/tls.key
+# (standard "kubernetes.io/tls" Secret shape), e.g. from cert-manager:
+#
+#   kubectl create secret tls kividb-tls-certs --cert=tls.crt --key=tls.key
+apiVersion: kividb.io/v1alpha1
+kind: KividbConfig
+metadata:
+  name: kividb-tls-config
+  namespace: default
+spec:
+  directives:
+    threads: "4"
+  tls:
+    enabled: true
+    port: 6443
+    certSecretRef:
+      name: kividb-tls-certs
+      # certKey/keyKey default to "tls.crt"/"tls.key" (shown explicitly
+      # here only for clarity); caKey is left unset since this example
+      # doesn't do client-cert verification.
+      certKey: tls.crt
+      keyKey: tls.key

@@ -90,9 +90,13 @@ otherwise, not a regression.
 2. Bump the version in three places to match:
    - `VERSION` (repo root)
    - `charts/kividb-operator/Chart.yaml` (`version:` and `appVersion:`)
-3. Commit: `git commit -m "Release vX.Y.Z"`.
-4. Tag and push: `git tag vX.Y.Z && git push origin main --tags`.
-5. `.github/workflows/release.yaml` triggers on the `v*` tag push and:
+3. If this release added, removed, or renamed a doc under `docs/`, update
+   `docs/manifest.json` to match (see [VERSIONING.md](VERSIONING.md) —
+   most releases don't touch this, since docs are edited in place, not
+   duplicated per version).
+4. Commit: `git commit -m "Release vX.Y.Z"`.
+5. Tag and push: `git tag vX.Y.Z && git push origin main --tags`.
+6. `.github/workflows/release.yaml` triggers on the `v*` tag push and:
    - builds and pushes all three images to `quay.io/kividbio/*`, tagged
      both `X.Y.Z` and `latest`,
    - packages the Helm chart (`helm package charts/kividb-operator`,
@@ -105,7 +109,7 @@ otherwise, not a regression.
    - creates a GitHub Release for the tag, using the corresponding
      `CHANGELOG.md` section as the release body, with the packaged
      chart `.tgz` attached as a release asset.
-6. Verify the release:
+7. Verify the release:
 
    ```bash
    docker pull quay.io/kividbio/kividb-operator:X.Y.Z
@@ -131,6 +135,8 @@ version actually changed the CRD — if it didn't, this step is a no-op.
 
 - [ ] `CHANGELOG.md` updated
 - [ ] `VERSION` and `Chart.yaml` bumped together
+- [ ] `docs/manifest.json` still matches `docs/*.md` if any doc files
+      were added/removed/renamed this release
 - [ ] CI green on the release commit
 - [ ] `config/samples/*.yaml` still apply cleanly against the new CRD
 - [ ] If the CRD schema changed: called out explicitly in the changelog

@@ -12,13 +12,12 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
-// DeepCopyInto copies all properties of this object into another object of
-// the same type that is provided as a pointer.
+// ── shared / kividbcluster_types.go ─────────────────────────────────────
+
 func (in *SecretKeyRef) DeepCopyInto(out *SecretKeyRef) {
 	*out = *in
 }
 
-// DeepCopy creates a new SecretKeyRef by deep-copying the receiver.
 func (in *SecretKeyRef) DeepCopy() *SecretKeyRef {
 	if in == nil {
 		return nil
@@ -57,29 +56,6 @@ func (in *KividbUser) DeepCopy() *KividbUser {
 		return nil
 	}
 	out := new(KividbUser)
-	in.DeepCopyInto(out)
-	return out
-}
-
-func (in *AuthSpec) DeepCopyInto(out *AuthSpec) {
-	*out = *in
-	if in.RequirePassSecretRef != nil {
-		out.RequirePassSecretRef = new(SecretKeyRef)
-		*out.RequirePassSecretRef = *in.RequirePassSecretRef
-	}
-	if in.Users != nil {
-		out.Users = make([]KividbUser, len(in.Users))
-		for i := range in.Users {
-			in.Users[i].DeepCopyInto(&out.Users[i])
-		}
-	}
-}
-
-func (in *AuthSpec) DeepCopy() *AuthSpec {
-	if in == nil {
-		return nil
-	}
-	out := new(AuthSpec)
 	in.DeepCopyInto(out)
 	return out
 }
@@ -143,55 +119,6 @@ func (in *ServicesSpec) DeepCopy() *ServicesSpec {
 	return out
 }
 
-func (in *S3CredentialsSecretRef) DeepCopyInto(out *S3CredentialsSecretRef) {
-	*out = *in
-}
-
-func (in *S3CredentialsSecretRef) DeepCopy() *S3CredentialsSecretRef {
-	if in == nil {
-		return nil
-	}
-	out := new(S3CredentialsSecretRef)
-	in.DeepCopyInto(out)
-	return out
-}
-
-func (in *S3StorageSpec) DeepCopyInto(out *S3StorageSpec) {
-	*out = *in
-	out.CredentialsSecretRef = in.CredentialsSecretRef
-}
-
-func (in *S3StorageSpec) DeepCopy() *S3StorageSpec {
-	if in == nil {
-		return nil
-	}
-	out := new(S3StorageSpec)
-	in.DeepCopyInto(out)
-	return out
-}
-
-func (in *BackupSpec) DeepCopyInto(out *BackupSpec) {
-	*out = *in
-	if in.TimeoutSeconds != nil {
-		out.TimeoutSeconds = new(int32)
-		*out.TimeoutSeconds = *in.TimeoutSeconds
-	}
-	if in.S3 != nil {
-		out.S3 = new(S3StorageSpec)
-		in.S3.DeepCopyInto(out.S3)
-	}
-	in.JobResources.DeepCopyInto(&out.JobResources)
-}
-
-func (in *BackupSpec) DeepCopy() *BackupSpec {
-	if in == nil {
-		return nil
-	}
-	out := new(BackupSpec)
-	in.DeepCopyInto(out)
-	return out
-}
-
 func (in *MonitoringSpec) DeepCopyInto(out *MonitoringSpec) {
 	*out = *in
 }
@@ -232,13 +159,18 @@ func (in *KividbClusterSpec) DeepCopyInto(out *KividbClusterSpec) {
 		out.ImagePullSecrets = make([]corev1.LocalObjectReference, len(in.ImagePullSecrets))
 		copy(out.ImagePullSecrets, in.ImagePullSecrets)
 	}
-	if in.KividbConfig != nil {
-		out.KividbConfig = make(map[string]string, len(in.KividbConfig))
-		for k, v := range in.KividbConfig {
-			out.KividbConfig[k] = v
-		}
+	if in.ConfigRef != nil {
+		out.ConfigRef = new(corev1.LocalObjectReference)
+		*out.ConfigRef = *in.ConfigRef
 	}
-	in.Auth.DeepCopyInto(&out.Auth)
+	if in.AclConfigRef != nil {
+		out.AclConfigRef = new(corev1.LocalObjectReference)
+		*out.AclConfigRef = *in.AclConfigRef
+	}
+	if in.SnapshotConfigRef != nil {
+		out.SnapshotConfigRef = new(corev1.LocalObjectReference)
+		*out.SnapshotConfigRef = *in.SnapshotConfigRef
+	}
 	in.Storage.DeepCopyInto(&out.Storage)
 	in.Resources.DeepCopyInto(&out.Resources)
 	in.AgentResources.DeepCopyInto(&out.AgentResources)
@@ -275,7 +207,6 @@ func (in *KividbClusterSpec) DeepCopyInto(out *KividbClusterSpec) {
 		*out.TerminationGracePeriodSeconds = *in.TerminationGracePeriodSeconds
 	}
 	in.Services.DeepCopyInto(&out.Services)
-	in.Backup.DeepCopyInto(&out.Backup)
 	out.Monitoring = in.Monitoring
 	in.Failover.DeepCopyInto(&out.Failover)
 }
@@ -302,25 +233,6 @@ func (in *KividbPodStatus) DeepCopy() *KividbPodStatus {
 	return out
 }
 
-func (in *BackupStatus) DeepCopyInto(out *BackupStatus) {
-	*out = *in
-	if in.LastRunTime != nil {
-		out.LastRunTime = in.LastRunTime.DeepCopy()
-	}
-	if in.LastSuccessTime != nil {
-		out.LastSuccessTime = in.LastSuccessTime.DeepCopy()
-	}
-}
-
-func (in *BackupStatus) DeepCopy() *BackupStatus {
-	if in == nil {
-		return nil
-	}
-	out := new(BackupStatus)
-	in.DeepCopyInto(out)
-	return out
-}
-
 func (in *KividbClusterStatus) DeepCopyInto(out *KividbClusterStatus) {
 	*out = *in
 	if in.Pods != nil {
@@ -330,7 +242,6 @@ func (in *KividbClusterStatus) DeepCopyInto(out *KividbClusterStatus) {
 	if in.LastFailoverTime != nil {
 		out.LastFailoverTime = in.LastFailoverTime.DeepCopy()
 	}
-	in.Backup.DeepCopyInto(&out.Backup)
 	if in.Conditions != nil {
 		out.Conditions = make([]metav1.Condition, len(in.Conditions))
 		for i := range in.Conditions {
@@ -394,6 +305,372 @@ func (in *KividbClusterList) DeepCopy() *KividbClusterList {
 }
 
 func (in *KividbClusterList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// ── kividbconfig_types.go ────────────────────────────────────────────────
+
+func (in *TLSSecretRef) DeepCopyInto(out *TLSSecretRef) {
+	*out = *in
+}
+
+func (in *TLSSecretRef) DeepCopy() *TLSSecretRef {
+	if in == nil {
+		return nil
+	}
+	out := new(TLSSecretRef)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbTLSSpec) DeepCopyInto(out *KividbTLSSpec) {
+	*out = *in
+	out.CertSecretRef = in.CertSecretRef
+}
+
+func (in *KividbTLSSpec) DeepCopy() *KividbTLSSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbTLSSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbConfigSpec) DeepCopyInto(out *KividbConfigSpec) {
+	*out = *in
+	if in.Directives != nil {
+		out.Directives = make(map[string]string, len(in.Directives))
+		for k, v := range in.Directives {
+			out.Directives[k] = v
+		}
+	}
+	if in.TLS != nil {
+		out.TLS = new(KividbTLSSpec)
+		in.TLS.DeepCopyInto(out.TLS)
+	}
+}
+
+func (in *KividbConfigSpec) DeepCopy() *KividbConfigSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbConfigSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbConfig) DeepCopyInto(out *KividbConfig) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+}
+
+func (in *KividbConfig) DeepCopy() *KividbConfig {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbConfig)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbConfig) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *KividbConfigList) DeepCopyInto(out *KividbConfigList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		out.Items = make([]KividbConfig, len(in.Items))
+		for i := range in.Items {
+			in.Items[i].DeepCopyInto(&out.Items[i])
+		}
+	}
+}
+
+func (in *KividbConfigList) DeepCopy() *KividbConfigList {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbConfigList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbConfigList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// ── kividbaclconfig_types.go ────────────────────────────────────────────
+
+func (in *KividbAclConfigSpec) DeepCopyInto(out *KividbAclConfigSpec) {
+	*out = *in
+	if in.RequirePassSecretRef != nil {
+		out.RequirePassSecretRef = new(SecretKeyRef)
+		*out.RequirePassSecretRef = *in.RequirePassSecretRef
+	}
+	if in.Users != nil {
+		out.Users = make([]KividbUser, len(in.Users))
+		for i := range in.Users {
+			in.Users[i].DeepCopyInto(&out.Users[i])
+		}
+	}
+}
+
+func (in *KividbAclConfigSpec) DeepCopy() *KividbAclConfigSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbAclConfigSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbAclConfig) DeepCopyInto(out *KividbAclConfig) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+}
+
+func (in *KividbAclConfig) DeepCopy() *KividbAclConfig {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbAclConfig)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbAclConfig) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *KividbAclConfigList) DeepCopyInto(out *KividbAclConfigList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		out.Items = make([]KividbAclConfig, len(in.Items))
+		for i := range in.Items {
+			in.Items[i].DeepCopyInto(&out.Items[i])
+		}
+	}
+}
+
+func (in *KividbAclConfigList) DeepCopy() *KividbAclConfigList {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbAclConfigList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbAclConfigList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// ── kividbsnapshotconfig_types.go ───────────────────────────────────────
+
+func (in *S3CredentialsSecretRef) DeepCopyInto(out *S3CredentialsSecretRef) {
+	*out = *in
+}
+
+func (in *S3CredentialsSecretRef) DeepCopy() *S3CredentialsSecretRef {
+	if in == nil {
+		return nil
+	}
+	out := new(S3CredentialsSecretRef)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *S3StorageSpec) DeepCopyInto(out *S3StorageSpec) {
+	*out = *in
+	out.CredentialsSecretRef = in.CredentialsSecretRef
+}
+
+func (in *S3StorageSpec) DeepCopy() *S3StorageSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(S3StorageSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbSnapshotConfigSpec) DeepCopyInto(out *KividbSnapshotConfigSpec) {
+	*out = *in
+	if in.TimeoutSeconds != nil {
+		out.TimeoutSeconds = new(int32)
+		*out.TimeoutSeconds = *in.TimeoutSeconds
+	}
+	in.S3.DeepCopyInto(&out.S3)
+	in.JobResources.DeepCopyInto(&out.JobResources)
+}
+
+func (in *KividbSnapshotConfigSpec) DeepCopy() *KividbSnapshotConfigSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbSnapshotConfigSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbSnapshotConfig) DeepCopyInto(out *KividbSnapshotConfig) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+}
+
+func (in *KividbSnapshotConfig) DeepCopy() *KividbSnapshotConfig {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbSnapshotConfig)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbSnapshotConfig) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *KividbSnapshotConfigList) DeepCopyInto(out *KividbSnapshotConfigList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		out.Items = make([]KividbSnapshotConfig, len(in.Items))
+		for i := range in.Items {
+			in.Items[i].DeepCopyInto(&out.Items[i])
+		}
+	}
+}
+
+func (in *KividbSnapshotConfigList) DeepCopy() *KividbSnapshotConfigList {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbSnapshotConfigList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbSnapshotConfigList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// ── kividbsnapshot_types.go ─────────────────────────────────────────────
+
+func (in *KividbSnapshotSpec) DeepCopyInto(out *KividbSnapshotSpec) {
+	*out = *in
+	out.ClusterRef = in.ClusterRef
+	out.SnapshotConfigRef = in.SnapshotConfigRef
+}
+
+func (in *KividbSnapshotSpec) DeepCopy() *KividbSnapshotSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbSnapshotSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbSnapshotStatus) DeepCopyInto(out *KividbSnapshotStatus) {
+	*out = *in
+	if in.StartTime != nil {
+		out.StartTime = in.StartTime.DeepCopy()
+	}
+	if in.CompletionTime != nil {
+		out.CompletionTime = in.CompletionTime.DeepCopy()
+	}
+}
+
+func (in *KividbSnapshotStatus) DeepCopy() *KividbSnapshotStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbSnapshotStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbSnapshot) DeepCopyInto(out *KividbSnapshot) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Spec = in.Spec
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+func (in *KividbSnapshot) DeepCopy() *KividbSnapshot {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbSnapshot)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbSnapshot) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *KividbSnapshotList) DeepCopyInto(out *KividbSnapshotList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		out.Items = make([]KividbSnapshot, len(in.Items))
+		for i := range in.Items {
+			in.Items[i].DeepCopyInto(&out.Items[i])
+		}
+	}
+}
+
+func (in *KividbSnapshotList) DeepCopy() *KividbSnapshotList {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbSnapshotList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbSnapshotList) DeepCopyObject() runtime.Object {
 	if c := in.DeepCopy(); c != nil {
 		return c
 	}

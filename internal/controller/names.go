@@ -37,6 +37,10 @@ const (
 	// AclFileName is the rendered ACL file's name within AclDir.
 	AclFileName = "users.acl"
 
+	// TLSDir is where the TLS cert/key (and optional CA cert) Secret is
+	// mounted, when a referenced KividbConfig has spec.tls.enabled: true.
+	TLSDir = "/etc/kividb/tls"
+
 	// DataVolumeFSGroup is applied as the pod-level securityContext.fsGroup
 	// so the data PVC is writable by kividb's non-root container user (an
 	// arbitrary UID picked by `useradd` in kividb's own image, not
@@ -45,9 +49,19 @@ const (
 	DataVolumeFSGroup = 1000
 
 	// DefaultAgentImage is used when KividbClusterSpec.AgentImage is unset.
-	// Overridden at build time via -ldflags in the operator's own release
-	// pipeline so it always matches the operator's own version.
-	DefaultAgentImage = "quay.io/kividbio/kividb-operator-agent:latest"
+	// Bumped by hand alongside VERSION/Chart.yaml on every release (see the
+	// pre-release checklist in docs/RELEASING.md) -- there is currently no
+	// build-time (-ldflags) mechanism that does this automatically, despite
+	// what an earlier version of this comment claimed.
+	DefaultAgentImage = "quay.io/kividbio/kividb-operator-agent:0.2.0"
+
+	// DefaultKividbImage is used when KividbClusterSpec.Image is unset. It's
+	// a floating, unpinned tag -- pin to a specific version by setting
+	// spec.image explicitly (see resolveImage in statefulset.go). Deliberately
+	// not derived from spec.variant: the operator never guesses an image tag
+	// from spec.variant, since only the actual publisher of a given image
+	// build knows which tag corresponds to it.
+	DefaultKividbImage = "quay.io/kividbio/kividb:latest"
 
 	// ExporterPort is the redis_exporter sidecar's standard listen port
 	// (its own documented default -- not something this project invented).

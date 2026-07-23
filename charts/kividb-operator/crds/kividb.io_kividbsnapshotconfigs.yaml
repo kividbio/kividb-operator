@@ -1,0 +1,92 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kividbsnapshotconfigs.kividb.io
+  labels:
+    app.kubernetes.io/name: kividb-operator
+    app.kubernetes.io/managed-by: kividb-operator
+spec:
+  group: kividb.io
+  names:
+    kind: KividbSnapshotConfig
+    listKind: KividbSnapshotConfigList
+    plural: kividbsnapshotconfigs
+    singular: kividbsnapshotconfig
+    shortNames:
+      - kdbsc
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Schedule
+          type: string
+          jsonPath: .spec.schedule
+        - name: Source
+          type: string
+          jsonPath: .spec.source
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            KividbSnapshotConfig is a reusable, standalone backup
+            destination and schedule. Create one and reference it by name
+            from any number of KividbClusters' spec.snapshotConfigRef.
+            Each scheduled run creates a KividbSnapshot record.
+          required: [spec]
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required: [schedule, s3]
+              properties:
+                schedule:
+                  type: string
+                  description: 'Standard cron expression, e.g. "0 * * * *".'
+                retention:
+                  type: integer
+                  default: 7
+                  description: Number of most-recent snapshots to keep in S3. 0 = keep all.
+                source:
+                  type: string
+                  default: master
+                  enum: [master, replica]
+                  description: >-
+                    Which role's pod to snapshot from. Recommended: master
+                    (always the most complete, up-to-date data; kividb's
+                    replication has no guaranteed consistency lag bound
+                    today, so a replica-sourced snapshot can be measurably
+                    stale).
+                timeoutSeconds:
+                  type: integer
+                  format: int32
+                s3:
+                  type: object
+                  required: [endpoint, bucket, credentialsSecretRef]
+                  properties:
+                    endpoint: {type: string}
+                    bucket: {type: string}
+                    region: {type: string}
+                    pathPrefix: {type: string}
+                    forcePathStyle: {type: boolean}
+                    insecureSkipTLSVerify: {type: boolean}
+                    credentialsSecretRef:
+                      type: object
+                      required: [name]
+                      properties:
+                        name: {type: string}
+                        accessKeyIdKey: {type: string}
+                        secretAccessKeyKey: {type: string}
+                jobResources:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true

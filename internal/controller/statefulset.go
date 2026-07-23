@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"strconv"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -16,6 +17,22 @@ func getPort(c *kividbv1alpha1.KividbCluster) int32 {
 		return 6380
 	}
 	return c.Spec.Port
+}
+
+// resolveImage returns spec.image verbatim if set, otherwise
+// DefaultKividbImage. The operator never derives or modifies an image
+// reference from spec.variant -- variant is informational only (it tells
+// the operator whether to wire up TLS/Lua-related configuration), not an
+// instruction to pick a different tag. Picking an image that actually
+// matches the declared variant is the caller's responsibility; see the
+// VariantGuidance/TLSVariantMismatch Events emitted in
+// kividbcluster_controller.go for the guidance surfaced back to the user
+// on a likely mismatch.
+func resolveImage(c *kividbv1alpha1.KividbCluster) string {
+	if c.Spec.Image != "" {
+		return c.Spec.Image
+	}
+	return DefaultKividbImage
 }
 
 func agentImage(c *kividbv1alpha1.KividbCluster) string {
@@ -60,7 +77,7 @@ func defaultAntiAffinity(c *kividbv1alpha1.KividbCluster) *corev1.Affinity {
 	}
 }
 
-func agentEnv(c *kividbv1alpha1.KividbCluster) []corev1.EnvVar {
+func agentEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "KIVIDB_ADDR", Value: fmt.Sprintf("127.0.0.1:%d", getPort(c))},
 		{Name: "AGENT_PORT", Value: fmt.Sprintf("%d", AgentPort)},
@@ -80,7 +97,7 @@ func agentEnv(c *kividbv1alpha1.KividbCluster) []corev1.EnvVar {
 		},
 	}
 
-	if ref := defaultUserPasswordRef(c); ref != nil {
+	if ref := defaultUserPasswordRef(aclConfig); ref != nil {
 		env = append(env, corev1.EnvVar{
 			Name: "KIVIDB_AUTH_PASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
@@ -92,8 +109,8 @@ func agentEnv(c *kividbv1alpha1.KividbCluster) []corev1.EnvVar {
 		})
 	}
 
-	if c.Spec.Backup.Enabled && c.Spec.Backup.S3 != nil {
-		s3 := c.Spec.Backup.S3
+	if snapCfg != nil {
+		s3 := snapCfg.Spec.S3
 		accessKeyKey := s3.CredentialsSecretRef.AccessKeyIDKey
 		if accessKeyKey == "" {
 			accessKeyKey = "accessKeyId"
@@ -109,7 +126,7 @@ func agentEnv(c *kividbv1alpha1.KividbCluster) []corev1.EnvVar {
 			corev1.EnvVar{Name: "S3_PATH_PREFIX", Value: s3.PathPrefix},
 			corev1.EnvVar{Name: "S3_FORCE_PATH_STYLE", Value: fmt.Sprintf("%t", s3.ForcePathStyle)},
 			corev1.EnvVar{Name: "S3_INSECURE_SKIP_TLS_VERIFY", Value: fmt.Sprintf("%t", s3.InsecureSkipTLSVerify)},
-			corev1.EnvVar{Name: "S3_RETENTION", Value: fmt.Sprintf("%d", c.Spec.Backup.Retention)},
+			corev1.EnvVar{Name: "S3_RETENTION", Value: fmt.Sprintf("%d", snapCfg.Spec.Retention)},
 			corev1.EnvVar{
 				Name: "S3_ACCESS_KEY_ID",
 				ValueFrom: &corev1.EnvVarSource{
@@ -139,12 +156,12 @@ func agentEnv(c *kividbv1alpha1.KividbCluster) []corev1.EnvVar {
 // plain env vars (no CLI flags required), and authenticates the same way
 // the agent sidecar does -- via the default ACL user's password, if one
 // is configured.
-func exporterEnv(c *kividbv1alpha1.KividbCluster) []corev1.EnvVar {
+func exporterEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbAclConfig) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "REDIS_ADDR", Value: fmt.Sprintf("redis://127.0.0.1:%d", getPort(c))},
 		{Name: "REDIS_EXPORTER_WEB_LISTEN_ADDRESS", Value: fmt.Sprintf(":%d", ExporterPort)},
 	}
-	if ref := defaultUserPasswordRef(c); ref != nil {
+	if ref := defaultUserPasswordRef(aclConfig); ref != nil {
 		env = append(env, corev1.EnvVar{
 			Name: "REDIS_PASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
@@ -158,7 +175,7 @@ func exporterEnv(c *kividbv1alpha1.KividbCluster) []corev1.EnvVar {
 	return env
 }
 
-func podTemplate(c *kividbv1alpha1.KividbCluster) corev1.PodTemplateSpec {
+func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) corev1.PodTemplateSpec {
 	labels := commonLabels(c)
 	for k, v := range c.Spec.PodLabels {
 		labels[k] = v
@@ -176,21 +193,91 @@ func podTemplate(c *kividbv1alpha1.KividbCluster) corev1.PodTemplateSpec {
 
 	port := getPort(c)
 
+	volumeMounts := []corev1.VolumeMount{
+		{Name: "data", MountPath: DataDir},
+		{Name: "config", MountPath: ConfigDir},
+		{Name: "acl", MountPath: AclDir},
+	}
+
+	volumes := []corev1.Volume{
+		{
+			Name: "config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: configMapName(c)},
+				},
+			},
+		},
+		{
+			Name: "acl",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: secretName(c)},
+			},
+		},
+	}
+
+	kividbArgs := []string{"--configfile", ConfigDir + "/" + ConfigFileName}
+	kividbPorts := []corev1.ContainerPort{
+		{Name: KividbPortName, ContainerPort: port},
+	}
+
+	if tls := kividbTLSSpec(kdbConfig); tls != nil && tls.Enabled {
+		certKey := tls.CertSecretRef.CertKey
+		if certKey == "" {
+			certKey = "tls.crt"
+		}
+		keyKey := tls.CertSecretRef.KeyKey
+		if keyKey == "" {
+			keyKey = "tls.key"
+		}
+		items := []corev1.KeyToPath{
+			{Key: certKey, Path: "tls.crt"},
+			{Key: keyKey, Path: "tls.key"},
+		}
+		hasCA := tls.CertSecretRef.CAKey != ""
+		if hasCA {
+			items = append(items, corev1.KeyToPath{Key: tls.CertSecretRef.CAKey, Path: "ca.crt"})
+		}
+		volumes = append(volumes, corev1.Volume{
+			Name: "tls",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: tls.CertSecretRef.Name, Items: items},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: "tls", MountPath: TLSDir, ReadOnly: true})
+
+		tlsPort := tls.Port
+		if tlsPort == 0 {
+			tlsPort = 6443
+		}
+		// kividb's --configfile parser does not currently apply tls-port /
+		// tls-cert-file / tls-key-file / tls-ca-cert-file directives (a
+		// confirmed upstream gap, verified against a live v1.0.2-tls
+		// container: the config file is accepted and the process starts,
+		// but no TLS listener comes up) -- the identical settings work when
+		// passed as CLI flags, so they're passed here in addition to
+		// writing them into kividb.conf (which still documents them for
+		// anyone reading the rendered ConfigMap directly).
+		kividbArgs = append(kividbArgs,
+			"--tls-port", strconv.Itoa(int(tlsPort)),
+			"--tls-cert-file", TLSDir+"/tls.crt",
+			"--tls-key-file", TLSDir+"/tls.key",
+		)
+		if hasCA {
+			kividbArgs = append(kividbArgs, "--tls-ca-cert-file", TLSDir+"/ca.crt")
+		}
+		kividbPorts = append(kividbPorts, corev1.ContainerPort{Name: "tls", ContainerPort: tlsPort})
+	}
+
 	kividbContainer := corev1.Container{
 		Name:            "kividb",
-		Image:           c.Spec.Image,
+		Image:           resolveImage(c),
 		ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
-		Args:            []string{"--configfile", ConfigDir + "/" + ConfigFileName},
+		Args:            kividbArgs,
 		WorkingDir:      DataDir,
-		Ports: []corev1.ContainerPort{
-			{Name: KividbPortName, ContainerPort: port},
-		},
-		Resources: c.Spec.Resources,
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "data", MountPath: DataDir},
-			{Name: "config", MountPath: ConfigDir},
-			{Name: "acl", MountPath: AclDir},
-		},
+		Ports:           kividbPorts,
+		Resources:       c.Spec.Resources,
+		VolumeMounts:    volumeMounts,
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler:        corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(int(port))}},
 			InitialDelaySeconds: 10,
@@ -212,7 +299,7 @@ func podTemplate(c *kividbv1alpha1.KividbCluster) corev1.PodTemplateSpec {
 		Image:           agentImage(c),
 		ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
 		Args:            []string{"serve"},
-		Env:             agentEnv(c),
+		Env:             agentEnv(c, aclConfig, snapCfg),
 		Resources:       c.Spec.AgentResources,
 		Ports: []corev1.ContainerPort{
 			{Name: AgentPortName, ContainerPort: AgentPort},
@@ -240,7 +327,7 @@ func podTemplate(c *kividbv1alpha1.KividbCluster) corev1.PodTemplateSpec {
 			Name:            "redis-exporter",
 			Image:           exporterImage(c),
 			ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
-			Env:             exporterEnv(c),
+			Env:             exporterEnv(c, aclConfig),
 			Resources:       c.Spec.ExporterResources,
 			Ports: []corev1.ContainerPort{
 				{Name: ExporterPortName, ContainerPort: ExporterPort},
@@ -251,23 +338,6 @@ func podTemplate(c *kividbv1alpha1.KividbCluster) corev1.PodTemplateSpec {
 				PeriodSeconds:       15,
 			},
 		})
-	}
-
-	volumes := []corev1.Volume{
-		{
-			Name: "config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: configMapName(c)},
-				},
-			},
-		},
-		{
-			Name: "acl",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{SecretName: secretName(c)},
-			},
-		},
 	}
 
 	return corev1.PodTemplateSpec{
@@ -310,7 +380,7 @@ func pullPolicyOrDefault(p corev1.PullPolicy) corev1.PullPolicy {
 	return p
 }
 
-func desiredStatefulSet(c *kividbv1alpha1.KividbCluster) *appsv1.StatefulSet {
+func desiredStatefulSet(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) *appsv1.StatefulSet {
 	replicas := c.Spec.Replicas + 1 // +1 for the master
 	accessModes := c.Spec.Storage.AccessModes
 	if len(accessModes) == 0 {
@@ -341,7 +411,7 @@ func desiredStatefulSet(c *kividbv1alpha1.KividbCluster) *appsv1.StatefulSet {
 			Replicas:             &replicas,
 			PodManagementPolicy:  appsv1.ParallelPodManagement,
 			Selector:             &metav1.LabelSelector{MatchLabels: selectorLabels(c)},
-			Template:             podTemplate(c),
+			Template:             podTemplate(c, kdbConfig, aclConfig, snapCfg),
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{pvc},
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
 				Type: appsv1.RollingUpdateStatefulSetStrategyType,

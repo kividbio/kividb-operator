@@ -60,11 +60,18 @@ func (s *server) runBackup(ctx context.Context) (*agentapi.BackupResponse, error
 		pruned = 0
 	}
 
+	role := agentapi.RoleUnknown
+	if st, err := s.queryStatus(); err == nil {
+		role = st.Role
+	}
+
 	return &agentapi.BackupResponse{
 		ObjectKey:   objectKey,
 		SizeBytes:   size,
 		DurationMs:  time.Since(start).Milliseconds(),
 		PrunedCount: pruned,
+		SourcePod:   s.cfg.PodName,
+		SourceRole:  role,
 	}, nil
 }
 

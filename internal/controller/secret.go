@@ -12,8 +12,8 @@ import (
 )
 
 // secretValueKey uniquely identifies one key within one Secret, used as a
-// map key when the controller pre-fetches every password referenced by
-// KividbClusterSpec.Auth before rendering the ACL file.
+// map key when the controller pre-fetches every password referenced by a
+// KividbAclConfig before rendering the ACL file.
 func secretValueKey(ref *kividbv1alpha1.SecretKeyRef) string {
 	if ref == nil {
 		return ""
@@ -72,13 +72,33 @@ func renderUserLine(u kividbv1alpha1.KividbUser, secretValues map[string]string)
 	return fmt.Sprintf("user %s %s %s %s %s %s", u.Name, onOff, authToken, keyPatterns, channelPatterns, cmdRules), nil
 }
 
-// renderACLFile renders the full ACL file body for a KividbCluster. If the
-// user list contains no "default" entry, a permissive default user is
-// synthesized (nopass, +@all) unless RequirePassSecretRef is set, in which
-// case the default user is authenticated by that password -- matching
-// kividb's own AclUser::default_user derivation from --requirepass.
-func renderACLFile(c *kividbv1alpha1.KividbCluster, secretValues map[string]string) (string, error) {
-	users := append([]kividbv1alpha1.KividbUser{}, c.Spec.Auth.Users...)
+// aclUsers returns the user list a (possibly nil) KividbAclConfig
+// contributes. A nil aclConfig (spec.aclConfigRef unset) means "no ACL
+// config at all", not zero users -- renderACLFile still synthesizes an
+// open default user in that case.
+func aclUsers(aclConfig *kividbv1alpha1.KividbAclConfig) []kividbv1alpha1.KividbUser {
+	if aclConfig == nil {
+		return nil
+	}
+	return aclConfig.Spec.Users
+}
+
+func aclRequirePassRef(aclConfig *kividbv1alpha1.KividbAclConfig) *kividbv1alpha1.SecretKeyRef {
+	if aclConfig == nil {
+		return nil
+	}
+	return aclConfig.Spec.RequirePassSecretRef
+}
+
+// renderACLFile renders the full ACL file body for a KividbCluster from
+// its (possibly nil) referenced KividbAclConfig. If the user list contains
+// no "default" entry, a permissive default user is synthesized (nopass,
+// +@all) unless RequirePassSecretRef is set, in which case the default
+// user is authenticated by that password -- matching kividb's own
+// AclUser::default_user derivation from --requirepass. A nil aclConfig
+// (spec.aclConfigRef unset) renders just that single open default user.
+func renderACLFile(aclConfig *kividbv1alpha1.KividbAclConfig, secretValues map[string]string) (string, error) {
+	users := append([]kividbv1alpha1.KividbUser{}, aclUsers(aclConfig)...)
 
 	hasDefault := false
 	for _, u := range users {
@@ -89,8 +109,8 @@ func renderACLFile(c *kividbv1alpha1.KividbCluster, secretValues map[string]stri
 	}
 	if !hasDefault {
 		def := kividbv1alpha1.KividbUser{Name: "default"}
-		if c.Spec.Auth.RequirePassSecretRef != nil {
-			def.PasswordSecretRef = c.Spec.Auth.RequirePassSecretRef
+		if ref := aclRequirePassRef(aclConfig); ref != nil {
+			def.PasswordSecretRef = ref
 		} else {
 			def.NoPass = true
 		}
@@ -113,34 +133,37 @@ func renderACLFile(c *kividbv1alpha1.KividbCluster, secretValues map[string]stri
 // collectSecretRefs returns every SecretKeyRef the controller must resolve
 // before it can render the ACL file: the default-user requirepass ref plus
 // each explicit user's password ref.
-func collectSecretRefs(c *kividbv1alpha1.KividbCluster) []*kividbv1alpha1.SecretKeyRef {
+func collectSecretRefs(aclConfig *kividbv1alpha1.KividbAclConfig) []*kividbv1alpha1.SecretKeyRef {
 	var refs []*kividbv1alpha1.SecretKeyRef
-	if c.Spec.Auth.RequirePassSecretRef != nil {
-		refs = append(refs, c.Spec.Auth.RequirePassSecretRef)
+	if ref := aclRequirePassRef(aclConfig); ref != nil {
+		refs = append(refs, ref)
 	}
-	for i := range c.Spec.Auth.Users {
-		if c.Spec.Auth.Users[i].PasswordSecretRef != nil {
-			refs = append(refs, c.Spec.Auth.Users[i].PasswordSecretRef)
+	users := aclUsers(aclConfig)
+	for i := range users {
+		if users[i].PasswordSecretRef != nil {
+			refs = append(refs, users[i].PasswordSecretRef)
 		}
 	}
 	return refs
 }
 
 // defaultUserPasswordRef returns the SecretKeyRef backing the "default"
-// ACL user's password, if any: an explicit "default" entry in Auth.Users
-// takes precedence over Auth.RequirePassSecretRef. The agent sidecar uses
-// this same ref (injected as an env var) to authenticate its own local
-// RESP connections, so it always matches what renderACLFile put on disk.
-func defaultUserPasswordRef(c *kividbv1alpha1.KividbCluster) *kividbv1alpha1.SecretKeyRef {
-	for i := range c.Spec.Auth.Users {
-		if c.Spec.Auth.Users[i].Name == "default" {
-			if c.Spec.Auth.Users[i].NoPass {
+// ACL user's password, if any: an explicit "default" entry in the
+// KividbAclConfig's Users takes precedence over RequirePassSecretRef. The
+// agent (and redis_exporter, when monitoring is enabled) sidecar uses this
+// same ref (injected as an env var) to authenticate its own local RESP
+// connections, so it always matches what renderACLFile put on disk.
+func defaultUserPasswordRef(aclConfig *kividbv1alpha1.KividbAclConfig) *kividbv1alpha1.SecretKeyRef {
+	users := aclUsers(aclConfig)
+	for i := range users {
+		if users[i].Name == "default" {
+			if users[i].NoPass {
 				return nil
 			}
-			return c.Spec.Auth.Users[i].PasswordSecretRef
+			return users[i].PasswordSecretRef
 		}
 	}
-	return c.Spec.Auth.RequirePassSecretRef
+	return aclRequirePassRef(aclConfig)
 }
 
 func desiredAuthSecret(c *kividbv1alpha1.KividbCluster, aclContent string) *corev1.Secret {

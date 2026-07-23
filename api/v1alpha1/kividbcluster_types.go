@@ -35,8 +35,29 @@ const RoleLabel = "kividb.io/role"
 // ClusterLabel identifies which KividbCluster a pod/service/etc. belongs to.
 const ClusterLabel = "kividb.io/cluster"
 
+// KividbVariant selects which build of the kividb image to run. Each
+// variant beyond "standard" corresponds to a real, separately-published
+// image tag suffix (e.g. quay.io/kividbio/kividb:v1.0.2-tls) -- the
+// features aren't runtime-togglable, they're compiled in.
+type KividbVariant string
+
+const (
+	// VariantStandard is the base build: no TLS, no Lua scripting.
+	VariantStandard KividbVariant = "standard"
+
+	// VariantTLS adds TLS listener support (--tls-port and friends).
+	// Pair with spec.configRef's KividbConfig.spec.tls.
+	VariantTLS KividbVariant = "tls"
+
+	// VariantLua adds Lua scripting support (EVAL/EVALSHA/FUNCTION).
+	VariantLua KividbVariant = "lua"
+
+	// VariantFull includes both TLS and Lua support.
+	VariantFull KividbVariant = "full"
+)
+
 // SecretKeyRef points at a single key within a Secret in the same namespace
-// as the KividbCluster.
+// as the object referencing it.
 type SecretKeyRef struct {
 	// Name of the Secret.
 	Name string `json:"name"`
@@ -45,7 +66,8 @@ type SecretKeyRef struct {
 }
 
 // KividbUser configures a single Redis-ACL-style user that the operator
-// will render into the ACL file kividb loads via --aclfile.
+// will render into the ACL file kividb loads via --aclfile. Used by
+// KividbAclConfig.
 type KividbUser struct {
 	// Name of the ACL user. "default" configures the built-in default user.
 	Name string `json:"name"`
@@ -81,21 +103,6 @@ type KividbUser struct {
 	// ["+@all"] if empty.
 	// +optional
 	CommandRules []string `json:"commandRules,omitempty"`
-}
-
-// AuthSpec configures the default/legacy requirepass authentication in
-// addition to (or instead of) the ACL user list.
-type AuthSpec struct {
-	// RequirePassSecretRef points at a Secret key holding the requirepass
-	// value for the built-in default user. If unset, no requirepass is
-	// configured and unauthenticated access is allowed unless the "default"
-	// user is defined explicitly in Users.
-	// +optional
-	RequirePassSecretRef *SecretKeyRef `json:"requirePassSecretRef,omitempty"`
-
-	// Users is the list of ACL users to render into the ACL file.
-	// +optional
-	Users []KividbUser `json:"users,omitempty"`
 }
 
 // StorageSpec configures the PersistentVolumeClaim template used for each
@@ -153,95 +160,12 @@ type ServicesSpec struct {
 	Replicas ServiceSpec `json:"replicas,omitempty"`
 }
 
-// S3StorageSpec configures the S3-compatible object storage destination
-// backups are uploaded to. Any S3-API-compatible endpoint works: AWS S3,
-// MinIO, Ceph RGW, Backblaze B2, R2, GCS (via its S3 interop endpoint), etc.
-type S3StorageSpec struct {
-	// Endpoint is the S3-compatible HTTP(S) endpoint, e.g.
-	// "https://s3.us-east-1.amazonaws.com" or "https://minio.example.com:9000".
-	Endpoint string `json:"endpoint"`
-
-	// Bucket is the destination bucket name. Must already exist.
-	Bucket string `json:"bucket"`
-
-	// Region is passed to the S3 client. Use any placeholder (e.g. "us-east-1")
-	// for providers that ignore it, such as most MinIO deployments.
-	// +optional
-	Region string `json:"region,omitempty"`
-
-	// PathPrefix is prepended to every object key, e.g. "backups/prod".
-	// +optional
-	PathPrefix string `json:"pathPrefix,omitempty"`
-
-	// ForcePathStyle enables path-style addressing (bucket.endpoint/key vs
-	// endpoint/bucket/key). Required by most self-hosted MinIO setups.
-	// +optional
-	ForcePathStyle bool `json:"forcePathStyle,omitempty"`
-
-	// InsecureSkipTLSVerify disables TLS certificate verification against
-	// Endpoint. Only intended for self-signed test/dev MinIO instances.
-	// +optional
-	InsecureSkipTLSVerify bool `json:"insecureSkipTLSVerify,omitempty"`
-
-	// CredentialsSecretRef points at a Secret containing the access key ID
-	// and secret access key.
-	CredentialsSecretRef S3CredentialsSecretRef `json:"credentialsSecretRef"`
-}
-
-// S3CredentialsSecretRef names the Secret and keys holding S3 credentials.
-type S3CredentialsSecretRef struct {
-	// Name of the Secret.
-	Name string `json:"name"`
-
-	// AccessKeyIDKey is the key within the Secret holding the access key ID.
-	// Defaults to "accessKeyId".
-	// +optional
-	AccessKeyIDKey string `json:"accessKeyIdKey,omitempty"`
-
-	// SecretAccessKeyKey is the key within the Secret holding the secret
-	// access key. Defaults to "secretAccessKey".
-	// +optional
-	SecretAccessKeyKey string `json:"secretAccessKeyKey,omitempty"`
-}
-
-// BackupSpec configures scheduled snapshotting to S3-compatible storage.
-type BackupSpec struct {
-	// Enabled turns on the scheduled backup CronJob.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
-	// Schedule is a standard cron expression, e.g. "0 * * * *" for hourly.
-	// Evaluated in the timezone of the operator's kube-controller (UTC on
-	// most clusters). Required when Enabled is true.
-	// +optional
-	Schedule string `json:"schedule,omitempty"`
-
-	// Retention is the number of most-recent snapshots to keep in S3; older
-	// ones are pruned after each successful backup. 0 means keep all.
-	// +optional
-	// +kubebuilder:default=7
-	Retention int32 `json:"retention,omitempty"`
-
-	// TimeoutSeconds bounds how long a single backup run (BGSAVE + upload)
-	// may take before the Job is considered failed. Defaults to 900 (15m).
-	// +optional
-	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
-
-	// S3 is the destination object storage configuration. Required when
-	// Enabled is true.
-	// +optional
-	S3 *S3StorageSpec `json:"s3,omitempty"`
-
-	// JobResources overrides the resource requirements of the backup Job's
-	// container. Defaults to modest fixed requests/limits.
-	// +optional
-	JobResources corev1.ResourceRequirements `json:"jobResources,omitempty"`
-}
-
-// MonitoringSpec toggles metrics exposure via the per-pod agent sidecar.
+// MonitoringSpec toggles metrics exposure via the per-pod agent sidecar and
+// the optional redis_exporter sidecar.
 type MonitoringSpec struct {
-	// Enabled exposes a Prometheus-format /metrics endpoint on the agent
-	// sidecar's port, derived from kividb's INFO output.
+	// Enabled adds a redis_exporter sidecar (see spec.exporterImage) to
+	// every pod. The agent sidecar's own lightweight /metrics is always
+	// available regardless of this setting.
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
@@ -272,8 +196,29 @@ type KividbClusterSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas,omitempty"`
 
-	// Image is the kividb container image, e.g. "quay.io/kividbio/kividb:v1.0.2".
-	Image string `json:"image"`
+	// Image is the kividb container image, e.g.
+	// "quay.io/kividbio/kividb:v1.0.2" or, for a non-standard build,
+	// "quay.io/kividbio/kividb:v1.0.2-tls". Defaults to a floating,
+	// unpinned tag if unset -- set this explicitly to pin a specific
+	// version. The operator uses this value verbatim; it never derives or
+	// modifies an image reference from Variant below.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Variant declares which build of kividb Image actually is:
+	// "standard" (default), "tls", "lua", or "full" (TLS+Lua). This is
+	// informational, not instructional -- it does not change which image
+	// gets pulled (see Image above). It tells the operator whether to wire
+	// up variant-specific configuration (currently: TLS cert mounting and
+	// CLI flags, gated on a referenced KividbConfig's spec.tls). Setting
+	// Variant to "tls"/"lua"/"full" without Image actually being that kind
+	// of build (or vice versa) is not validated by the API server -- the
+	// operator emits a guidance Event (visible via `kubectl describe
+	// kividbcluster`) on a likely mismatch, but does not block reconciling.
+	// +optional
+	// +kubebuilder:default=standard
+	// +kubebuilder:validation:Enum=standard;tls;lua;full
+	Variant KividbVariant `json:"variant,omitempty"`
 
 	// ImagePullPolicy for the kividb container. Defaults to IfNotPresent.
 	// +optional
@@ -299,20 +244,25 @@ type KividbClusterSpec struct {
 	// +kubebuilder:default=6380
 	Port int32 `json:"port,omitempty"`
 
-	// KividbConfig holds free-form kividb.conf directives (the same
-	// lower-kebab-case keys accepted by kividb's --configfile, e.g.
-	// "maxmemory", "threads", "aof", "loglevel", "cluster-enabled",
-	// "notify-keyspace-events", "slowlog-log-slower-than", "tls-port", ...).
-	// The operator renders these verbatim into the generated ConfigMap; it
-	// does not validate directive names beyond what the CRD schema requires
-	// elsewhere (e.g. Port, Auth). Do not set "replicaof" here -- replication
-	// topology is managed dynamically by the operator at runtime.
+	// ConfigRef names a KividbConfig in the same namespace, providing
+	// kividb.conf directives and TLS settings. Optional: omit for kividb's
+	// own built-in defaults plus whatever the operator itself pins (port,
+	// aclfile).
 	// +optional
-	KividbConfig map[string]string `json:"kividbConfig,omitempty"`
+	ConfigRef *corev1.LocalObjectReference `json:"configRef,omitempty"`
 
-	// Auth configures requirepass and/or ACL users.
+	// AclConfigRef names a KividbAclConfig in the same namespace, providing
+	// ACL users and/or requirepass. Optional: omit for an open,
+	// passwordless default user (fine for local/dev, not for anything
+	// reachable outside the cluster).
 	// +optional
-	Auth AuthSpec `json:"auth,omitempty"`
+	AclConfigRef *corev1.LocalObjectReference `json:"aclConfigRef,omitempty"`
+
+	// SnapshotConfigRef names a KividbSnapshotConfig in the same namespace,
+	// providing the backup schedule and S3 destination. Optional: omit to
+	// disable scheduled backups entirely.
+	// +optional
+	SnapshotConfigRef *corev1.LocalObjectReference `json:"snapshotConfigRef,omitempty"`
 
 	// Storage configures the per-pod PersistentVolumeClaim template.
 	Storage StorageSpec `json:"storage"`
@@ -363,10 +313,6 @@ type KividbClusterSpec struct {
 	// +optional
 	Services ServicesSpec `json:"services,omitempty"`
 
-	// Backup configures scheduled S3 snapshotting.
-	// +optional
-	Backup BackupSpec `json:"backup,omitempty"`
-
 	// Monitoring configures metrics exposure.
 	// +optional
 	Monitoring MonitoringSpec `json:"monitoring,omitempty"`
@@ -394,27 +340,6 @@ type KividbPodStatus struct {
 	ReplicationOffset int64 `json:"replicationOffset,omitempty"`
 }
 
-// BackupStatus reports the outcome of the most recent backup run.
-type BackupStatus struct {
-	// LastRunTime is when the most recent backup Job started.
-	// +optional
-	LastRunTime *metav1.Time `json:"lastRunTime,omitempty"`
-
-	// LastSuccessTime is when the most recent backup Job succeeded.
-	// +optional
-	LastSuccessTime *metav1.Time `json:"lastSuccessTime,omitempty"`
-
-	// LastObjectKey is the S3 object key of the most recent successful
-	// backup.
-	// +optional
-	LastObjectKey string `json:"lastObjectKey,omitempty"`
-
-	// LastError holds the error message of the most recent failed backup,
-	// cleared on the next success.
-	// +optional
-	LastError string `json:"lastError,omitempty"`
-}
-
 // KividbClusterStatus defines the observed state of a KividbCluster.
 type KividbClusterStatus struct {
 	// Phase is the coarse-grained lifecycle state.
@@ -433,10 +358,6 @@ type KividbClusterStatus struct {
 	// +optional
 	LastFailoverTime *metav1.Time `json:"lastFailoverTime,omitempty"`
 
-	// Backup reports the status of scheduled backups.
-	// +optional
-	Backup BackupStatus `json:"backup,omitempty"`
-
 	// ObservedGeneration is the .metadata.generation last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -452,16 +373,18 @@ type KividbClusterStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:shortName=kdb;kdbc
+// +kubebuilder:resource:shortName=kdb
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Master",type=string,JSONPath=`.status.masterPod`
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.spec.replicas`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // KividbCluster is the Schema for the kividbclusters API. It describes a
-// single master, N-replica KiviDB cluster, including its configuration,
-// ACL users, storage, scheduling constraints, exposed Services, scheduled
-// S3 backups, monitoring, and failover behavior.
+// single master, N-replica KiviDB cluster: storage, scheduling
+// constraints, exposed Services, monitoring, and failover behavior.
+// Configuration, ACL users, and scheduled backups are set via separate
+// KividbConfig / KividbAclConfig / KividbSnapshotConfig resources,
+// referenced by name.
 type KividbCluster struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

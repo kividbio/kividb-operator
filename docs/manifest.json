@@ -1,0 +1,12 @@
+{
+  "$schema": "https://kividb.io/schemas/operator-docs-manifest-v1.json",
+  "docs": [
+    { "slug": "architecture", "title": "Architecture", "file": "ARCHITECTURE.md" },
+    { "slug": "install", "title": "Installing kividb-operator", "file": "INSTALL.md" },
+    { "slug": "configuration", "title": "Field reference", "file": "CONFIGURATION.md" },
+    { "slug": "backup-restore", "title": "Backups and restore", "file": "BACKUP_RESTORE.md" },
+    { "slug": "gui", "title": "Web GUI", "file": "GUI.md" },
+    { "slug": "troubleshooting", "title": "Troubleshooting", "file": "TROUBLESHOOTING.md" },
+    { "slug": "roadmap", "title": "Roadmap", "file": "ROADMAP.md" }
+  ]
+}

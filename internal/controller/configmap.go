@@ -12,30 +12,46 @@ import (
 )
 
 // renderKividbConf renders kividb's flat "key value" config file format
-// (see src/config.rs:apply_config_file upstream) from the free-form
-// KividbConfig map plus the fields the operator itself must pin (port,
-// aclfile). Directives are emitted in sorted-key order so the generated
-// ConfigMap is deterministic and diffs cleanly.
+// (see src/config.rs:apply_config_file upstream) from the referenced
+// KividbConfig's free-form directives plus the fields the operator itself
+// must pin (port, aclfile, and TLS if configured). Directives are emitted
+// in sorted-key order so the generated ConfigMap is deterministic and
+// diffs cleanly.
+//
+// kdbConfig may be nil (spec.configRef unset) -- kividb's own built-in
+// defaults apply, plus whatever the operator itself pins.
 //
 // Deliberately absent: "replicaof". Replication topology is not static --
 // it is driven at runtime by the operator via the agent's REPLICAOF calls,
 // so baking a replicaof directive into the config file would fight the
 // controller on every pod restart.
-func renderKividbConf(c *kividbv1alpha1.KividbCluster) string {
+func renderKividbConf(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) string {
 	directives := map[string]string{}
-	for k, v := range c.Spec.KividbConfig {
-		if strings.EqualFold(k, "replicaof") || strings.EqualFold(k, "port") || strings.EqualFold(k, "aclfile") {
-			continue // operator-owned, see below
+	if kdbConfig != nil {
+		for k, v := range kdbConfig.Spec.Directives {
+			if strings.EqualFold(k, "replicaof") || strings.EqualFold(k, "port") || strings.EqualFold(k, "aclfile") {
+				continue // operator-owned, see below
+			}
+			directives[k] = v
 		}
-		directives[k] = v
 	}
 
-	port := c.Spec.Port
-	if port == 0 {
-		port = 6380
-	}
+	port := getPort(c)
 	directives["port"] = strconv.Itoa(int(port))
 	directives["aclfile"] = AclDir + "/" + AclFileName
+
+	if tls := kividbTLSSpec(kdbConfig); tls != nil && tls.Enabled {
+		tlsPort := tls.Port
+		if tlsPort == 0 {
+			tlsPort = 6443
+		}
+		directives["tls-port"] = strconv.Itoa(int(tlsPort))
+		directives["tls-cert-file"] = TLSDir + "/tls.crt"
+		directives["tls-key-file"] = TLSDir + "/tls.key"
+		if tls.CertSecretRef.CAKey != "" {
+			directives["tls-ca-cert-file"] = TLSDir + "/ca.crt"
+		}
+	}
 
 	keys := make([]string, 0, len(directives))
 	for k := range directives {
@@ -55,7 +71,16 @@ func renderKividbConf(c *kividbv1alpha1.KividbCluster) string {
 	return b.String()
 }
 
-func desiredConfigMap(c *kividbv1alpha1.KividbCluster) *corev1.ConfigMap {
+// kividbTLSSpec safely extracts the TLS spec from a possibly-nil
+// KividbConfig.
+func kividbTLSSpec(kdbConfig *kividbv1alpha1.KividbConfig) *kividbv1alpha1.KividbTLSSpec {
+	if kdbConfig == nil {
+		return nil
+	}
+	return kdbConfig.Spec.TLS
+}
+
+func desiredConfigMap(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      configMapName(c),
@@ -63,7 +88,7 @@ func desiredConfigMap(c *kividbv1alpha1.KividbCluster) *corev1.ConfigMap {
 			Labels:    commonLabels(c),
 		},
 		Data: map[string]string{
-			ConfigFileName: renderKividbConf(c),
+			ConfigFileName: renderKividbConf(c, kdbConfig),
 		},
 	}
 }

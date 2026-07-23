@@ -55,9 +55,10 @@ func main() {
 	}
 
 	reconciler := &controller.KividbClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Agent:  controller.NewAgentClient(agentTimeout),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Agent:    controller.NewAgentClient(agentTimeout),
+		Recorder: mgr.GetEventRecorderFor("kividb-operator"),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "KividbCluster")

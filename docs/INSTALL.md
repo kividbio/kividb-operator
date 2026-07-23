@@ -42,7 +42,10 @@ Verify:
 
 ```bash
 kubectl get pods -n kividb-operator-system
-kubectl get crd kividbclusters.kividb.io
+kubectl get crds -l app.kubernetes.io/name=kividb-operator
+# or explicitly, all five kinds:
+kubectl get crd kividbclusters.kividb.io kividbconfigs.kividb.io \
+  kividbaclconfigs.kividb.io kividbsnapshotconfigs.kividb.io kividbsnapshots.kividb.io
 ```
 
 ### Upgrading
@@ -69,19 +72,23 @@ helm upgrade kividb-operator charts/kividb-operator -n kividb-operator-system
 helm uninstall kividb-operator -n kividb-operator-system
 ```
 
-This does **not** delete the CRD (Helm's `crds/` convention again) or any
-`KividbCluster` objects/their StatefulSets/PVCs — the operator simply
-stops reconciling them. To remove everything, including all data:
+This does **not** delete any of the five CRDs (Helm's `crds/` convention
+again) or any `KividbCluster`/`KividbConfig`/`KividbAclConfig`/
+`KividbSnapshotConfig`/`KividbSnapshot` objects/their
+StatefulSets/PVCs — the operator simply stops reconciling them. To remove
+everything, including all data:
 
 ```bash
 kubectl delete kividbcluster --all -A     # deletes every managed StatefulSet/Service/etc. via ownerReferences
-kubectl delete crd kividbclusters.kividb.io
+kubectl delete crd kividbclusters.kividb.io kividbconfigs.kividb.io \
+  kividbaclconfigs.kividb.io kividbsnapshotconfigs.kividb.io kividbsnapshots.kividb.io
 ```
 
-**`kubectl delete crd` deletes every `KividbCluster` object across every
-namespace in the cluster, cascading to their PVCs' reclaim policy.**
-Double-check you mean *every* cluster in the whole Kubernetes cluster, not
-just one, before running it.
+**`kubectl delete crd` deletes every object of that kind across every
+namespace in the cluster** — for `kividbclusters.kividb.io` specifically,
+that cascades to their PVCs' reclaim policy. Double-check you mean
+*every* cluster in the whole Kubernetes cluster, not just one, before
+running it.
 
 ## Option B: kustomize / kubectl
 
@@ -103,7 +110,7 @@ kubectl apply -k config/manager   # Deployment
 Or, without kustomize at all, apply the pieces directly:
 
 ```bash
-kubectl apply -f config/crd/bases/kividb.io_kividbclusters.yaml
+kubectl apply -f config/crd/bases/
 kubectl apply -f config/rbac/
 kubectl apply -f config/manager/manager.yaml
 ```

@@ -11,7 +11,9 @@
 A Kubernetes operator for [kividb](https://kividb.io), a
 Redis-RESP-compatible in-memory store written in Rust. It manages a
 `KividbCluster` custom resource describing a single-master, N-replica
-kividb cluster, and handles:
+kividb cluster — plus four companion CRDs
+(`KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig`/`KividbSnapshot`,
+see [Custom resources](#custom-resources) below) — and handles:
 
 - **Automatic failover** — an unhealthy master is detected and replaced by
   promoting the most caught-up replica, with pod labels (not Service
@@ -19,11 +21,16 @@ kividb cluster, and handles:
 - **Separate master/replica Services**, each independently configurable
   as `ClusterIP`, `NodePort`, or `LoadBalancer` (with static IP /
   annotations / source-range support).
+- **Explicit, user-pinned image** plus a declared `standard`/`tls`/`lua`/
+  `full` variant so the operator wires up the right configuration (TLS
+  certificate mounting from a Kubernetes Secret, etc.) for whichever
+  build you point it at.
 - **ACL user management** and legacy `requirepass`, rendered into
   kividb's Redis-compatible ACL file from Kubernetes Secrets.
 - **Scheduled snapshot backups** to any S3-compatible object storage
   (AWS S3, MinIO, R2, B2, Ceph RGW, ...), via a native Kubernetes
-  `CronJob` and per-pod retention pruning.
+  `CronJob`, configurable master-or-replica sourcing, per-pod retention
+  pruning, and a queryable record (`KividbSnapshot`) of every run.
 - **Standard scheduling controls** — `resources`, `tolerations`,
   `nodeSelector`, `affinity` — plus Prometheus metrics and a read-only
   web dashboard.
@@ -31,6 +38,22 @@ kividb cluster, and handles:
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it all fits
 together, including a sequence diagram of what actually happens during a
 failover and a backup.
+
+## Custom resources
+
+Configuration, ACLs, and backup destinations are their own reusable CRDs
+— referenced by name from a `KividbCluster`, not embedded in it — the
+same shape as StackGres's `SGPostgresConfig`/`SGObjectStorage` split:
+
+| Kind | Short name | Purpose |
+|---|---|---|
+| `KividbCluster` | `kdb` | The cluster: topology, storage, Services, monitoring, failover. |
+| `KividbConfig` | `kdbc` | Reusable `kividb.conf` directives + TLS settings. |
+| `KividbAclConfig` | `kdbacl` | Reusable ACL users / `requirepass`. |
+| `KividbSnapshotConfig` | `kdbsc` | Reusable backup schedule, S3 destination, retention. |
+| `KividbSnapshot` | `kdbs` | Operator-created record of one backup run (read-only). |
+
+Full field reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## How it works, in one picture
 
@@ -91,6 +114,10 @@ for the Secrets it references) and the full field reference in
 
 ## The web GUI
 
+<p align="center">
+  <img src="assets/gui.png" alt="kividb-operator GUI dashboard">
+</p>
+
 A read-only dashboard (`cmd/gui`) ships alongside the operator
 (`gui.enabled: true` by default in the Helm chart) listing every
 `KividbCluster`, its phase, master/replica pods with readiness and
@@ -112,7 +139,9 @@ kubectl port-forward -n kividb-operator-system svc/kividb-operator-gui 8090:8090
 | [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md) | Configuring S3 backups, triggering one on demand, manual restore procedure |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → cause → fix for common issues |
 | [docs/GUI.md](docs/GUI.md) | Running and deploying the dashboard |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | What's planned for 0.2.0, and what's required before 1.0.0 |
 | [docs/RELEASING.md](docs/RELEASING.md) | Versioning and the release pipeline |
+| [docs/VERSIONING.md](docs/VERSIONING.md) | How an external site can fetch these docs at a specific released version |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Local dev setup, code layout, PR checklist |
 
 ## Status

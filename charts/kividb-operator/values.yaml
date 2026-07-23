@@ -1,6 +1,6 @@
 # Default values for kividb-operator.
-# This is a YAML-formatted file. See values.schema.json (none shipped yet)
-# and the field comments below for guidance.
+# This is a YAML-formatted file. See values.schema.json for the validated
+# structure and the field comments below for guidance.
 
 # nameOverride / fullnameOverride behave like the standard helm create
 # scaffolding (see templates/_helpers.tpl).
@@ -54,7 +54,7 @@ manager:
 
   image:
     repository: quay.io/kividbio/kividb-operator
-    tag: "0.1.0"
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
 
   resources:
@@ -104,7 +104,7 @@ manager:
 agent:
   image:
     repository: quay.io/kividbio/kividb-operator-agent
-    tag: "0.1.0"
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
   resources:
     requests:
@@ -146,7 +146,7 @@ gui:
 
   image:
     repository: quay.io/kividbio/kividb-operator-gui
-    tag: "0.1.0"
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
 
   service:

@@ -1,0 +1,37 @@
+# Reusable backup destination/schedule, referenced by kividb-full's
+# spec.snapshotConfigRef. Prerequisites: apply
+# kividb.io_v1alpha1_kividbcluster_full-secrets.yaml (or otherwise create
+# a Secret with the same name/keys) first.
+apiVersion: kividb.io/v1alpha1
+kind: KividbSnapshotConfig
+metadata:
+  name: kividb-full-hourly-backup
+  namespace: default
+spec:
+  schedule: "0 * * * *" # hourly
+  retention: 24 # keep the last 24 hourly snapshots
+  # source: master is both the default and the recommendation -- it's
+  # always the most complete, up-to-date data. "replica" trades a small,
+  # variable staleness window for zero BGSAVE I/O impact on the pod
+  # serving writes; only pick it if you've specifically measured that
+  # tradeoff is worth it for your workload.
+  source: master
+  timeoutSeconds: 900
+  s3:
+    endpoint: "https://minio.storage.svc.cluster.local:9000"
+    bucket: "kividb-backups"
+    region: "us-east-1" # ignored by most MinIO deployments, but required by the S3 client
+    pathPrefix: "prod/kividb-full"
+    forcePathStyle: true # required by most self-hosted MinIO setups
+    insecureSkipTLSVerify: false
+    credentialsSecretRef:
+      name: kividb-full-s3-credentials
+      accessKeyIdKey: accessKeyId
+      secretAccessKeyKey: secretAccessKey
+  jobResources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi

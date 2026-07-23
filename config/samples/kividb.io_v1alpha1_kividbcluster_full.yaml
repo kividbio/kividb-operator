@@ -1,10 +1,10 @@
 # Full-featured KividbCluster sample exercising every major spec field.
 #
-# Prerequisites: apply kividb.io_v1alpha1_kividbcluster_full-secrets.yaml
-# (or otherwise create Secrets with the same names/keys) in the same
-# namespace BEFORE applying this object.
-#
+# Prerequisites, in order:
 #   kubectl apply -f kividb.io_v1alpha1_kividbcluster_full-secrets.yaml
+#   kubectl apply -f kividb.io_v1alpha1_kividbconfig_full.yaml
+#   kubectl apply -f kividb.io_v1alpha1_kividbaclconfig_full.yaml
+#   kubectl apply -f kividb.io_v1alpha1_kividbsnapshotconfig_full.yaml
 #   kubectl apply -f kividb.io_v1alpha1_kividbcluster_full.yaml
 apiVersion: kividb.io/v1alpha1
 kind: KividbCluster
@@ -20,52 +20,17 @@ spec:
   agentImage: quay.io/kividbio/kividb-operator-agent:0.1.0
   port: 6380
 
-  kividbConfig:
-    maxmemory: "1gb"
-    maxmemory-policy: "allkeys-lru"
-    threads: "4"
-    aof: "yes"
-    loglevel: "notice"
-    notify-keyspace-events: "KEA"
-    slowlog-log-slower-than: "10000"
-    # Do not set "replicaof", "port" or "aclfile" here -- the operator
-    # manages those directives itself.
-
-  auth:
-    # requirePassSecretRef sets a fallback requirepass for the built-in
-    # default user in addition to (or in place of) defining "default"
-    # explicitly in users[] below. Here the "default" user is defined
-    # explicitly instead, so this ref is illustrative of the alternative
-    # mechanism -- both are shown; in practice pick one.
-    users:
-      - name: default
-        enabled: true
-        passwordSecretRef:
-          name: kividb-full-user-passwords
-          key: default-password
-        keyPatterns:
-          - "~*"
-        channelPatterns:
-          - "&*"
-        commandRules:
-          - "+@all"
-      - name: app
-        enabled: true
-        passwordSecretRef:
-          name: kividb-full-user-passwords
-          key: app-password
-        # Restricted to only this application's key/channel namespace.
-        keyPatterns:
-          - "~app:*"
-          - "~session:*"
-        channelPatterns:
-          - "&app:*"
-        commandRules:
-          - "+@all"
-          - "-flushall"
-          - "-flushdb"
-          - "-config"
-          - "-shutdown"
+  # Configuration, ACL users, and the backup schedule/destination are all
+  # separate, standalone, reusable resources -- referenced here by name,
+  # not embedded. Create/edit them independently of this KividbCluster,
+  # and reuse the same KividbConfig/KividbAclConfig/KividbSnapshotConfig
+  # across multiple clusters if you want identical settings everywhere.
+  configRef:
+    name: kividb-full-config
+  aclConfigRef:
+    name: kividb-full-acl
+  snapshotConfigRef:
+    name: kividb-full-hourly-backup
 
   storage:
     size: 20Gi
@@ -117,30 +82,6 @@ spec:
         - "10.0.0.0/8"
     replicas:
       type: ClusterIP
-
-  backup:
-    enabled: true
-    schedule: "0 * * * *" # hourly
-    retention: 24 # keep the last 24 hourly snapshots
-    timeoutSeconds: 900
-    s3:
-      endpoint: "https://minio.storage.svc.cluster.local:9000"
-      bucket: "kividb-backups"
-      region: "us-east-1" # ignored by most MinIO deployments, but required by the S3 client
-      pathPrefix: "prod/kividb-full"
-      forcePathStyle: true # required by most self-hosted MinIO setups
-      insecureSkipTLSVerify: false
-      credentialsSecretRef:
-        name: kividb-full-s3-credentials
-        accessKeyIdKey: accessKeyId
-        secretAccessKeyKey: secretAccessKey
-    jobResources:
-      requests:
-        cpu: 50m
-        memory: 64Mi
-      limits:
-        cpu: 250m
-        memory: 256Mi
 
   monitoring:
     # Adds a third "redis-exporter" container (oliver006/redis_exporter,

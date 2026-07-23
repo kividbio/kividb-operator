@@ -15,8 +15,8 @@ description: |
   failover via a per-pod agent sidecar, scheduled S3-compatible backups, and
   (optionally) a read-only web GUI.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/kividbio/kividb-operator
 sources:
@@ -48,6 +48,26 @@ annotations:
       name: kividbclusters.kividb.io
       displayName: KiviDB Cluster
       description: A single-master, N-replica KiviDB (Redis-compatible) cluster
+    - kind: KividbConfig
+      version: v1alpha1
+      name: kividbconfigs.kividb.io
+      displayName: KiviDB Config
+      description: Reusable kividb.conf directives and TLS settings, referenced by name from one or more KividbClusters
+    - kind: KividbAclConfig
+      version: v1alpha1
+      name: kividbaclconfigs.kividb.io
+      displayName: KiviDB ACL Config
+      description: Reusable ACL users and requirepass, referenced by name from one or more KividbClusters
+    - kind: KividbSnapshotConfig
+      version: v1alpha1
+      name: kividbsnapshotconfigs.kividb.io
+      displayName: KiviDB Snapshot Config
+      description: Reusable backup schedule, S3 destination, and retention policy, referenced by name from one or more KividbClusters
+    - kind: KividbSnapshot
+      version: v1alpha1
+      name: kividbsnapshots.kividb.io
+      displayName: KiviDB Snapshot
+      description: Operator-created record of a single backup run (read-only)
   artifacthub.io/crdsExamples: |
     - apiVersion: kividb.io/v1alpha1
       kind: KividbCluster
@@ -58,3 +78,30 @@ annotations:
         replicas: 2
         storage:
           size: 10Gi
+    - apiVersion: kividb.io/v1alpha1
+      kind: KividbConfig
+      metadata:
+        name: kividb-sample-config
+      spec:
+        directives:
+          maxmemory: "1073741824"
+    - apiVersion: kividb.io/v1alpha1
+      kind: KividbAclConfig
+      metadata:
+        name: kividb-sample-acl
+      spec:
+        users:
+          - name: default
+            noPass: true
+    - apiVersion: kividb.io/v1alpha1
+      kind: KividbSnapshotConfig
+      metadata:
+        name: kividb-sample-backups
+      spec:
+        schedule: "0 * * * *"
+        source: master
+        s3:
+          endpoint: "https://s3.us-east-1.amazonaws.com"
+          bucket: "my-kividb-backups"
+          credentialsSecretRef:
+            name: kividb-sample-s3-creds

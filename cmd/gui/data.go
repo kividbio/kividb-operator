@@ -13,6 +13,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// defaultKividbImage mirrors internal/controller/names.go's
+// DefaultKividbImage -- kept in sync manually rather than imported, same
+// rationale as the naming helpers below.
+const defaultKividbImage = "quay.io/kividbio/kividb:latest"
+
 // Object naming conventions below mirror the frozen convention documented
 // in docs/_internal-spec.md and implemented in internal/controller/names.go
 // (those helpers are unexported there, so the GUI -- a separate binary --
@@ -62,14 +67,12 @@ func summarizeCluster(c *kividbv1alpha1.KividbCluster) ClusterSummary {
 		}
 	}
 
-	var backupLastSuccess *time.Time
-	if c.Status.Backup.LastSuccessTime != nil {
-		t := c.Status.Backup.LastSuccessTime.Time
-		backupLastSuccess = &t
-	}
-
 	created := c.CreationTimestamp.Time
 
+	// BackupLastSuccess/BackupLastError are deliberately left unset here:
+	// they'd require listing KividbSnapshot objects per cluster, which the
+	// dashboard's doc comment promises never to do. getClusterDetail fills
+	// both in from real KividbSnapshot history.
 	return ClusterSummary{
 		Namespace:         c.Namespace,
 		Name:              c.Name,
@@ -78,9 +81,7 @@ func summarizeCluster(c *kividbv1alpha1.KividbCluster) ClusterSummary {
 		DesiredPods:       c.Spec.Replicas + 1,
 		ReadyPods:         ready,
 		TotalPods:         len(c.Status.Pods),
-		BackupEnabled:     c.Spec.Backup.Enabled,
-		BackupLastSuccess: backupLastSuccess,
-		BackupLastError:   c.Status.Backup.LastError,
+		BackupEnabled:     c.Spec.SnapshotConfigRef != nil,
 		CreationTimestamp: created,
 		Age:               humanizeAge(time.Since(created)),
 	}
@@ -124,22 +125,51 @@ func getClusterDetail(ctx context.Context, ctrlClient client.Client, clientset k
 		return nil, err
 	}
 
+	image := c.Spec.Image
+	if image == "" {
+		image = defaultKividbImage + " (default, unpinned)"
+	}
+
 	det := &ClusterDetail{
 		ClusterSummary:     summarizeCluster(&c),
-		Image:              c.Spec.Image,
+		Image:              image,
 		AgentImage:         c.Spec.AgentImage,
 		Port:               portOrDefault(c.Spec.Port),
 		StorageSize:        c.Spec.Storage.Size,
 		MasterServiceType:  string(c.Spec.Services.Master.Type),
 		ReplicaServiceType: string(c.Spec.Services.Replicas.Type),
 		ObservedGeneration: c.Status.ObservedGeneration,
+		Variant:            string(c.Spec.Variant),
+	}
+	if c.Spec.ConfigRef != nil {
+		det.ConfigRef = c.Spec.ConfigRef.Name
+	}
+	if c.Spec.AclConfigRef != nil {
+		det.AclConfigRef = c.Spec.AclConfigRef.Name
 	}
 	if c.Spec.Storage.StorageClassName != nil {
 		det.StorageClassName = *c.Spec.Storage.StorageClassName
 	}
-	if c.Spec.Backup.Enabled {
-		det.BackupSchedule = c.Spec.Backup.Schedule
-		det.BackupRetention = c.Spec.Backup.Retention
+	if c.Spec.SnapshotConfigRef != nil {
+		det.SnapshotConfigRef = c.Spec.SnapshotConfigRef.Name
+		var snapCfg kividbv1alpha1.KividbSnapshotConfig
+		if err := ctrlClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: c.Spec.SnapshotConfigRef.Name}, &snapCfg); err == nil {
+			det.BackupSchedule = snapCfg.Spec.Schedule
+			det.BackupRetention = snapCfg.Spec.Retention
+		}
+		det.Snapshots = fetchSnapshots(ctx, ctrlClient, namespace, name)
+		for _, s := range det.Snapshots {
+			switch s.Phase {
+			case string(kividbv1alpha1.SnapshotSucceeded):
+				if s.CompletionTime != nil && (det.BackupLastSuccess == nil || s.CompletionTime.After(*det.BackupLastSuccess)) {
+					det.BackupLastSuccess = s.CompletionTime
+				}
+			case string(kividbv1alpha1.SnapshotFailed):
+				if det.BackupLastError == "" {
+					det.BackupLastError = s.Error
+				}
+			}
+		}
 	}
 	if c.Status.LastFailoverTime != nil {
 		t := c.Status.LastFailoverTime.Time
@@ -172,7 +202,7 @@ func getClusterDetail(ctx context.Context, ctrlClient client.Client, clientset k
 	enrichPods(ctx, clientset, namespace, name, det, podByName)
 	det.StatefulSet = fetchStatefulSetView(ctx, clientset, namespace, statefulSetName(name))
 	det.Services = fetchServiceViews(ctx, clientset, namespace, name)
-	if c.Spec.Backup.Enabled {
+	if c.Spec.SnapshotConfigRef != nil {
 		det.CronJob = fetchCronJobView(ctx, clientset, namespace, backupCronJobName(name))
 	}
 	det.Events = fetchClusterEvents(ctx, clientset, namespace, name)
@@ -282,6 +312,62 @@ func fetchCronJobView(ctx context.Context, clientset kubernetes.Interface, names
 		v.LastSuccessfulTime = &t
 	}
 	return v
+}
+
+// fetchSnapshots lists the KividbSnapshot records belonging to one
+// cluster (via the operator-set kividb.io/cluster label), newest first,
+// capped to a reasonable page for the detail view.
+func fetchSnapshots(ctx context.Context, ctrlClient client.Client, namespace, clusterName string) []SnapshotView {
+	const maxSnapshots = 20
+
+	var list kividbv1alpha1.KividbSnapshotList
+	if err := ctrlClient.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabels{kividbv1alpha1.ClusterLabel: clusterName}); err != nil {
+		return nil
+	}
+
+	views := make([]SnapshotView, 0, len(list.Items))
+	for _, s := range list.Items {
+		v := SnapshotView{
+			Name:       s.Name,
+			Phase:      string(s.Status.Phase),
+			SourcePod:  s.Status.SourcePod,
+			SourceRole: string(s.Status.SourceRole),
+			ObjectKey:  s.Status.ObjectKey,
+			SizeBytes:  s.Status.SizeBytes,
+			DurationMs: s.Status.DurationMs,
+			Error:      s.Status.Error,
+		}
+		if s.Status.StartTime != nil {
+			t := s.Status.StartTime.Time
+			v.StartTime = &t
+		}
+		if s.Status.CompletionTime != nil {
+			t := s.Status.CompletionTime.Time
+			v.CompletionTime = &t
+		}
+		views = append(views, v)
+	}
+
+	sort.Slice(views, func(i, j int) bool {
+		ti, tj := snapshotSortTime(views[i]), snapshotSortTime(views[j])
+		return tj.Before(ti)
+	})
+	if len(views) > maxSnapshots {
+		views = views[:maxSnapshots]
+	}
+	return views
+}
+
+// snapshotSortTime picks the best available timestamp for ordering: a
+// completed snapshot sorts by completion, an in-progress one by start.
+func snapshotSortTime(v SnapshotView) time.Time {
+	if v.CompletionTime != nil {
+		return *v.CompletionTime
+	}
+	if v.StartTime != nil {
+		return *v.StartTime
+	}
+	return time.Time{}
 }
 
 // fetchClusterEvents lists Events involving the KividbCluster object

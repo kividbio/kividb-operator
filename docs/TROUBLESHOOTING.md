@@ -7,7 +7,7 @@ diagnosis:
 kubectl get kividbcluster my-cluster -o yaml
 kubectl describe kividbcluster my-cluster   # shows Conditions + recent Events
 kubectl get pods -l kividb.io/cluster=my-cluster -o wide --show-labels
-kubectl logs deploy/kividb-operator-controller-manager -n kividb-operator-system
+kubectl logs deploy/kividb-operator-manager -n kividb-operator-system
 ```
 
 ## Cluster stuck in `Provisioning`
@@ -31,9 +31,9 @@ Common culprits:
   kubectl exec my-cluster-0 -c agent -- wget -qO- http://localhost:8081/readyz
   ```
 
-  If that fails with an auth error, your `spec.auth` password Secret and
-  the agent's `KIVIDB_AUTH_PASSWORD` env var have drifted — see the ACL
-  section below.
+  If that fails with an auth error, your `KividbAclConfig`'s password
+  Secret and the agent's `KIVIDB_AUTH_PASSWORD` env var have drifted —
+  see the ACL section below.
 
 **Cause: no ready pod yet to elect as master.** This is expected and
 self-heals: until at least one pod is Ready, the controller logs (and
@@ -48,7 +48,7 @@ Check whether the operator can actually reach pod agents over the network
 (NetworkPolicy misconfiguration is the usual cause here):
 
 ```bash
-kubectl exec -n kividb-operator-system deploy/kividb-operator-controller-manager -- \
+kubectl exec -n kividb-operator-system deploy/kividb-operator-manager -- \
   wget -qO- http://<pod-ip>:8081/status
 ```
 
@@ -76,26 +76,36 @@ to port 8081 on kividb pods — allow it explicitly.
 ```bash
 kubectl get jobs -l kividb.io/cluster=my-cluster
 kubectl logs job/<latest-job-name>
-kubectl get kividbcluster my-cluster -o jsonpath='{.status.backup.lastError}'
+kubectl get kdbs -l kividb.io/cluster=my-cluster --sort-by=.status.startTime
+kubectl get kdbs <latest-snapshot-name> -o jsonpath='{.status.error}'
 ```
 
 Common errors and what they mean:
 
 | Error contains | Likely cause |
 |---|---|
-| `connection refused` / `no such host` | Master Service DNS wrong, or no pod currently holds the master label (check `status.masterPod`) |
+| `connection refused` / `no such host` | The target Service (master or replica, per the `KividbSnapshotConfig`'s `spec.source`) has no matching pod right now — check `status.masterPod` on the `KividbCluster`, or that `spec.replicas >= 1` if `source: replica` |
 | `AccessDenied` / `SignatureDoesNotMatch` | Wrong S3 credentials, or wrong `region`/`endpoint` combination |
-| `bucket does not exist` | `spec.backup.s3.bucket` typo, or bucket not created ahead of time (the operator never creates buckets) |
-| `timed out waiting for BGSAVE` | Data set too large for the default 5-minute save window, or disk I/O contention — check `spec.resources` and node disk pressure |
+| `bucket does not exist` | `KividbSnapshotConfig`'s `spec.s3.bucket` typo, or bucket not created ahead of time (the operator never creates buckets) |
+| `timed out waiting for BGSAVE` | Data set too large for `spec.timeoutSeconds`, or disk I/O contention — check `spec.resources` and node disk pressure |
 | `no persistence files found` | Neither `dump.kdb` nor `appendonly.aof` exists yet on a brand-new, still-empty cluster — expected on the very first backup of an empty database; write some data first if this is unexpected |
+
+If no `KividbSnapshot` object was created at all for a run you know
+happened, check that the CronJob's pod actually completed (even a
+crashed/OOMKilled pod should still leave a Job the controller can read a
+termination message from) — a `KividbSnapshot` only fails to appear if
+the controller itself couldn't reach the Job/pod objects, which usually
+means an RBAC or API-server connectivity problem with the operator
+itself, not the backup Job.
 
 See [BACKUP_RESTORE.md](BACKUP_RESTORE.md) for how to trigger a manual
 backup while debugging.
 
 ## ACL / authentication errors (`NOAUTH`, `WRONGPASS`)
 
-The operator renders `spec.auth` into the `<cluster>-auth` Secret
-(`users.acl` key) every reconcile. If you rotate a password:
+The operator renders the referenced `KividbAclConfig` into the
+`<cluster>-auth` Secret (`users.acl` key) every reconcile. If you rotate
+a password:
 
 1. Update the Secret your `passwordSecretRef` points at.
 2. The operator will notice on its next reconcile (it re-resolves every
@@ -117,8 +127,31 @@ If the **agent itself** can't authenticate to kividb (visible as
 `/readyz`/`/status` calls failing with an auth error in agent logs), check
 that `KIVIDB_AUTH_PASSWORD` on the `agent` container matches the
 **default** user's current password — see
-[CONFIGURATION.md](CONFIGURATION.md#auth--requirepass-and-acl-users) for
-how the default user's password is derived.
+[CONFIGURATION.md](CONFIGURATION.md#kividbaclconfig) for how the default
+user's password is derived.
+
+**If a user can run a command you configured a negative `commandRules`
+entry to block** (e.g. `-flushall` didn't stop `FLUSHALL`): this is not a
+Secret/rendering problem. Live testing has confirmed kividb currently
+accepts and correctly echoes back negative command rules via
+`ACL GETUSER` without enforcing them — see
+[ROADMAP.md](ROADMAP.md#known-upstream-kividb-issues-confirmed-by-live-testing-2026-07-23).
+Nothing on the operator side to fix here today.
+
+## TLS: nothing is listening on `spec.tls.port`
+
+As of kividb v1.0.2, this is expected — not a configuration mistake.
+Live testing (inspecting `/proc/net/tcp` inside a running `-tls`/`-full`
+variant container) confirms the TLS listener never comes up, regardless
+of whether the settings arrive via `kividb.conf` or the equivalent CLI
+flags (the operator sends both). There is currently no `KividbConfig`/
+`KividbCluster` change that works around this — it needs a kividb-side
+fix. See
+[ROADMAP.md](ROADMAP.md#known-upstream-kividb-issues-confirmed-by-live-testing-2026-07-23).
+Double-check you're not chasing a Secret/mount problem instead: `kubectl
+exec <pod> -c kividb -- ls -la /etc/kividb/tls` should show `tls.crt`/
+`tls.key` symlinks resolving correctly even though the listener itself
+won't be up.
 
 ## Storage: PVC won't resize after changing `spec.storage.size`
 
@@ -141,19 +174,27 @@ larger PVCs and restore from backup (see BACKUP_RESTORE.md) instead.
 ## The operator pod itself won't start
 
 ```bash
-kubectl logs -n kividb-operator-system deploy/kividb-operator-controller-manager
+kubectl logs -n kividb-operator-system deploy/kividb-operator-manager
 ```
 
 - `leader election lost` / repeated restarts with leader-election errors
   — check that the `coordination.k8s.io` `leases` RBAC
   (`config/rbac/leader_election_role.yaml`) is bound in the same
   namespace the operator runs in.
-- `no matches for kind "KividbCluster"` — the CRD isn't installed; run
-  `kubectl apply -k config/crd` or reinstall/upgrade the Helm chart (CRDs
-  in `charts/kividb-operator/crds/` are installed once by Helm and are
+- `no matches for kind "KividbCluster"` (or `KividbConfig`/
+  `KividbAclConfig`/`KividbSnapshotConfig`/`KividbSnapshot`) — that CRD
+  isn't installed; run `kubectl apply -k config/crd` (installs all five)
+  or reinstall/upgrade the Helm chart (CRDs in
+  `charts/kividb-operator/crds/` are installed once by Helm and are
   **not** upgraded automatically on `helm upgrade` — see
   [RELEASING.md](RELEASING.md) and [INSTALL.md](INSTALL.md) for the
   manual CRD-upgrade step).
+- `KividbCluster ... configRef/aclConfigRef/snapshotConfigRef` reconcile
+  error naming a resource that doesn't exist — the referenced
+  `KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig` object was
+  never created, or was created in a different namespace (references are
+  same-namespace only). `kubectl get kdbc,kdbacl,kdbsc -n <namespace>` to
+  check what actually exists.
 
 ## Still stuck?
 

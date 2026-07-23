@@ -1,0 +1,23 @@
+# Reusable kividb.conf directive set, referenced by kividb-full's
+# spec.configRef. Create this before the KividbCluster that references it.
+apiVersion: kividb.io/v1alpha1
+kind: KividbConfig
+metadata:
+  name: kividb-full-config
+  namespace: default
+spec:
+  directives:
+    maxmemory: "1gb"
+    maxmemory-policy: "allkeys-lru"
+    threads: "4"
+    aof: "yes"
+    loglevel: "notice"
+    notify-keyspace-events: "KEA"
+    slowlog-log-slower-than: "10000"
+    # Do not set "replicaof", "port" or "aclfile" here -- the operator
+    # manages those directives itself.
+  # TLS is left disabled in this sample; see
+  # kividb.io_v1alpha1_kividbconfig_tls.yaml for a TLS-enabled example
+  # (pairs with a KividbCluster whose spec.variant is "tls" or "full").
+  tls:
+    enabled: false

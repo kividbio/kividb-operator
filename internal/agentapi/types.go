@@ -49,6 +49,25 @@ type BackupResponse struct {
 	SizeBytes   int64  `json:"sizeBytes"`
 	DurationMs  int64  `json:"durationMs"`
 	PrunedCount int    `json:"prunedCount"`
+	// SourcePod/SourceRole identify which pod actually performed the
+	// backup (the agent's own POD_NAME and its role at the time) -- the
+	// backup-trigger client that called this endpoint only knows a
+	// Service name, not which pod handled the request.
+	SourcePod  string `json:"sourcePod,omitempty"`
+	SourceRole Role   `json:"sourceRole,omitempty"`
+}
+
+// BackupResult is written by `agent backup-trigger` as JSON to its own
+// container's termination message (see cmd/agent/backup_trigger.go and
+// the default terminationMessagePath, /dev/termination-log) so the
+// controller can populate a KividbSnapshot's status from
+// pod.status.containerStatuses[].state.terminated.message without
+// scraping logs. Mirrors BackupResponse on success; carries Error instead
+// on failure.
+type BackupResult struct {
+	Success bool `json:"success"`
+	BackupResponse
+	Error string `json:"error,omitempty"`
 }
 
 // OKResponse is returned by simple actions that have no extra payload.

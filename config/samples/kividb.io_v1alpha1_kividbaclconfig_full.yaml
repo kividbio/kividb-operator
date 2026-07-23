@@ -1,0 +1,39 @@
+# Reusable ACL user set, referenced by kividb-full's spec.aclConfigRef.
+# Prerequisites: apply kividb.io_v1alpha1_kividbcluster_full-secrets.yaml
+# (or otherwise create Secrets with the same names/keys) first -- this
+# object references passwords by Secret, never inline.
+apiVersion: kividb.io/v1alpha1
+kind: KividbAclConfig
+metadata:
+  name: kividb-full-acl
+  namespace: default
+spec:
+  users:
+    - name: default
+      enabled: true
+      passwordSecretRef:
+        name: kividb-full-user-passwords
+        key: default-password
+      keyPatterns:
+        - "~*"
+      channelPatterns:
+        - "&*"
+      commandRules:
+        - "+@all"
+    - name: app
+      enabled: true
+      passwordSecretRef:
+        name: kividb-full-user-passwords
+        key: app-password
+      # Restricted to only this application's key/channel namespace.
+      keyPatterns:
+        - "~app:*"
+        - "~session:*"
+      channelPatterns:
+        - "&app:*"
+      commandRules:
+        - "+@all"
+        - "-flushall"
+        - "-flushdb"
+        - "-config"
+        - "-shutdown"
