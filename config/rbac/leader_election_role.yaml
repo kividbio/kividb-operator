@@ -1,0 +1,34 @@
+# Namespaced Role granting only what leader election needs
+# (LeaderElectionID: "kividb-operator-leader.kividb.io" in main.go, via
+# controller-runtime's coordination.k8s.io Lease-based leader election).
+# Kept separate from the cluster-wide data-plane role.yaml so the blast
+# radius of a leader-election bug (or a namespace-scoped install) never
+# extends to the manager's real data-plane permissions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kividb-operator-leader-election-role
+  namespace: kividb-operator-system
+  labels:
+    app.kubernetes.io/name: kividb-operator
+    app.kubernetes.io/managed-by: kividb-operator
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch

@@ -1,0 +1,20 @@
+{{- if .Values.gui.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kividb-operator.gui.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kividb-operator.gui.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gui
+spec:
+  type: {{ .Values.gui.service.type }}
+  selector:
+    {{- include "kividb-operator.gui.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: gui
+  ports:
+    - name: http
+      port: {{ .Values.gui.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

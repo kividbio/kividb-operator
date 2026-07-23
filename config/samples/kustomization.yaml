@@ -1,0 +1,5 @@
+resources:
+  - kividb.io_v1alpha1_kividbcluster_minimal.yaml
+  - kividb.io_v1alpha1_kividbcluster_full-secrets.yaml
+  - kividb.io_v1alpha1_kividbcluster_full.yaml
+  - kividb.io_v1alpha1_kividbcluster_dev-minio.yaml

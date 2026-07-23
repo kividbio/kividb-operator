@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kividb-operator-gui
+  namespace: kividb-operator-system
+  labels:
+    app.kubernetes.io/name: kividb-operator-gui
+    app.kubernetes.io/component: gui
+    app.kubernetes.io/part-of: kividb-operator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kividb-operator-gui
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http

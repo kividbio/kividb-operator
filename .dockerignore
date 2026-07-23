@@ -1,0 +1,35 @@
+# Version control
+.git/
+.gitignore
+
+# Build output
+bin/
+*.exe
+*.test
+cover.out
+cover.html
+
+# Docs -- not needed in any image, and the internal spec is explicitly
+# not meant to ship anywhere.
+docs/
+*.md
+!LICENSE
+
+# IDE / OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Helm chart / kustomize manifests are applied via kubectl/helm, never
+# baked into an image.
+charts/
+config/
+
+# CI
+.github/
+
+# Local scratch
+tmp/
+.env

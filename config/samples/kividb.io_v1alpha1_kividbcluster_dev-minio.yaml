@@ -1,0 +1,84 @@
+# Docker Desktop / kind-friendly example: a small single-master,
+# single-replica cluster with backups pointed at a local, in-cluster MinIO
+# (e.g. installed via `helm install minio minio/minio` or the MinIO
+# Kubernetes manifests, in the same "default" namespace, exposing a
+# ClusterIP Service named "minio" on port 9000). No LoadBalancer, no
+# tolerations/nodeSelector, and a small PVC size so it fits comfortably on
+# a laptop's default storage class (Docker Desktop's "hostpath" / kind's
+# "standard" provisioner).
+#
+# Quick local MinIO for testing this sample (skip if you already have one):
+#
+#   kubectl create deployment minio --image=minio/minio -- server /data --console-address :9001
+#   kubectl set env deployment/minio MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin123
+#   kubectl expose deployment minio --port=9000 --target-port=9000 --name=minio
+#   kubectl exec deploy/minio -- mc mb /data/kividb-dev-backups   # or use the MinIO console to create the bucket
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kividb-dev-s3-credentials
+  namespace: default
+  labels:
+    app.kubernetes.io/name: kividb
+    app.kubernetes.io/instance: kividb-dev
+type: Opaque
+stringData:
+  accessKeyId: "minioadmin"
+  secretAccessKey: "minioadmin123"
+---
+apiVersion: kividb.io/v1alpha1
+kind: KividbCluster
+metadata:
+  name: kividb-dev
+  namespace: default
+spec:
+  replicas: 1 # 1 master + 1 replica = 2 pods total
+  image: quay.io/kividbio/kividb:v1.0.2
+  imagePullPolicy: IfNotPresent
+  port: 6380
+
+  kividbConfig:
+    maxmemory: "256mb"
+    loglevel: "notice"
+
+  storage:
+    size: 1Gi
+    accessModes:
+      - ReadWriteOnce
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  services:
+    master:
+      type: ClusterIP
+    replicas:
+      type: ClusterIP
+
+  backup:
+    enabled: true
+    schedule: "*/30 * * * *" # every 30 minutes, for quick local testing
+    retention: 5
+    timeoutSeconds: 120
+    s3:
+      endpoint: "http://minio.default.svc.cluster.local:9000"
+      bucket: "kividb-dev-backups"
+      region: "us-east-1"
+      pathPrefix: "dev"
+      forcePathStyle: true
+      insecureSkipTLSVerify: true # local MinIO over plain HTTP
+      credentialsSecretRef:
+        name: kividb-dev-s3-credentials
+
+  monitoring:
+    enabled: true
+    serviceMonitor: false # most local kind/Docker Desktop setups don't have Prometheus Operator installed
+
+  failover:
+    enabled: true
+    unhealthyThresholdSeconds: 20

@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+#
+# Builds the read-only kividb-operator GUI (cmd/gui) as a single static Go
+# binary. The final image ships no shell, no package manager, and no Node
+# toolchain -- the HTML/CSS/JS under cmd/gui/static/ are embedded into the
+# binary at build time (see cmd/gui/main.go's //go:embed directive), so
+# there is nothing else to copy into the runtime stage.
+
+# ── Stage 1: build ───────────────────────────────────────────────────────────
+FROM golang:1.23-bookworm AS builder
+
+WORKDIR /build
+
+# Cache module downloads separately from source so `go build` is only
+# re-run when go.mod/go.sum change, not on every source edit. go.sum does
+# not exist yet in this repo (see docs/_internal-spec.md) -- the wildcard
+# keeps this COPY working once CI runs `go mod tidy` and commits one.
+COPY go.mod go.sum* ./
+RUN go mod download
+
+COPY api ./api
+COPY internal ./internal
+COPY cmd ./cmd
+
+# CGO_ENABLED=0 + the static-debian12 base below is what lets this run
+# without a libc in the runtime image at all.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/kividb-operator-gui ./cmd/gui
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+FROM gcr.io/distroless/static-debian12:nonroot
+
+# distroless's :nonroot tag already runs as an unprivileged, shell-less user
+# (uid/gid 65532) -- no useradd step is possible (or needed) in this base.
+# Use the numeric UID:GID explicitly (not the "nonroot" name): Kubernetes'
+# runAsNonRoot pod security check can only verify a numeric UID from the
+# image config without resolving /etc/passwd, so a symbolic USER here makes
+# kubelet refuse to start the container ("cannot verify user is non-root")
+# under any pod that sets runAsNonRoot: true -- as this chart's Deployment does.
+USER 65532:65532
+
+COPY --from=builder /out/kividb-operator-gui /usr/local/bin/kividb-operator-gui
+
+EXPOSE 8090
+
+ENTRYPOINT ["/usr/local/bin/kividb-operator-gui"]

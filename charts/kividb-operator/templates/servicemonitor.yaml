@@ -1,0 +1,44 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+# Scrapes two metrics sources across every KividbCluster pod in the
+# cluster, both via the per-cluster headless Service "<name>-headless"
+# (the only Service with per-pod, not load-balanced, endpoints -- the
+# master/replica Services select by role and would only ever surface one
+# pod's metrics each). Selects by app.kubernetes.io/name: kividb (the
+# label every KividbCluster-managed object carries, per
+# internal/controller/names.go). Requires the Prometheus Operator CRDs
+# (monitoring.coreos.com) to be installed.
+#
+#   - "agent" port (8081): the agent sidecar's own lightweight /metrics,
+#     always present regardless of any KividbCluster's own
+#     spec.monitoring setting.
+#   - "metrics" port (9121): oliver006/redis_exporter's richer, Redis
+#     ecosystem-standard metric set (compatible with common Grafana Redis
+#     dashboards). Only exists on pods belonging to a KividbCluster with
+#     spec.monitoring.enabled: true -- Prometheus simply finds no target
+#     for this endpoint on any other cluster's pods.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "kividb-operator.fullname" . }}-kividb-clusters
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kividb-operator.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kividb
+  endpoints:
+    - port: agent
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}

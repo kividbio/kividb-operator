@@ -1,0 +1,15 @@
+# Smallest valid KividbCluster: only the two required spec fields
+# (spec.image, spec.storage.size) are set. Everything else takes the CRD's
+# defaults: replicas=2 (i.e. 1 master + 2 replicas = 3 pods total), port
+# 6380, requirepass/ACL disabled (no auth at all -- fine for a scratch/dev
+# cluster, not for anything reachable outside a trusted network), no
+# backups, no monitoring, automatic failover enabled.
+apiVersion: kividb.io/v1alpha1
+kind: KividbCluster
+metadata:
+  name: kividb-minimal
+  namespace: default
+spec:
+  image: quay.io/kividbio/kividb:v1.0.2
+  storage:
+    size: 5Gi

@@ -1,0 +1,26 @@
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+cover.out
+cover.html
+
+# Go
+/vendor/
+
+# Helm
+charts/*/charts/
+charts/*/*.tgz
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local dev
+.env
+kubeconfig*
+*.local.yaml

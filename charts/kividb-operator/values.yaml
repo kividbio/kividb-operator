@@ -1,0 +1,189 @@
+# Default values for kividb-operator.
+# This is a YAML-formatted file. See values.schema.json (none shipped yet)
+# and the field comments below for guidance.
+
+# nameOverride / fullnameOverride behave like the standard helm create
+# scaffolding (see templates/_helpers.tpl).
+nameOverride: ""
+fullnameOverride: ""
+
+# namespace is informational only when installing with `helm install -n
+# <namespace>` (Helm always uses the -n/--namespace flag or current
+# context as the actual install namespace); it is not consumed by any
+# template directly.
+namespace: kividb-operator-system
+
+# watchNamespace, if set, is passed to the manager as an env var
+# (WATCH_NAMESPACE) so a future namespace-scoped build of main.go can
+# restrict its cache/informers to a single namespace. The manager as
+# currently written watches all namespaces unconditionally; leave this
+# empty ("") for that default cluster-wide behavior.
+watchNamespace: ""
+
+crds:
+  # install controls whether this chart's crds/ directory is installed.
+  # Per Helm convention, CRDs in crds/ are installed once on `helm install`
+  # and are NEVER upgraded or deleted automatically by `helm upgrade` /
+  # `helm uninstall` -- this flag only gates whether Helm attempts the
+  # initial install. To upgrade the CRD itself later, apply it manually:
+  #   kubectl apply -f charts/kividb-operator/crds/kividb.io_kividbclusters.yaml
+  install: true
+
+rbac:
+  # create controls whether ClusterRole/ClusterRoleBinding/Role/RoleBinding
+  # objects are created for the manager and (if gui.enabled) the GUI.
+  create: true
+
+serviceAccount:
+  create: true
+  # name overrides the generated ServiceAccount name for the manager.
+  # Defaults to the chart fullname if empty.
+  name: ""
+  annotations: {}
+
+leaderElection:
+  # enabled toggles the manager's --leader-elect flag. Only matters when
+  # manager.replicaCount > 1, but safe to leave on always.
+  enabled: true
+
+# -----------------------------------------------------------------------
+# Operator manager (main.go / Dockerfile)
+# -----------------------------------------------------------------------
+manager:
+  replicaCount: 1
+
+  image:
+    repository: quay.io/kividbio/kividb-operator
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # metricsBindAddress / healthProbeBindAddress mirror main.go's flag
+  # defaults; only override if you need non-default ports.
+  metricsBindAddress: ":8080"
+  healthProbeBindAddress: ":8081"
+
+  # agentTimeout is passed as --agent-timeout to the manager (per-call
+  # timeout when the controller talks to a pod's agent sidecar HTTP API).
+  agentTimeout: "5s"
+
+  podAnnotations: {}
+  podLabels: {}
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+
+  # nodeSelector/tolerations/affinity here apply ONLY to the operator's own
+  # Deployment pod -- they have nothing to do with the nodeSelector/
+  # tolerations/affinity fields on a KividbCluster spec, which place the
+  # *database* pods and are configured per-cluster on the CR itself.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -----------------------------------------------------------------------
+# Agent sidecar image (built by every KividbCluster's StatefulSet, not run
+# by this chart directly -- listed here purely so its repository/tag can
+# be overridden cluster-wide as the default `spec.agentImage` value; the
+# chart does not currently template this into the CRD, since agentImage is
+# a per-KividbCluster spec field, not an operator deployment concern. It is
+# provided for documentation/consistency and for future use by
+# `--set agent.image.tag=...`-style automation that pre-populates sample
+# manifests.)
+# -----------------------------------------------------------------------
+agent:
+  image:
+    repository: quay.io/kividbio/kividb-operator-agent
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+# -----------------------------------------------------------------------
+# redis_exporter sidecar image (added by every KividbCluster's StatefulSet
+# only when that cluster's spec.monitoring.enabled is true -- not run by
+# this chart directly). Same informational-only role as `agent:` above:
+# lets the default `spec.exporterImage` be overridden cluster-wide without
+# templating it into the CRD, since it's a per-KividbCluster spec field.
+# -----------------------------------------------------------------------
+exporter:
+  image:
+    repository: oliver006/redis_exporter
+    tag: "v1.66.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+# -----------------------------------------------------------------------
+# Read-only web GUI (cmd/gui, Dockerfile.gui) -- optional Deployment with
+# its own narrow, secrets-free RBAC. Contract frozen in docs/_internal-spec.md:
+# port 8090, get/list/watch only on kividbclusters/pods/statefulsets/
+# cronjobs/services, never secrets.
+# -----------------------------------------------------------------------
+gui:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: quay.io/kividbio/kividb-operator-gui
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8090
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+  podAnnotations: {}
+  podLabels: {}
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -----------------------------------------------------------------------
+# Metrics / Prometheus Operator integration
+# -----------------------------------------------------------------------
+metrics:
+  serviceMonitor:
+    # enabled creates a ServiceMonitor scraping /metrics on port 8081
+    # (AgentPort) across every KividbCluster pod cluster-wide, selecting on
+    # app.kubernetes.io/name: kividb. Requires the monitoring.coreos.com
+    # CRDs (Prometheus Operator) to already be installed. This is
+    # independent of any individual KividbCluster's spec.monitoring field
+    # -- that field controls whether the agent's /metrics endpoint is
+    # exposed and documented as scrape-able per cluster; this chart-level
+    # ServiceMonitor is the actual Prometheus Operator wiring.
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+imagePullSecrets: []

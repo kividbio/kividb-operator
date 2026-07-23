@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KiviDB Clusters</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="dashboard">
+<header class="topbar">
+  <h1>KiviDB Clusters</h1>
+  <div class="topbar-meta">
+    <span id="refresh-indicator" class="muted">loading&hellip;</span>
+  </div>
+</header>
+
+<main>
+  <div id="error-banner" class="banner error hidden"></div>
+
+  <table class="cluster-table">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Namespace</th>
+        <th>Phase</th>
+        <th>Master pod</th>
+        <th>Pods ready</th>
+        <th>Backup last success</th>
+        <th>Age</th>
+      </tr>
+    </thead>
+    <tbody id="clusters-tbody">
+      <tr><td colspan="7" class="muted">Loading clusters&hellip;</td></tr>
+    </tbody>
+  </table>
+
+  <p id="empty-state" class="muted hidden">No KividbCluster objects found.</p>
+</main>
+
+<footer>
+  <span class="muted">Read-only view. Auto-refreshes every 10s. No Secrets are ever read by this GUI.</span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

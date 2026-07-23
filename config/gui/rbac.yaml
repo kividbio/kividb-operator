@@ -1,0 +1,64 @@
+# RBAC for the read-only kividb-operator GUI (cmd/gui). This is deliberately
+# a *separate*, much narrower identity from the operator manager's own
+# ClusterRole (config/rbac/role.yaml) -- do not bind the GUI's
+# ServiceAccount to that role, and do not add "secrets" to this one.
+#
+# The GUI's Go code (cmd/gui/data.go) only ever calls Get/List against:
+#   - kividbclusters.kividb.io   (its own CRD)
+#   - pods                       (core)
+#   - services                   (core)
+#   - events                     (core)
+#   - statefulsets.apps
+#   - cronjobs.batch
+# It never calls Watch (it polls every 10s instead of maintaining a
+# long-lived watch/informer), and it never touches secrets in any group.
+# "watch" is still granted below since it's a harmless superset and keeps
+# this ClusterRole reusable if a future version adds live streaming.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kividb-operator-gui
+  namespace: kividb-operator-system
+  labels:
+    app.kubernetes.io/name: kividb-operator-gui
+    app.kubernetes.io/component: gui
+    app.kubernetes.io/part-of: kividb-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kividb-operator-gui
+  labels:
+    app.kubernetes.io/name: kividb-operator-gui
+    app.kubernetes.io/component: gui
+    app.kubernetes.io/part-of: kividb-operator
+rules:
+  - apiGroups: ["kividb.io"]
+    resources: ["kividbclusters"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kividb-operator-gui
+  labels:
+    app.kubernetes.io/name: kividb-operator-gui
+    app.kubernetes.io/component: gui
+    app.kubernetes.io/part-of: kividb-operator
+subjects:
+  - kind: ServiceAccount
+    name: kividb-operator-gui
+    namespace: kividb-operator-system
+roleRef:
+  kind: ClusterRole
+  name: kividb-operator-gui
+  apiGroup: rbac.authorization.k8s.io

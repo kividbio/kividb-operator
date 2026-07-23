@@ -1,0 +1,20 @@
+# Standard kubebuilder config/default: composes the CRDs, RBAC and manager
+# Deployment under a shared namespace so `kubectl apply -k config/default`
+# installs a complete, self-contained operator deployment.
+#
+# Note: unlike a freshly kubebuilder-scaffolded project, the object names
+# under ../rbac and ../manager are already fully qualified (e.g.
+# "kividb-operator-manager-role", "kividb-operator-manager") rather than
+# short names like "manager-role" meant to be prefixed here -- so this
+# kustomization deliberately does NOT set namePrefix, to avoid double-
+# prefixing them.
+namespace: kividb-operator-system
+
+commonLabels:
+  app.kubernetes.io/name: kividb-operator
+  app.kubernetes.io/managed-by: kividb-operator
+
+resources:
+  - ../crd
+  - ../rbac
+  - ../manager

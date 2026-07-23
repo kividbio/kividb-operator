@@ -1,0 +1,100 @@
+{{- if .Values.rbac.create }}
+# Mirrors config/rbac/role.yaml exactly -- see the //+kubebuilder:rbac
+# markers on KividbClusterReconciler in
+# internal/controller/kividbcluster_controller.go for the source of truth.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kividb-operator.clusterRoleName" . }}
+  labels:
+    {{- include "kividb-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - kividb.io
+    resources:
+      - kividbclusters
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - kividb.io
+    resources:
+      - kividbclusters/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - kividb.io
+    resources:
+      - kividbclusters/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - batch
+    resources:
+      - cronjobs
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - configmaps
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+{{- end }}

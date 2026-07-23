@@ -1,0 +1,194 @@
+name: Release
+
+# Triggered by pushing a tag matching v<semver>, e.g. v0.1.0. Release
+# checklist (see docs/RELEASING.md once written):
+#   1. Bump VERSION and charts/kividb-operator/Chart.yaml (version AND
+#      appVersion) to the same new version.
+#   2. Update CHANGELOG.md with a new "## [x.y.z] - YYYY-MM-DD" section.
+#   3. Commit, merge to main.
+#   4. `git tag vx.y.z && git push origin vx.y.z` -- this workflow does
+#      the rest: builds+pushes all three images tagged both `vx.y.z` and
+#      `latest`, packages+pushes the Helm chart as an OCI artifact, and
+#      creates a GitHub Release with notes pulled from CHANGELOG.md and the
+#      packaged chart .tgz attached.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  REGISTRY: quay.io
+  IMAGE_NAMESPACE: kividbio
+
+jobs:
+  version-check:
+    name: Verify tag matches VERSION/Chart.yaml
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute and cross-check version
+        id: v
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          file_version="$(cat VERSION | tr -d '[:space:]')"
+          chart_version="$(grep '^version:' charts/kividb-operator/Chart.yaml | awk '{print $2}')"
+          chart_app_version="$(grep '^appVersion:' charts/kividb-operator/Chart.yaml | tr -d '\"' | awk '{print $2}')"
+          echo "tag=$tag VERSION=$file_version chart.version=$chart_version chart.appVersion=$chart_app_version"
+          if [ "$tag" != "$file_version" ] || [ "$tag" != "$chart_version" ] || [ "$tag" != "$chart_app_version" ]; then
+            echo "::error::Tag v$tag does not match VERSION ($file_version) / Chart.yaml version ($chart_version) / appVersion ($chart_app_version). Bump them together before tagging."
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  images:
+    name: Build and push images
+    needs: version-check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: manager
+            image: kividb-operator
+            dockerfile: Dockerfile
+          - name: agent
+            image: kividb-operator-agent
+            dockerfile: Dockerfile.agent
+          - name: gui
+            image: kividb-operator-gui
+            dockerfile: Dockerfile.gui
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Dockerfile exists
+        id: check
+        run: |
+          if [ -f "${{ matrix.dockerfile }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::${{ matrix.dockerfile }} not found, skipping ${{ matrix.image }}"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.present == 'true'
+
+      - name: Log in to Quay.io
+        if: steps.check.outputs.present == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Build and push
+        if: steps.check.outputs.present == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ needs.version-check.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:latest
+
+  chart:
+    name: Package and push Helm chart
+    needs: version-check
+    runs-on: ubuntu-latest
+    outputs:
+      chart_path: ${{ steps.package.outputs.chart_path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: helm lint
+        run: helm lint charts/kividb-operator
+
+      - name: Log in to Quay.io (OCI registry)
+        run: echo "${{ secrets.QUAY_PASSWORD }}" | helm registry login ${{ env.REGISTRY }} -u ${{ secrets.QUAY_USERNAME }} --password-stdin
+
+      - name: Package chart
+        id: package
+        run: |
+          mkdir -p dist
+          helm package charts/kividb-operator --destination dist/
+          chart_path="$(ls dist/kividb-operator-chart-*.tgz)"
+          echo "chart_path=$chart_path" >> "$GITHUB_OUTPUT"
+
+      # Pushes to quay.io/kividbio/kividb-operator-chart -- a flat, 2-segment
+      # path distinct from the quay.io/kividbio/kividb-operator *image* repo
+      # above, so the chart OCI artifact and the manager image never collide
+      # tag-for-tag in the same repository. Chart.yaml's "name" field is
+      # "kividb-operator-chart" specifically so helm push (which always
+      # appends Chart.yaml's name as the final path segment, with no way to
+      # override it) lands here; this does not affect any deployed object's
+      # name (see charts/kividb-operator/templates/_helpers.tpl). An earlier
+      # nested-path attempt (.../charts/kividb-operator) failed live with a
+      # 401 on the first real release -- likely just needed the kivipusher
+      # robot account granted write on the newly-created repo (the same
+      # manual step the three image repos needed the first time they were
+      # pushed), but flattening the path sidesteps the question entirely.
+      - name: Push chart as OCI artifact
+        run: helm push "${{ steps.package.outputs.chart_path }}" oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}
+
+      - name: Upload packaged chart artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: dist/*.tgz
+
+  github-release:
+    name: Create GitHub Release
+    needs: [version-check, images, chart]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download packaged chart
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          path: dist
+
+      - name: Extract changelog section for this version
+        id: changelog
+        run: |
+          version="${{ needs.version-check.outputs.version }}"
+          if [ -f CHANGELOG.md ]; then
+            notes="$(awk -v ver="$version" '
+              BEGIN { found=0 }
+              /^## \[/ {
+                if (found) exit
+                if (index($0, "[" ver "]") > 0) { found=1; next }
+                next
+              }
+              found { print }
+            ' CHANGELOG.md)"
+          else
+            notes=""
+          fi
+          if [ -z "$notes" ]; then
+            notes="No changelog entry found for $version in CHANGELOG.md."
+          fi
+          # GITHUB_OUTPUT multi-line value.
+          {
+            echo "notes<<CHANGELOG_EOF"
+            echo "$notes"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: kividb-operator ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.notes }}
+          files: dist/*.tgz

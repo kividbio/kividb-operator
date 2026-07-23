@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KiviDB Cluster</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="detail">
+<header class="topbar">
+  <h1><a href="/" class="back-link">&larr; Clusters</a> / <span id="cluster-title">&hellip;</span></h1>
+  <div class="topbar-meta">
+    <span id="phase-badge" class="badge">&hellip;</span>
+    <span id="refresh-indicator" class="muted">loading&hellip;</span>
+  </div>
+</header>
+
+<main>
+  <div id="error-banner" class="banner error hidden"></div>
+
+  <section class="grid">
+    <div class="card">
+      <h2>Spec summary</h2>
+      <dl id="spec-summary" class="kv"></dl>
+    </div>
+
+    <div class="card">
+      <h2>Status</h2>
+      <dl id="status-summary" class="kv"></dl>
+    </div>
+
+    <div class="card">
+      <h2>Backup</h2>
+      <dl id="backup-summary" class="kv"></dl>
+    </div>
+
+    <div class="card">
+      <h2>Services</h2>
+      <table class="mini-table" id="services-table">
+        <thead><tr><th>Name</th><th>Type</th><th>ClusterIP</th><th>External</th><th>Ports</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Pods</h2>
+    <table class="wide-table" id="pods-table">
+      <thead>
+        <tr>
+          <th>Name</th><th>Role</th><th>Ready</th><th>Phase</th>
+          <th>Replication offset</th><th>Node</th><th>Restarts</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Conditions</h2>
+    <table class="wide-table" id="conditions-table">
+      <thead><tr><th>Type</th><th>Status</th><th>Reason</th><th>Message</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Recent events</h2>
+    <table class="wide-table" id="events-table">
+      <thead><tr><th>Last seen</th><th>Type</th><th>Reason</th><th>Count</th><th>Message</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<footer>
+  <span class="muted">Read-only view. Auto-refreshes every 10s. No Secrets are ever read by this GUI.</span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,105 @@
+# ClusterRole for the kividb-operator manager (data-plane RBAC).
+#
+# Mirrors the //+kubebuilder:rbac markers on KividbClusterReconciler in
+# internal/controller/kividbcluster_controller.go exactly. Leader-election
+# RBAC (coordination.k8s.io leases) is intentionally kept out of this
+# ClusterRole and lives instead in the namespaced Role/RoleBinding pair in
+# leader_election_role.yaml / leader_election_role_binding.yaml, following
+# the standard kubebuilder split between cluster-wide data-plane
+# permissions and namespace-scoped leader-election permissions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kividb-operator-manager-role
+  labels:
+    app.kubernetes.io/name: kividb-operator
+    app.kubernetes.io/managed-by: kividb-operator
+rules:
+  - apiGroups:
+      - kividb.io
+    resources:
+      - kividbclusters
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - kividb.io
+    resources:
+      - kividbclusters/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - kividb.io
+    resources:
+      - kividbclusters/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - batch
+    resources:
+      - cronjobs
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - configmaps
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch

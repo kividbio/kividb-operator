@@ -1,0 +1,291 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kividbclusters.kividb.io
+  labels:
+    app.kubernetes.io/name: kividb-operator
+    app.kubernetes.io/managed-by: kividb-operator
+spec:
+  group: kividb.io
+  names:
+    kind: KividbCluster
+    listKind: KividbClusterList
+    plural: kividbclusters
+    singular: kividbcluster
+    shortNames:
+      - kdb
+      - kdbc
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Master
+          type: string
+          jsonPath: .status.masterPod
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            KividbCluster describes a single-master, N-replica KiviDB
+            (Redis-compatible) cluster: its configuration, ACL users,
+            storage, scheduling constraints, exposed Services, scheduled S3
+            backups, monitoring and failover behavior.
+          required: [spec]
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required: [image, storage]
+              properties:
+                replicas:
+                  type: integer
+                  minimum: 0
+                  default: 2
+                  description: Number of replica pods in addition to the single master. Total pods = replicas+1.
+                image:
+                  type: string
+                  description: 'kividb container image, e.g. "quay.io/kividbio/kividb:v1.0.2".'
+                imagePullPolicy:
+                  type: string
+                  enum: [Always, IfNotPresent, Never]
+                imagePullSecrets:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                agentImage:
+                  type: string
+                  description: kividb-operator sidecar agent image. Defaults to the operator's bundled version.
+                exporterImage:
+                  type: string
+                  description: >-
+                    Prometheus redis_exporter sidecar image, added only when
+                    spec.monitoring.enabled is true. Defaults to the
+                    operator's bundled oliver006/redis_exporter version.
+                port:
+                  type: integer
+                  default: 6380
+                  description: RESP protocol port kividb listens on.
+                kividbConfig:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: >-
+                    Free-form kividb.conf directives (lower-kebab-case keys,
+                    e.g. maxmemory, threads, aof, loglevel, cluster-enabled,
+                    notify-keyspace-events, slowlog-log-slower-than,
+                    tls-port). Do not set "replicaof", "port" or "aclfile"
+                    here; those are operator-managed.
+                auth:
+                  type: object
+                  description: Authentication configuration (requirepass and/or ACL users).
+                  properties:
+                    requirePassSecretRef:
+                      type: object
+                      required: [name, key]
+                      properties:
+                        name: {type: string}
+                        key: {type: string}
+                    users:
+                      type: array
+                      items:
+                        type: object
+                        required: [name]
+                        properties:
+                          name: {type: string}
+                          enabled: {type: boolean}
+                          noPass: {type: boolean}
+                          passwordSecretRef:
+                            type: object
+                            required: [name, key]
+                            properties:
+                              name: {type: string}
+                              key: {type: string}
+                          keyPatterns:
+                            type: array
+                            items: {type: string}
+                          channelPatterns:
+                            type: array
+                            items: {type: string}
+                          commandRules:
+                            type: array
+                            items: {type: string}
+                storage:
+                  type: object
+                  required: [size]
+                  properties:
+                    size:
+                      type: string
+                      description: 'PVC capacity, e.g. "10Gi".'
+                    storageClassName:
+                      type: string
+                    accessModes:
+                      type: array
+                      items: {type: string}
+                resources:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: Standard Kubernetes ResourceRequirements for the kividb container.
+                agentResources:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: Standard Kubernetes ResourceRequirements for the agent sidecar container.
+                exporterResources:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: Standard Kubernetes ResourceRequirements for the redis_exporter sidecar container.
+                tolerations:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  description: Standard Kubernetes Tolerations applied to every pod.
+                nodeSelector:
+                  type: object
+                  additionalProperties: {type: string}
+                affinity:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: Standard Kubernetes Affinity. If unset, a default preferred anti-affinity is injected.
+                podAnnotations:
+                  type: object
+                  additionalProperties: {type: string}
+                podLabels:
+                  type: object
+                  additionalProperties: {type: string}
+                terminationGracePeriodSeconds:
+                  type: integer
+                  format: int64
+                services:
+                  type: object
+                  properties:
+                    master:
+                      type: object
+                      description: Service exposing the current master pod.
+                      properties:
+                        type:
+                          type: string
+                          enum: [ClusterIP, NodePort, LoadBalancer]
+                        loadBalancerIP: {type: string}
+                        loadBalancerSourceRanges:
+                          type: array
+                          items: {type: string}
+                        annotations:
+                          type: object
+                          additionalProperties: {type: string}
+                    replicas:
+                      type: object
+                      description: Service load-balancing across all replica pods.
+                      properties:
+                        type:
+                          type: string
+                          enum: [ClusterIP, NodePort, LoadBalancer]
+                        loadBalancerIP: {type: string}
+                        loadBalancerSourceRanges:
+                          type: array
+                          items: {type: string}
+                        annotations:
+                          type: object
+                          additionalProperties: {type: string}
+                backup:
+                  type: object
+                  properties:
+                    enabled: {type: boolean}
+                    schedule:
+                      type: string
+                      description: 'Standard cron expression, e.g. "0 * * * *".'
+                    retention:
+                      type: integer
+                      default: 7
+                      description: Number of most-recent snapshots to keep in S3. 0 = keep all.
+                    timeoutSeconds:
+                      type: integer
+                      format: int32
+                    s3:
+                      type: object
+                      required: [endpoint, bucket, credentialsSecretRef]
+                      properties:
+                        endpoint: {type: string}
+                        bucket: {type: string}
+                        region: {type: string}
+                        pathPrefix: {type: string}
+                        forcePathStyle: {type: boolean}
+                        insecureSkipTLSVerify: {type: boolean}
+                        credentialsSecretRef:
+                          type: object
+                          required: [name]
+                          properties:
+                            name: {type: string}
+                            accessKeyIdKey: {type: string}
+                            secretAccessKeyKey: {type: string}
+                    jobResources:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                monitoring:
+                  type: object
+                  properties:
+                    enabled: {type: boolean}
+                    serviceMonitor: {type: boolean}
+                failover:
+                  type: object
+                  properties:
+                    enabled: {type: boolean}
+                    unhealthyThresholdSeconds:
+                      type: integer
+                      format: int32
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Provisioning, Running, Degraded, FailingOver, Error]
+                masterPod:
+                  type: string
+                pods:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name: {type: string}
+                      role: {type: string}
+                      ready: {type: boolean}
+                      replicationOffset:
+                        type: integer
+                        format: int64
+                lastFailoverTime:
+                  type: string
+                  format: date-time
+                backup:
+                  type: object
+                  properties:
+                    lastRunTime: {type: string, format: date-time}
+                    lastSuccessTime: {type: string, format: date-time}
+                    lastObjectKey: {type: string}
+                    lastError: {type: string}
+                observedGeneration:
+                  type: integer
+                  format: int64
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true

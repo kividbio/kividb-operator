@@ -1,0 +1,60 @@
+apiVersion: v2
+# "kividb-operator-chart", not "kividb-operator": Helm's OCI push always
+# appends this exact name as the final path segment, and "kividb-operator"
+# is already the container image repo (quay.io/kividbio/kividb-operator)
+# -- pushing the chart there too would collide tag-for-tag with the image
+# on every release. This name is package/OCI-path identity only; it does
+# NOT affect any deployed object's name or labels (see
+# templates/_helpers.tpl's kividb-operator.name, which is a literal, not
+# derived from this field) or the local directory name
+# (charts/kividb-operator/, unrelated to this field).
+name: kividb-operator-chart
+description: |
+  Kubernetes operator for KiviDB, a Redis-RESP-compatible data store: manages
+  single-master/N-replica KividbCluster StatefulSets, ACL/auth, automatic
+  failover via a per-pod agent sidecar, scheduled S3-compatible backups, and
+  (optionally) a read-only web GUI.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/kividbio/kividb-operator
+sources:
+  - https://github.com/kividbio/kividb-operator
+keywords:
+  - kividb
+  - redis
+  - database
+  - operator
+  - statefulset
+maintainers:
+  - name: kividbio
+    url: https://github.com/kividbio
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/category: database
+  artifacthub.io/operator: "true"
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://github.com/kividbio/kividb-operator/tree/main/docs
+    - name: Source
+      url: https://github.com/kividbio/kividb-operator
+  # No icon is set here yet -- add "artifacthub.io/logo-url" once kividbio
+  # has a hosted logo image; ArtifactHub falls back to a generic icon
+  # without it, which is fine, just less polished.
+  artifacthub.io/crds: |
+    - kind: KividbCluster
+      version: v1alpha1
+      name: kividbclusters.kividb.io
+      displayName: KiviDB Cluster
+      description: A single-master, N-replica KiviDB (Redis-compatible) cluster
+  artifacthub.io/crdsExamples: |
+    - apiVersion: kividb.io/v1alpha1
+      kind: KividbCluster
+      metadata:
+        name: kividb-sample
+      spec:
+        image: quay.io/kividbio/kividb:v1.0.2
+        replicas: 2
+        storage:
+          size: 10Gi

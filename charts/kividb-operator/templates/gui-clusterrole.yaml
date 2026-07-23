@@ -1,0 +1,52 @@
+{{- if and .Values.gui.enabled .Values.rbac.create }}
+# Narrow, read-only ClusterRole for the GUI. Deliberately separate from
+# kividb-operator-manager-role: the GUI must be able to display cluster
+# state but must NEVER be able to read Secrets (ACL passwords, S3
+# credentials) or mutate anything. Do not add "secrets" to this list.
+# Mirrors config/gui/rbac.yaml (the ClusterRole the GUI's own Go code in
+# cmd/gui/data.go actually calls: Get/List on kividbclusters, pods,
+# services, events, statefulsets.apps, cronjobs.batch -- watch is granted
+# too as a harmless superset even though the GUI currently polls rather
+# than watching).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kividb-operator.fullname" . }}-gui-role
+  labels:
+    {{- include "kividb-operator.gui.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - kividb.io
+    resources:
+      - kividbclusters
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - batch
+    resources:
+      - cronjobs
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - services
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+{{- end }}

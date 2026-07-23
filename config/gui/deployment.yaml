@@ -1,0 +1,72 @@
+# Standalone Deployment for the read-only kividb-operator GUI. See
+# docs/GUI.md for the full deployment walkthrough (including the
+# Helm-chart alternative, if charts/kividb-operator/templates/gui-*.yaml
+# exists in your checkout).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kividb-operator-gui
+  namespace: kividb-operator-system
+  labels:
+    app.kubernetes.io/name: kividb-operator-gui
+    app.kubernetes.io/component: gui
+    app.kubernetes.io/part-of: kividb-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kividb-operator-gui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kividb-operator-gui
+        app.kubernetes.io/component: gui
+        app.kubernetes.io/part-of: kividb-operator
+    spec:
+      serviceAccountName: kividb-operator-gui
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gui
+          image: quay.io/kividbio/kividb-operator-gui:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8090
+          env:
+            - name: GUI_PORT
+              value: "8090"
+            # Leave WATCH_NAMESPACE unset to list KividbClusters across all
+            # namespaces (matches the ClusterRole in rbac.yaml). Set it to
+            # restrict the dashboard (and the detail API) to one namespace.
+            # - name: WATCH_NAMESPACE
+            #   value: "default"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi

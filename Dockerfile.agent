@@ -1,0 +1,30 @@
+# Build the kividb-operator sidecar agent binary (cmd/agent).
+#
+# Same two-stage pattern as the operator's own Dockerfile: static build in a
+# full Go image, copied into a minimal distroless non-root runtime. The
+# resulting image is run in every kividb Pod as the "agent" container, with
+# its command/args (["serve"] for the sidecar, or ["backup-trigger", ...]
+# for the backup CronJob's Job pod) supplied by the Pod spec the controller
+# renders -- see internal/controller/statefulset.go and
+# internal/controller/backup.go. No default CMD/Args are baked in here.
+
+FROM golang:1.23-bookworm AS builder
+WORKDIR /workspace
+
+COPY go.mod go.mod
+COPY go.sum go.sum
+RUN go mod download
+
+COPY main.go main.go
+COPY api/ api/
+COPY internal/ internal/
+COPY cmd/agent/ cmd/agent/
+
+RUN CGO_ENABLED=0 GOOS=linux go build -a -o /agent ./cmd/agent
+
+FROM gcr.io/distroless/static-debian12:nonroot
+WORKDIR /
+COPY --from=builder /agent /agent
+USER 65532:65532
+
+ENTRYPOINT ["/agent"]

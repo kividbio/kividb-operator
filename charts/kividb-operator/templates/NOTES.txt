@@ -1,0 +1,60 @@
+kividb-operator {{ .Chart.AppVersion }} has been installed into namespace "{{ .Release.Namespace }}".
+
+1. Check that the operator manager is running:
+
+   kubectl -n {{ .Release.Namespace }} get deployment {{ include "kividb-operator.fullname" . }}-manager
+   kubectl -n {{ .Release.Namespace }} logs deployment/{{ include "kividb-operator.fullname" . }}-manager -f
+
+{{- if .Values.crds.install }}
+
+2. The KividbCluster CRD (kividbclusters.kividb.io) was installed with this
+   release. Confirm it's present:
+
+   kubectl get crd kividbclusters.kividb.io
+{{- else }}
+
+2. crds.install was set to false -- install the CRD yourself before
+   creating any KividbCluster objects:
+
+   kubectl apply -f charts/kividb-operator/crds/kividb.io_kividbclusters.yaml
+{{- end }}
+
+3. Apply a sample KividbCluster (see config/samples/ in the repository for
+   more, including full-featured and MinIO-backed examples):
+
+   kubectl apply -f - <<'EOF'
+   apiVersion: kividb.io/v1alpha1
+   kind: KividbCluster
+   metadata:
+     name: my-kividb
+     namespace: default
+   spec:
+     image: quay.io/kividbio/kividb:v1.0.2
+     storage:
+       size: 5Gi
+   EOF
+
+   kubectl get kividbcluster my-kividb
+   kubectl get pods -l app.kubernetes.io/instance=my-kividb
+
+{{- if .Values.gui.enabled }}
+
+4. Reach the read-only web GUI via port-forward:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kividb-operator.gui.fullname" . }} 8090:{{ .Values.gui.service.port }}
+
+   Then open http://localhost:8090 in a browser. The GUI's ServiceAccount
+   ({{ include "kividb-operator.gui.serviceAccountName" . }}) only has
+   get/list/watch on kividbclusters/pods/statefulsets/cronjobs/services --
+   it cannot read Secrets or make changes.
+{{- else }}
+
+4. The GUI is disabled (gui.enabled=false). Re-run `helm upgrade` with
+   --set gui.enabled=true to install it.
+{{- end }}
+
+5. Connect to a cluster's master with redis-cli (KiviDB speaks the RESP
+   protocol on the "kividb" port, default 6380):
+
+   kubectl -n default port-forward svc/my-kividb-master 6380:6380
+   redis-cli -p 6380 PING
