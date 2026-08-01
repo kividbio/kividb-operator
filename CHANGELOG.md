@@ -6,6 +6,14 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Release and CI Docker builds use **native** multi-arch runners
+  (`ubuntu-latest` for amd64, `ubuntu-24.04-arm` for arm64), push each
+  arch by digest, then merge into one OCI index — replacing the previous
+  QEMU-emulated `platforms: linux/amd64,linux/arm64` single-runner model
+  that made arm64 release builds very slow.
+
 ## [0.3.0] - 2026-08-02
 
 ### Added

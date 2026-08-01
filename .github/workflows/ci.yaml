@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
-    branches: [main]
+    branches: [master, main]
 
 permissions:
   contents: read
@@ -74,52 +74,77 @@ jobs:
       - name: helm template (sanity render)
         run: helm template kividb-operator charts/kividb-operator > /dev/null
 
+  # Native per-arch builds (no QEMU): amd64 on ubuntu-latest, arm64 on
+  # ubuntu-24.04-arm. Mirrors the release workflow's model so CI catches
+  # Dockerfile breakage on both arches without emulated builds.
   docker:
-    name: Docker build (no push)
-    runs-on: ubuntu-latest
+    name: Docker build ${{ matrix.name }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: manager
+            dockerfile: ./Dockerfile
+            tag: kividb-operator:ci
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - name: manager
+            dockerfile: ./Dockerfile
+            tag: kividb-operator:ci
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - name: agent
+            dockerfile: ./Dockerfile.agent
+            tag: kividb-operator-agent:ci
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - name: agent
+            dockerfile: ./Dockerfile.agent
+            tag: kividb-operator-agent:ci
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - name: gui
+            dockerfile: ./Dockerfile.gui
+            tag: kividb-operator-gui:ci
+            platform: linux/amd64
+            runner: ubuntu-latest
+            optional: true
+          - name: gui
+            dockerfile: ./Dockerfile.gui
+            tag: kividb-operator-gui:ci
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            optional: true
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build manager image (linux/amd64 + linux/arm64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: false
-          provenance: false
-          tags: kividb-operator:ci
-
-      - name: Build agent image (linux/amd64 + linux/arm64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile.agent
-          platforms: linux/amd64,linux/arm64
-          push: false
-          provenance: false
-          tags: kividb-operator-agent:ci
-
-      - name: Check for GUI Dockerfile
-        id: gui
+      - name: Check Dockerfile exists
+        id: check
         run: |
-          if [ -f Dockerfile.gui ]; then
+          if [ -f "${{ matrix.dockerfile }}" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
+            if [ "${{ matrix.optional }}" = "true" ]; then
+              echo "::warning::${{ matrix.dockerfile }} not found, skipping"
+            else
+              echo "::error::${{ matrix.dockerfile }} required but missing"
+              exit 1
+            fi
           fi
 
-      - name: Build GUI image (linux/amd64 + linux/arm64)
-        if: steps.gui.outputs.present == 'true'
+      - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.present == 'true'
+
+      - name: Build ${{ matrix.name }} (${{ matrix.platform }})
+        if: steps.check.outputs.present == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile.gui
-          platforms: linux/amd64,linux/arm64
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
           push: false
+          load: true
           provenance: false
-          tags: kividb-operator-gui:ci
+          tags: ${{ matrix.tag }}

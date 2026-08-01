@@ -96,14 +96,17 @@ otherwise, not a regression.
    `docs/manifest.json` to match (see [VERSIONING.md](VERSIONING.md) —
    most releases don't touch this, since docs are edited in place, not
    duplicated per version).
-4. Confirm multi-arch: `.github/workflows/release.yaml` must build
-   `platforms: linux/amd64,linux/arm64` (0.2.0 shipped amd64-only and
-   broke Apple Silicon pulls — do not regress this).
+4. Confirm multi-arch: `.github/workflows/release.yaml` builds each
+   arch **natively** (`ubuntu-latest` for amd64, `ubuntu-24.04-arm` for
+   arm64), then merges digests into one OCI index — do **not** regress
+   to QEMU/`platforms: linux/amd64,linux/arm64` on a single amd64 runner
+   (that is how 0.2.0–0.3.0 release builds got painfully slow).
 5. Commit: `git commit -m "Release vX.Y.Z"`.
-6. Tag and push: `git tag vX.Y.Z && git push origin main --tags`.
+6. Tag and push: `git tag vX.Y.Z && git push origin master --tags`.
 7. `.github/workflows/release.yaml` triggers on the `v*` tag push and:
    - builds and pushes all three images to `quay.io/kividbio/*`, tagged
-     both `X.Y.Z` and `latest`, for **amd64 and arm64**,
+     both `X.Y.Z` and `latest`, for **amd64 and arm64** (native runners,
+     then a manifest-merge job),
    - packages the Helm chart (`helm package charts/kividb-operator`,
      producing `kividb-operator-chart-X.Y.Z.tgz` -- the package name
      comes from `Chart.yaml`'s `name:`, which is intentionally
@@ -118,7 +121,7 @@ otherwise, not a regression.
 
    ```bash
    docker pull quay.io/kividbio/kividb-operator:X.Y.Z
-   docker manifest inspect quay.io/kividbio/kividb-operator:X.Y.Z
+   docker buildx imagetools inspect quay.io/kividbio/kividb-operator:X.Y.Z
    helm show chart oci://quay.io/kividbio/kividb-operator-chart --version X.Y.Z
    ```
 
