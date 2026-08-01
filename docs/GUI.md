@@ -36,7 +36,8 @@ without a manual refresh.
 
 ### Cluster detail (`/clusters/{namespace}/{name}`)
 
-- **Spec summary**: `spec.image` (or the floating default tag if unset,
+- Spec summary: `spec.image` (or the release default
+  `quay.io/kividbio/kividb:v1.0.3` if unset,
   labeled accordingly) and `spec.variant`, agent image, port, desired pod count,
   storage size/class, the master/replica Service types, and the names of
   any referenced `KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig`.

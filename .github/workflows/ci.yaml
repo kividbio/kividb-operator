@@ -10,7 +10,9 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.23"
+  # Keep in sync with go.mod's `go` directive (and the golang:*-bookworm
+  # builder image in the Dockerfiles).
+  GO_VERSION: "1.25"
 
 jobs:
   go:
@@ -78,22 +80,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build manager image
+      - name: Build manager image (linux/amd64 + linux/arm64)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: false
+          provenance: false
           tags: kividb-operator:ci
 
-      - name: Build agent image
+      - name: Build agent image (linux/amd64 + linux/arm64)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile.agent
+          platforms: linux/amd64,linux/arm64
           push: false
+          provenance: false
           tags: kividb-operator-agent:ci
 
       - name: Check for GUI Dockerfile
@@ -105,11 +113,13 @@ jobs:
             echo "present=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build GUI image
+      - name: Build GUI image (linux/amd64 + linux/arm64)
         if: steps.gui.outputs.present == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile.gui
+          platforms: linux/amd64,linux/arm64
           push: false
+          provenance: false
           tags: kividb-operator-gui:ci

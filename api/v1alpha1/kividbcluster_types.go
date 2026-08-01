@@ -37,7 +37,7 @@ const ClusterLabel = "kividb.io/cluster"
 
 // KividbVariant selects which build of the kividb image to run. Each
 // variant beyond "standard" corresponds to a real, separately-published
-// image tag suffix (e.g. quay.io/kividbio/kividb:v1.0.2-tls) -- the
+// image tag suffix (e.g. quay.io/kividbio/kividb:v1.0.3-tls) -- the
 // features aren't runtime-togglable, they're compiled in.
 type KividbVariant string
 
@@ -197,9 +197,9 @@ type KividbClusterSpec struct {
 	Replicas int32 `json:"replicas,omitempty"`
 
 	// Image is the kividb container image, e.g.
-	// "quay.io/kividbio/kividb:v1.0.2" or, for a non-standard build,
-	// "quay.io/kividbio/kividb:v1.0.2-tls". Defaults to a floating,
-	// unpinned tag if unset -- set this explicitly to pin a specific
+	// "quay.io/kividbio/kividb:v1.0.3" or, for a non-standard build,
+	// "quay.io/kividbio/kividb:v1.0.3-tls". Defaults to
+	// quay.io/kividbio/kividb:v1.0.3 if unset -- set this explicitly to pin a specific
 	// version. The operator uses this value verbatim; it never derives or
 	// modifies an image reference from Variant below.
 	// +optional

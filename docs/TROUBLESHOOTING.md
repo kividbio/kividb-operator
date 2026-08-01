@@ -140,18 +140,62 @@ Nothing on the operator side to fix here today.
 
 ## TLS: nothing is listening on `spec.tls.port`
 
-As of kividb v1.0.2, this is expected — not a configuration mistake.
-Live testing (inspecting `/proc/net/tcp` inside a running `-tls`/`-full`
-variant container) confirms the TLS listener never comes up, regardless
-of whether the settings arrive via `kividb.conf` or the equivalent CLI
-flags (the operator sends both). There is currently no `KividbConfig`/
-`KividbCluster` change that works around this — it needs a kividb-side
-fix. See
-[ROADMAP.md](ROADMAP.md#known-upstream-kividb-issues-confirmed-by-live-testing-2026-07-23).
-Double-check you're not chasing a Secret/mount problem instead: `kubectl
-exec <pod> -c kividb -- ls -la /etc/kividb/tls` should show `tls.crt`/
-`tls.key` symlinks resolving correctly even though the listener itself
-won't be up.
+## TLS: nothing is listening on `spec.tls.port`
+
+**On kividb v1.0.3+** (`-tls`/`-full` images), the TLS listener should
+come up when `KividbConfig.spec.tls.enabled: true` and `variant` is
+`tls`/`full`. Confirm with:
+
+```bash
+kubectl exec <pod> -c kividb -- cat /proc/net/tcp
+# look for a LISTEN entry on the tls-port (default 6443 → hex 0x192B)
+```
+
+**On kividb v1.0.2**, a missing TLS listener was expected — not an
+operator configuration mistake. Live testing then confirmed the listener
+never came up regardless of conf vs CLI flags (the operator sends both).
+
+If TLS is missing on v1.0.3+, first check the Secret mount:
+
+```bash
+kubectl exec <pod> -c kividb -- ls -la /etc/kividb/tls
+```
+
+`tls.crt`/`tls.key` should resolve. Also check for a
+`TLSVariantMismatch` Event (`kubectl describe kividbcluster`). See
+[ROADMAP.md](ROADMAP.md#known-upstream-kividb-issues).
+
+## Operator ImagePullBackOff on Apple Silicon / arm64
+
+**Symptom:** after upgrading the Helm chart to `0.2.0`, manager/GUI pods
+stuck in `ImagePullBackOff` with:
+
+```text
+no matching manifest for linux/arm64/v8 in the manifest list entries
+```
+
+**Cause:** the `0.2.0` images on Quay were published as an OCI index
+containing only `linux/amd64` (plus an attestation manifest with
+`unknown/unknown`). Container runtimes that select by host architecture
+(minikube on Apple Silicon) refuse to pull. `0.1.0` was a single-arch
+amd64 image and often still ran via emulation, which is why the first
+install worked and the upgrade did not.
+
+**Fix:** install operator **0.3.0+** (multi-arch `linux/amd64` +
+`linux/arm64`), or for local development build and load arm64 images:
+
+```bash
+make docker-build VERSION=0.3.0-local
+minikube image load quay.io/kividbio/kividb-operator:0.3.0-local
+minikube image load quay.io/kividbio/kividb-operator-agent:0.3.0-local
+minikube image load quay.io/kividbio/kividb-operator-gui:0.3.0-local
+helm upgrade --install kividb-operator charts/kividb-operator \
+  -n kividb-operator-system \
+  --set manager.image.tag=0.3.0-local \
+  --set gui.image.tag=0.3.0-local \
+  --set manager.image.pullPolicy=IfNotPresent \
+  --set gui.image.pullPolicy=IfNotPresent
+```
 
 ## Storage: PVC won't resize after changing `spec.storage.size`
 

@@ -30,7 +30,7 @@ All fields below are under `spec:` unless stated otherwise.
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `replicas` | int32 | `2` | Replica pods **in addition to** the single master. Total pods = `replicas + 1`. |
-| `image` | string | a floating, unpinned tag | Explicit kividb container image, e.g. `quay.io/kividbio/kividb:v1.0.2` or `quay.io/kividbio/kividb:v1.0.2-tls`. Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
+| `image` | string | `quay.io/kividbio/kividb:v1.0.3` | Explicit kividb container image, e.g. `quay.io/kividbio/kividb:v1.0.3` or `quay.io/kividbio/kividb:v1.0.3-tls`. Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
 | `variant` | string | `standard` | One of `standard`, `tls`, `lua`, `full`. See [Image and variant](#image-and-variant) — informational only, does not affect which image gets pulled. |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
 | `imagePullSecrets` | `[]LocalObjectReference` | — | Standard Kubernetes image pull secrets. |
@@ -43,12 +43,13 @@ All fields below are under `spec:` unless stated otherwise.
 
 `image` is the **only** field that determines which container actually
 runs — the operator uses it verbatim and never constructs, guesses, or
-modifies it. Leave it unset for a floating, unpinned default tag (fine
-for a scratch/dev cluster); set it explicitly to pin a specific version:
+modifies it. Leave it unset to use the release default
+(`quay.io/kividbio/kividb:v1.0.3` for operator 0.3.0); set it explicitly
+to pin a different tag or variant:
 
 ```yaml
 spec:
-  image: quay.io/kividbio/kividb:v1.0.3
+  image: quay.io/kividbio/kividb:v1.0.3-tls
 ```
 
 To move to a later version, just change this value — same as any other
@@ -63,7 +64,7 @@ a referenced [`KividbConfig`](#kividbconfig)'s `spec.tls`). It does
 **not** change which image tag gets pulled — there is no "tls variant
 tag" the operator appends or looks for. If you want a TLS-capable build,
 you set `image` to one yourself (e.g.
-`quay.io/kividbio/kividb:v1.0.2-tls`) *and* set `variant: tls` to match;
+`quay.io/kividbio/kividb:v1.0.3-tls`) *and* set `variant: tls` to match;
 the two aren't cross-validated by the API server, since only you know
 what a given `image` value actually contains.
 
@@ -83,15 +84,14 @@ Setting `variant: tls`/`full` and pointing `image` at a build that
 actually supports it still isn't sufficient today — see the live-tested
 caveat below.
 
-> **Live-tested and currently non-functional:** as of kividb v1.0.2, the
-> `-tls`/`-full` image variants do not open a TLS listener at all, even
-> when given the exact CLI flags their own `--help` documents (confirmed
-> by inspecting `/proc/net/tcp` inside a running container — only the
-> plaintext port is ever in `LISTEN` state). The operator wires everything
-> up correctly on its end (cert mounting, and both the config-file
-> directives and the equivalent CLI flags), so nothing further
-> is needed here once kividb itself implements the listener. Track this in
-> [ROADMAP.md](ROADMAP.md#known-upstream-kividb-issues-confirmed-by-live-testing-2026-07-23).
+> **TLS on kividb v1.0.3+:** e2e against `v1.0.3-tls` / `v1.0.3-full`
+> confirmed the TLS port is in `LISTEN` when the operator mounts certs
+> and passes CLI flags (see `hack/e2e/04-compat-variants.sh`). On
+> **v1.0.2** the listener never opened — pin `spec.image` to v1.0.3+ if
+> you need TLS. The operator still writes both conf directives and CLI
+> flags because `--configfile` historically dropped `tls-*` keys; track
+> remaining upstream caveats in
+> [ROADMAP.md](ROADMAP.md#known-upstream-kividb-issues).
 
 ### References to other CRDs
 

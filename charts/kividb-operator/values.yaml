@@ -54,7 +54,7 @@ manager:
 
   image:
     repository: quay.io/kividbio/kividb-operator
-    tag: "0.2.0"
+    tag: "0.3.0"
     pullPolicy: IfNotPresent
 
   resources:
@@ -104,7 +104,7 @@ manager:
 agent:
   image:
     repository: quay.io/kividbio/kividb-operator-agent
-    tag: "0.2.0"
+    tag: "0.3.0"
     pullPolicy: IfNotPresent
   resources:
     requests:
@@ -146,7 +146,7 @@ gui:
 
   image:
     repository: quay.io/kividbio/kividb-operator-gui
-    tag: "0.2.0"
+    tag: "0.3.0"
     pullPolicy: IfNotPresent
 
   service:

@@ -15,8 +15,8 @@ description: |
   failover via a per-pod agent sidecar, scheduled S3-compatible backups, and
   (optionally) a read-only web GUI.
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.3.0
+appVersion: "0.3.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/kividbio/kividb-operator
 sources:
@@ -74,7 +74,7 @@ annotations:
       metadata:
         name: kividb-sample
       spec:
-        image: quay.io/kividbio/kividb:v1.0.2
+        image: quay.io/kividbio/kividb:v1.0.3
         replicas: 2
         storage:
           size: 10Gi

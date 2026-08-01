@@ -63,7 +63,7 @@ metadata:
   namespace: default
 spec:
   replicas: 1 # 1 master + 1 replica = 2 pods total
-  image: quay.io/kividbio/kividb:v1.0.2
+  image: quay.io/kividbio/kividb:v1.0.3
   imagePullPolicy: IfNotPresent
   port: 6380
 

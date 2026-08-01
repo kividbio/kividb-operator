@@ -177,6 +177,20 @@ helm-package: ## Package the Helm chart into a .tgz using the version in Chart.y
 	helm package $(CHART_DIR) --destination dist/
 
 # ---------------------------------------------------------------------------
+# Minikube e2e / compat (hack/e2e)
+# ---------------------------------------------------------------------------
+
+.PHONY: e2e e2e-prereqs e2e-deploy
+e2e: ## Run full minikube e2e suite
+	./hack/e2e/run-all.sh
+
+e2e-prereqs: ## Check kubectl/helm/minikube/docker/redis-cli and minikube status
+	./hack/e2e/00-prereqs.sh
+
+e2e-deploy: ## Helm-install the operator into minikube (local image tags)
+	./hack/e2e/01-deploy-operator.sh
+
+# ---------------------------------------------------------------------------
 # Misc
 # ---------------------------------------------------------------------------
 
@@ -186,4 +200,4 @@ clean: ## Remove build artifacts.
 
 .PHONY: help
 help: ## Show this help.
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'

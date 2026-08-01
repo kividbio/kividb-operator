@@ -139,19 +139,17 @@ kubectl port-forward -n kividb-operator-system svc/kividb-operator-gui 8090:8090
 | [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md) | Configuring S3 backups, triggering one on demand, manual restore procedure |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → cause → fix for common issues |
 | [docs/GUI.md](docs/GUI.md) | Running and deploying the dashboard |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | What's planned for 0.2.0, and what's required before 1.0.0 |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | What's shipped in 0.3.0, and what's required before 1.0.0 |
 | [docs/RELEASING.md](docs/RELEASING.md) | Versioning and the release pipeline |
 | [docs/VERSIONING.md](docs/VERSIONING.md) | How an external site can fetch these docs at a specific released version |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Local dev setup, code layout, PR checklist |
 
 ## Status
 
-This project is at `v0.1.0` — see [CHANGELOG.md](CHANGELOG.md). The CRD
-API version is `kividb.io/v1alpha1`: expect it to evolve. There is no
-network access in every environment this repo has been built in so far,
-so treat the first CI run against a given commit as the first real
-`go build`/`go test` correctness check (see
-[docs/RELEASING.md](docs/RELEASING.md) for what CI verifies).
+This project is at `v0.3.0` — see [CHANGELOG.md](CHANGELOG.md). Validated
+against kividb **v1.0.3** (that tag is also the default when
+`spec.image` is unset). The CRD API version is `kividb.io/v1alpha1`:
+expect it to evolve.
 
 ## License
 

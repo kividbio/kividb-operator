@@ -51,7 +51,7 @@ requested:
 
 | Container | Image | Role |
 |---|---|---|
-| `kividb` | `spec.image`, or a floating default tag if unset | The database itself. `workingDir: /data`, `--configfile /etc/kividb/kividb.conf`. |
+| `kividb` | `spec.image`, or `quay.io/kividbio/kividb:v1.0.3` if unset | The database itself. `workingDir: /data`, `--configfile /etc/kividb/kividb.conf`. |
 | `agent`  | `spec.agentImage` (defaults to the operator's own agent image) | A small Go HTTP sidecar (`cmd/agent`) that translates HTTP calls from the controller into RESP commands against `127.0.0.1:<port>`, and owns all S3 backup logic. |
 | `redis-exporter` | `spec.exporterImage` (defaults to `oliver006/redis_exporter`), only when `spec.monitoring.enabled: true` | The de facto standard Prometheus exporter for Redis-protocol stores, scraped separately from the agent's own lightweight `/metrics` -- see [CONFIGURATION.md](CONFIGURATION.md#monitoring). |
 
@@ -139,7 +139,7 @@ does, in order:
    `ServiceName` and `VolumeClaimTemplates` are set once at creation time
    and never touched again, since the Kubernetes API server rejects
    changes to those fields on an existing StatefulSet). The image comes
-   from `spec.image` verbatim (a floating default tag if unset — see
+   from `spec.image` verbatim (`quay.io/kividbio/kividb:v1.0.3` if unset — see
    [CONFIGURATION.md](CONFIGURATION.md#image-and-variant) for why
    `spec.variant` never affects this); TLS cert/key/CA are mounted from
    the `KividbConfig`'s `tls.certSecretRef` when `tls.enabled` is true.

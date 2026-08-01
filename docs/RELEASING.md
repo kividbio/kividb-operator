@@ -90,15 +90,20 @@ otherwise, not a regression.
 2. Bump the version in three places to match:
    - `VERSION` (repo root)
    - `charts/kividb-operator/Chart.yaml` (`version:` and `appVersion:`)
+   - `internal/controller/names.go` `DefaultAgentImage` (and chart
+     `values.yaml` image tags)
 3. If this release added, removed, or renamed a doc under `docs/`, update
    `docs/manifest.json` to match (see [VERSIONING.md](VERSIONING.md) —
    most releases don't touch this, since docs are edited in place, not
    duplicated per version).
-4. Commit: `git commit -m "Release vX.Y.Z"`.
-5. Tag and push: `git tag vX.Y.Z && git push origin main --tags`.
-6. `.github/workflows/release.yaml` triggers on the `v*` tag push and:
+4. Confirm multi-arch: `.github/workflows/release.yaml` must build
+   `platforms: linux/amd64,linux/arm64` (0.2.0 shipped amd64-only and
+   broke Apple Silicon pulls — do not regress this).
+5. Commit: `git commit -m "Release vX.Y.Z"`.
+6. Tag and push: `git tag vX.Y.Z && git push origin main --tags`.
+7. `.github/workflows/release.yaml` triggers on the `v*` tag push and:
    - builds and pushes all three images to `quay.io/kividbio/*`, tagged
-     both `X.Y.Z` and `latest`,
+     both `X.Y.Z` and `latest`, for **amd64 and arm64**,
    - packages the Helm chart (`helm package charts/kividb-operator`,
      producing `kividb-operator-chart-X.Y.Z.tgz` -- the package name
      comes from `Chart.yaml`'s `name:`, which is intentionally
@@ -109,10 +114,11 @@ otherwise, not a regression.
    - creates a GitHub Release for the tag, using the corresponding
      `CHANGELOG.md` section as the release body, with the packaged
      chart `.tgz` attached as a release asset.
-7. Verify the release:
+8. Verify the release (from both amd64 and arm64 if you can):
 
    ```bash
    docker pull quay.io/kividbio/kividb-operator:X.Y.Z
+   docker manifest inspect quay.io/kividbio/kividb-operator:X.Y.Z
    helm show chart oci://quay.io/kividbio/kividb-operator-chart --version X.Y.Z
    ```
 
@@ -141,6 +147,11 @@ version actually changed the CRD — if it didn't, this step is a no-op.
 - [ ] `config/samples/*.yaml` still apply cleanly against the new CRD
 - [ ] If the CRD schema changed: called out explicitly in the changelog
       entry, with the `kubectl apply` step above mentioned
+- [ ] Multi-arch images: after the release workflow finishes, confirm
+      `docker manifest inspect quay.io/kividbio/kividb-operator:X.Y.Z`
+      lists both `linux/amd64` and `linux/arm64`
+- [ ] `make test` (unit) green; optionally `make e2e` against minikube
+      with `LOAD_IMAGES=1` before tagging
 - [ ] If `spec.agentImage`'s default changed: double-checked
       `internal/controller/names.go`'s `DefaultAgentImage` constant
       matches the tag actually being pushed

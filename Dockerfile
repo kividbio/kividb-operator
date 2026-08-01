@@ -19,8 +19,11 @@ COPY api/ api/
 COPY internal/ internal/
 
 # Build a fully static binary: no CGO, so it runs unmodified on the
-# distroless static base image below.
-RUN CGO_ENABLED=0 GOOS=linux go build -a -o /manager .
+# distroless static base image below. TARGETARCH is supplied by buildx
+# so multi-arch images compile for the right architecture.
+ARG TARGETOS=linux
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o /manager .
 
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /

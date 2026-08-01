@@ -23,8 +23,11 @@ COPY internal ./internal
 COPY cmd ./cmd
 
 # CGO_ENABLED=0 + the static-debian12 base below is what lets this run
-# without a libc in the runtime image at all.
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/kividb-operator-gui ./cmd/gui
+# without a libc in the runtime image at all. TARGETARCH is supplied by
+# buildx so multi-arch images compile for the right architecture.
+ARG TARGETOS=linux
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/kividb-operator-gui ./cmd/gui
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12:nonroot

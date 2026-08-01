@@ -16,7 +16,7 @@ import (
 // defaultKividbImage mirrors internal/controller/names.go's
 // DefaultKividbImage -- kept in sync manually rather than imported, same
 // rationale as the naming helpers below.
-const defaultKividbImage = "quay.io/kividbio/kividb:latest"
+const defaultKividbImage = "quay.io/kividbio/kividb:v1.0.3"
 
 // Object naming conventions below mirror the frozen convention documented
 // in docs/_internal-spec.md and implemented in internal/controller/names.go
@@ -127,7 +127,7 @@ func getClusterDetail(ctx context.Context, ctrlClient client.Client, clientset k
 
 	image := c.Spec.Image
 	if image == "" {
-		image = defaultKividbImage + " (default, unpinned)"
+		image = defaultKividbImage + " (default)"
 	}
 
 	det := &ClusterDetail{

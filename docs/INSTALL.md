@@ -33,7 +33,7 @@ commented list):
 ```bash
 helm install kividb-operator charts/kividb-operator \
   -n kividb-operator-system --create-namespace \
-  --set manager.image.tag=0.1.0 \
+  --set manager.image.tag=0.3.0 \
   --set gui.enabled=false \
   --set metrics.serviceMonitor.enabled=true
 ```

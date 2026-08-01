@@ -6,58 +6,50 @@ before that version number is used at all (see
 [RELEASING.md](RELEASING.md) for what 1.0.0 signals and why v0.1.x
 shouldn't skip straight there).
 
-## Known upstream kividb issues (confirmed by live testing, 2026-07-23)
+## Known upstream kividb issues
+
+### Re-verified against kividb v1.0.3 (operator 0.3.0 e2e, 2026-08-02)
+
+- **TLS listener on `-tls`/`-full`:** **works on v1.0.3.** Operator e2e
+  (`hack/e2e/04-compat-variants.sh`) confirmed `/proc/net/tcp` shows the
+  configured `tls-port` (default 6443) in `LISTEN` for both
+  `v1.0.3-tls` and `v1.0.3-full`, with plaintext `PING` still healthy.
+  Prefer pinning `spec.image` to those tags and `variant: tls`/`full`
+  with a `KividbConfig` that enables TLS.
+- **Lua on `-lua`/`-full`:** `EVAL` succeeds on v1.0.3.
+
+### Still open / previously confirmed on v1.0.2 (2026-07-23)
 
 These were found running the multi-CRD architecture end-to-end on a real
-EKS cluster for the first time. They're kividb binary/protocol issues,
-not bugs in this operator's reconciliation logic — the operator is
-producing exactly the configuration it's designed to, but kividb doesn't
-act on (or, in the TLS case, doesn't yet implement) parts of it. Listed
-here because they materially affect what you should rely on today.
+EKS cluster. They're kividb binary/protocol issues, not bugs in this
+operator's reconciliation logic — re-check on each engine bump.
 
-- **`-tls`/`-full` variant images do not open the TLS listener at all.**
-  Verified two ways: neither writing `tls-port`/`tls-cert-file`/
-  `tls-key-file` into `kividb.conf` (the original design) nor passing the
-  identical settings as `--tls-port`/`--tls-cert-file`/`--tls-key-file`
-  CLI flags (which the image's own `--help` documents and which this
-  operator now also does, in [statefulset.go](../internal/controller/statefulset.go),
-  as a belt-and-suspenders fix for the config-file gap below) results in
-  a listening socket on the configured port — confirmed by reading
-  `/proc/net/tcp` inside the running container: only the plaintext port
-  ever appears in `LISTEN` state. **Until kividb itself implements this,
-  `spec.variant: tls`/`full` and `KividbConfig.spec.tls` have no effect
-  beyond selecting a different image tag and mounting certs that go
-  unused.** Don't rely on this for anything security-sensitive today.
+- **`-tls`/`-full` on v1.0.2 did not open the TLS listener** (fixed by
+  v1.0.3 per above). Historical detail: neither conf directives nor CLI
+  flags produced a listening TLS socket on 1.0.2.
 - **kividb's `--configfile` parser silently drops `tls-*` directives.**
-  Independent of the listener issue above: even once kividb does
-  implement the listener, anyone hand-editing a `kividb.conf`-style file
-  (or reading the operator's rendered ConfigMap for reference) should
-  know the file-based path doesn't currently work — only identically-named
-  CLI flags do. The operator now sends both, so this is transparent to
-  `KividbCluster` users; it only matters if you're comparing the rendered
-  ConfigMap against actual runtime behavior.
-- **Per-command ACL denies are accepted but not enforced.** An ACL rule
-  like `+@all -flushall -flushdb` is parsed and echoed back correctly by
-  `ACL GETUSER` — kividb's own view of the rule is right — but the denied
-  command still executes. Verified live: an `app` user configured with
-  exactly that rule set successfully ran `FLUSHALL`. This means
-  `KividbAclConfig`'s `commandRules` negative rules (anything starting
-  with `-`) should not be trusted as an enforcement boundary today; only
-  `keyPatterns`/`channelPatterns` restriction and category-level
-  (`+@read` etc.) positive grants were not tested to the same depth this
-  pass and warrant re-verification before relying on them either.
-- **`PING` does not require authentication even with a password set.**
-  Real Redis requires `AUTH` before any command except `AUTH`/`HELLO`/
-  `RESET`/`QUIT` once `requirepass` is set; kividb currently allows `PING`
-  through unauthenticated. Low severity on its own, but worth knowing if
-  you're using unauthenticated `PING` reachability as any kind of signal.
+  Independent of the listener: hand-edited `kividb.conf` files still
+  should not be trusted for TLS — only identically-named CLI flags are
+  reliable. The operator sends both.
+- **Per-command ACL denies are accepted but not enforced** (as of the
+  1.0.2 live test). An ACL rule like `+@all -flushall -flushdb` is
+  echoed by `ACL GETUSER` but `FLUSHALL` still executes. Re-verify on
+  newer engines before treating negative `commandRules` as an
+  enforcement boundary.
+- **`PING` does not require authentication even with a password set**
+  (as of 1.0.2). Low severity, but don't use unauthenticated `PING` as a
+  security signal.
+- **Replication RDB bulk-header bug** (see 0.2.0 notes below) — replica
+  reads may still be unreliable until fixed upstream.
 
-None of the above are blocked on this operator — they're upstream kividb
-fixes. This operator's job here is to keep configuring things correctly
-(which live testing now confirms it does) and to keep this list current
-as kividb's own behavior changes.
+None of the remaining items are blocked on this operator — they're
+upstream kividb fixes. This operator's job is to keep configuring things
+correctly and keep this list current as kividb's behavior changes.
 
-## 0.2.0
+## 0.2.0 (shipped)
+
+Items below that landed in 0.2.0 stay listed for history; open follow-ups
+moved under 0.3.0 / Before 1.0.0.
 
 - **Unit and integration tests.** Every fix documented in this repo's
   commit history so far was found by manual live testing against a real
@@ -102,7 +94,20 @@ as kividb's own behavior changes.
   decision (who publishes as kividb's own maintainers), not an engineering
   task.
 
-## 0.3.0 and beyond (less firm)
+## 0.3.0 (shipped / in progress)
+
+- **Multi-arch operator images** (`linux/amd64` + `linux/arm64`) — fixes
+  the Apple Silicon / arm64 `ErrImagePull` on the 0.2.0 Quay tags.
+- **Automated tests:** unit coverage for election/phase/config/ACL/
+  backup CronJob rendering, plus a minikube e2e suite
+  (`hack/e2e/`, `make e2e`) for variants vs kividb v1.0.3, failover under
+  load, snapshot chaos (pod kill mid-backup), and Prometheus/memory
+  scrape under load.
+- **Engine pin:** samples and docs target kividb **v1.0.3** (+ variant
+  tags). Upstream TLS / ACL / replication caveats from the 2026-07-23
+  live test are re-verified by e2e rather than assumed fixed.
+
+## 0.4.0 and beyond (less firm)
 
 - **`KividbCluster` horizontal read scaling helpers** -- e.g. a
   `spec.replicas` autoscaling hook driven by replica CPU/connection count,

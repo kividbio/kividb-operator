@@ -6,6 +6,51 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-02
+
+### Added
+
+- Multi-arch release images (`linux/amd64` + `linux/arm64`) for the
+  manager, agent, and GUI. 0.2.0 published an OCI index with only amd64
+  (plus an attestation stub), which caused `ErrImagePull` /
+  `no matching manifest for linux/arm64/v8` on Apple Silicon minikube and
+  other arm64 nodes. Release and CI Docker builds now use buildx with
+  QEMU and `platforms: linux/amd64,linux/arm64` (`provenance: false` so
+  the index is not polluted with unknown/unknown attestation-only
+  entries that confused some pullers).
+- Unit tests for core pure functions: `electReplica`, `computePhase`,
+  `renderKividbConf`, `renderACLFile`, naming helpers, and
+  `desiredBackupCronJob` (`go test ./... -race`).
+- Minikube e2e harness under `hack/e2e/` covering operator deploy,
+  kube-prometheus-stack, MinIO-backed snapshots, variant/TLS compat
+  against kividb `v1.0.3`, failover under load, snapshot chaos (pod kill
+  mid-backup), and agent memory metrics under load (`make e2e`).
+
+### Changed
+
+- Samples, chart examples, and docs pin / recommend kividb **v1.0.3**
+  (and `v1.0.3-tls` / `-lua` / `-full` variants) as the validated engine
+  line for this operator release. When `spec.image` is unset, the
+  operator now defaults to `quay.io/kividbio/kividb:v1.0.3` (no longer
+  the floating `:latest` tag). Default `spec.agentImage` is
+  `quay.io/kividbio/kividb-operator-agent:0.3.0`.
+- CI Go version bumped to 1.25 to match `go.mod` / Dockerfiles.
+- Dockerfiles honor `TARGETOS`/`TARGETARCH` from buildx so multi-arch
+  compiles target the correct GOARCH.
+
+### Compatibility (kividb 1.0.3)
+
+- **TLS / Lua variants work on v1.0.3** (`v1.0.3-tls`, `v1.0.3-lua`,
+  `v1.0.3-full`): e2e confirmed TLS port `LISTEN` and `EVAL` success.
+  Prefer these tags over v1.0.2 for TLS.
+- Remaining upstream caveats (configfile `tls-*` drop, ACL negative
+  command rules, unauthenticated `PING`, replication RDB bulk-header)
+  still tracked in ROADMAP — re-check with `hack/e2e/`.
+- Snapshot robustness under source-pod or Job-pod kill is exercised by
+  `hack/e2e/06-snapshot-chaos.sh` (no resume of an in-flight
+  BGSAVE/upload; next manual/scheduled run should succeed after
+  recovery).
+
 ## [0.2.0] - 2026-07-24
 
 ### Changed (breaking)
@@ -103,6 +148,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Helm chart (`charts/kividb-operator`) and kustomize bases
   (`config/`) for installation.
 
-[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.2.0...main
+[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.3.0...main
+[0.3.0]: https://github.com/kividbio/kividb-operator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kividbio/kividb-operator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kividbio/kividb-operator/releases/tag/v0.1.0

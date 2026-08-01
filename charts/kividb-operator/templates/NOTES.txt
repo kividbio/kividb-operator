@@ -29,7 +29,7 @@ kividb-operator {{ .Chart.AppVersion }} has been installed into namespace "{{ .R
      name: my-kividb
      namespace: default
    spec:
-     image: quay.io/kividbio/kividb:v1.0.2
+     image: quay.io/kividbio/kividb:v1.0.3
      storage:
        size: 5Gi
    EOF

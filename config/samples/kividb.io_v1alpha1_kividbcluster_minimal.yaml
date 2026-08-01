@@ -1,9 +1,9 @@
 # Smallest valid KividbCluster: only the one required spec field
 # (spec.storage.size). spec.image is left unset here, so the operator
-# falls back to its floating, unpinned default tag -- fine for a
-# scratch/dev cluster; pin spec.image explicitly (e.g.
-# "quay.io/kividbio/kividb:v1.0.2") for anything you care about
-# reproducing later. Everything else takes the CRD's defaults: replicas=2
+# uses its release default (quay.io/kividbio/kividb:v1.0.3 for 0.3.0).
+# Pin spec.image explicitly for a different tag/variant (e.g.
+# "quay.io/kividbio/kividb:v1.0.3-tls"). Everything else takes the CRD's
+# defaults: replicas=2
 # (i.e. 1 master + 2 replicas = 3 pods total), port 6380, no
 # configRef/aclConfigRef (so: built-in kividb defaults, open passwordless
 # access -- fine for a scratch/dev cluster, not for anything reachable

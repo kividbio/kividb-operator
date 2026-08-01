@@ -27,7 +27,7 @@ spec:
         runAsGroup: 65532
       containers:
         - name: manager
-          image: quay.io/kividbio/kividb-operator:0.1.0
+          image: quay.io/kividbio/kividb-operator:0.3.0
           imagePullPolicy: IfNotPresent
           args:
             - --leader-elect

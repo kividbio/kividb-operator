@@ -13,11 +13,11 @@ metadata:
   namespace: default
 spec:
   replicas: 3 # 1 master + 3 replicas = 4 pods total
-  image: quay.io/kividbio/kividb:v1.0.2
+  image: quay.io/kividbio/kividb:v1.0.3
   imagePullPolicy: IfNotPresent
   # imagePullSecrets:
   #   - name: quay-pull-secret
-  agentImage: quay.io/kividbio/kividb-operator-agent:0.1.0
+  agentImage: quay.io/kividbio/kividb-operator-agent:0.3.0
   port: 6380
 
   # Configuration, ACL users, and the backup schedule/destination are all
