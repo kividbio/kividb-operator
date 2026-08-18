@@ -6,6 +6,41 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-18
+
+### Added
+
+- **`KividbDbOps` CRD** with `op: restart` / `method: InPlace` rolling
+  restart (replicas first, then master). GUI can create/list these.
+- **`spec.bootstrapFromSnapshot`** on `KividbCluster`: seed a **new**
+  cluster's pod-0 PVC from a Succeeded `KividbSnapshot` before the
+  StatefulSet starts (supported restore path; see
+  `docs/BACKUP_RESTORE.md`).
+- Agent **`POST /exec`** for authenticated RESP commands (used by the GUI
+  explorer).
+- Agent **`restore-from-s3`** subcommand used by the bootstrap Job.
+- Management GUI: Basic auth (`GUI_AUTH_*` / chart `gui.auth.existingSecret`),
+  live status gauges, pod logs, RESP explorer, DbOps restart actions,
+  24h local metrics scraper (PVC-backed) with sparkline charts.
+- e2e suite **`08-resp-acl-select.sh`**: RESP3 `HELLO 3`, ACL deny smoke,
+  `SELECT` on replica, failover single-master re-point. Override
+  `KIVIDB_VERSION` (e.g. `v1.0.4-rc2`) for pre-GA engine testing.
+
+### Changed
+
+- Default engine pin **`quay.io/kividbio/kividb:v1.0.4`** (and docs/
+  samples). Default agent image **`…-agent:0.4.0`**.
+- GUI ClusterRole gains `create` on `kividbdbops` and `get` on `pods/log`
+  (still never Secrets to the browser).
+
+### Notes
+
+- Engine ACL caveats (implicit default auth when `requirepass` empty;
+  last-wins multi `keyPatterns`) remain documented in ROADMAP — Cloud-safe;
+  not fixed in this operator release.
+- Out of scope: `ReducedImpact` restart, in-place restore of a live
+  cluster.
+
 ## [0.3.0] - 2026-08-02
 
 ### Added
@@ -148,7 +183,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Helm chart (`charts/kividb-operator`) and kustomize bases
   (`config/`) for installation.
 
-[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.3.0...main
+[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.4.0...main
+[0.4.0]: https://github.com/kividbio/kividb-operator/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kividbio/kividb-operator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kividbio/kividb-operator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kividbio/kividb-operator/releases/tag/v0.1.0

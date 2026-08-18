@@ -37,7 +37,7 @@ const ClusterLabel = "kividb.io/cluster"
 
 // KividbVariant selects which build of the kividb image to run. Each
 // variant beyond "standard" corresponds to a real, separately-published
-// image tag suffix (e.g. quay.io/kividbio/kividb:v1.0.3-tls) -- the
+	// image tag suffix (e.g. quay.io/kividbio/kividb:v1.0.4-tls) -- the
 // features aren't runtime-togglable, they're compiled in.
 type KividbVariant string
 
@@ -197,9 +197,9 @@ type KividbClusterSpec struct {
 	Replicas int32 `json:"replicas,omitempty"`
 
 	// Image is the kividb container image, e.g.
-	// "quay.io/kividbio/kividb:v1.0.3" or, for a non-standard build,
-	// "quay.io/kividbio/kividb:v1.0.3-tls". Defaults to
-	// quay.io/kividbio/kividb:v1.0.3 if unset -- set this explicitly to pin a specific
+	// "quay.io/kividbio/kividb:v1.0.4" or, for a non-standard build,
+	// "quay.io/kividbio/kividb:v1.0.4-tls". Defaults to
+	// quay.io/kividbio/kividb:v1.0.4 if unset -- set this explicitly to pin a specific
 	// version. The operator uses this value verbatim; it never derives or
 	// modifies an image reference from Variant below.
 	// +optional
@@ -264,6 +264,13 @@ type KividbClusterSpec struct {
 	// +optional
 	SnapshotConfigRef *corev1.LocalObjectReference `json:"snapshotConfigRef,omitempty"`
 
+	// BootstrapFromSnapshot, when set on a new cluster, seeds pod-0's data
+	// volume from a successful KividbSnapshot before kividb starts. Only
+	// honored while status.bootstrap.completed is unset; after a successful
+	// bootstrap the field is ignored (treat as immutable for that cluster).
+	// +optional
+	BootstrapFromSnapshot *BootstrapFromSnapshotSpec `json:"bootstrapFromSnapshot,omitempty"`
+
 	// Storage configures the per-pod PersistentVolumeClaim template.
 	Storage StorageSpec `json:"storage"`
 
@@ -322,6 +329,53 @@ type KividbClusterSpec struct {
 	Failover FailoverSpec `json:"failover,omitempty"`
 }
 
+// BootstrapFromSnapshotSpec points at a KividbSnapshot used to seed a
+// brand-new cluster's data volume.
+type BootstrapFromSnapshotSpec struct {
+	// SnapshotRef names a KividbSnapshot in the same namespace. The
+	// snapshot's status.phase must be Succeeded and status.objectKey must
+	// be set.
+	SnapshotRef corev1.LocalObjectReference `json:"snapshotRef"`
+}
+
+// BootstrapPhase is the coarse state of snapshot bootstrap.
+type BootstrapPhase string
+
+const (
+	BootstrapPending    BootstrapPhase = "Pending"
+	BootstrapInProgress BootstrapPhase = "InProgress"
+	BootstrapCompleted  BootstrapPhase = "Completed"
+	BootstrapFailed     BootstrapPhase = "Failed"
+)
+
+// BootstrapStatus reports progress of seeding from a snapshot.
+type BootstrapStatus struct {
+	// Phase is the current bootstrap lifecycle state.
+	// +optional
+	Phase BootstrapPhase `json:"phase,omitempty"`
+
+	// SnapshotName echoes the snapshot that was (or is being) used.
+	// +optional
+	SnapshotName string `json:"snapshotName,omitempty"`
+
+	// Completed is true once the PVC has been seeded successfully. When
+	// true, spec.bootstrapFromSnapshot is ignored on subsequent reconciles.
+	// +optional
+	Completed bool `json:"completed,omitempty"`
+
+	// Message is a human-readable summary.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// Error holds the failure reason when Phase is Failed.
+	// +optional
+	Error string `json:"error,omitempty"`
+
+	// CompletionTime is when bootstrap finished successfully.
+	// +optional
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+}
+
 // KividbPodStatus reports the operator's last-observed state for one pod.
 type KividbPodStatus struct {
 	// Name of the Pod.
@@ -361,6 +415,11 @@ type KividbClusterStatus struct {
 	// ObservedGeneration is the .metadata.generation last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Bootstrap reports snapshot-bootstrap progress when
+	// spec.bootstrapFromSnapshot was set on this cluster.
+	// +optional
+	Bootstrap *BootstrapStatus `json:"bootstrap,omitempty"`
 
 	// Conditions follow the standard Kubernetes conditions convention.
 	// +optional

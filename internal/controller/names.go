@@ -53,15 +53,15 @@ const (
 	// pre-release checklist in docs/RELEASING.md) -- there is currently no
 	// build-time (-ldflags) mechanism that does this automatically, despite
 	// what an earlier version of this comment claimed.
-	DefaultAgentImage = "quay.io/kividbio/kividb-operator-agent:0.3.0"
+	DefaultAgentImage = "quay.io/kividbio/kividb-operator-agent:0.4.0"
 
 	// DefaultKividbImage is used when KividbClusterSpec.Image is unset.
 	// Pinned to the kividb engine line this operator release was validated
 	// against (see CHANGELOG / hack/e2e). Override with spec.image for a
-	// different tag or variant (e.g. ...:v1.0.3-tls). Deliberately not
+	// different tag or variant (e.g. ...:v1.0.4-tls). Deliberately not
 	// derived from spec.variant: the operator never guesses an image tag
 	// from spec.variant.
-	DefaultKividbImage = "quay.io/kividbio/kividb:v1.0.3"
+	DefaultKividbImage = "quay.io/kividbio/kividb:v1.0.4"
 
 	// ExporterPort is the redis_exporter sidecar's standard listen port
 	// (its own documented default -- not something this project invented).

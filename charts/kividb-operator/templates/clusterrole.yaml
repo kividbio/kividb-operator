@@ -66,6 +66,26 @@ rules:
       - update
       - patch
   - apiGroups:
+      - kividb.io
+    resources:
+      - kividbdbops
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - kividb.io
+    resources:
+      - kividbdbops/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
       - apps
     resources:
       - statefulsets
@@ -97,12 +117,17 @@ rules:
       - get
       - list
       - watch
+      - create
+      - update
+      - patch
+      - delete
   - apiGroups:
       - ""
     resources:
       - services
       - configmaps
       - secrets
+      - persistentvolumeclaims
     verbs:
       - get
       - list
@@ -120,6 +145,7 @@ rules:
       - list
       - watch
       - patch
+      - delete
   - apiGroups:
       - ""
     resources:

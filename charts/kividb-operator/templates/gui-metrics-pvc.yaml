@@ -1,0 +1,19 @@
+{{- if and .Values.gui.enabled .Values.gui.metrics.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "kividb-operator.gui.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kividb-operator.gui.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gui
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.gui.metrics.persistence.size | quote }}
+  {{- with .Values.gui.metrics.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

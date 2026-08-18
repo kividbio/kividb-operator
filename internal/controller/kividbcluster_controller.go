@@ -103,6 +103,20 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.reconcileServices(ctx, &c); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling services: %w", err)
 	}
+
+	blockSTS, bootErr := r.reconcileBootstrap(ctx, &c)
+	if bootErr != nil {
+		log.Error(bootErr, "bootstrap reconciliation failed")
+	}
+	if c.Spec.BootstrapFromSnapshot != nil {
+		if statusErr := r.Status().Update(ctx, &c); statusErr != nil {
+			return ctrl.Result{}, fmt.Errorf("updating bootstrap status: %w", statusErr)
+		}
+		if err := r.Get(ctx, req.NamespacedName, &c); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	if err := r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
 	}
@@ -113,6 +127,10 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.reconcileSnapshots(ctx, &c, snapCfg.Name); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconciling snapshots: %w", err)
 		}
+	}
+
+	if blockSTS || bootErr != nil {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// Captured before reconcileRoles/updateStatus mutate c.Status, so it

@@ -381,7 +381,7 @@ func pullPolicyOrDefault(p corev1.PullPolicy) corev1.PullPolicy {
 }
 
 func desiredStatefulSet(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) *appsv1.StatefulSet {
-	replicas := c.Spec.Replicas + 1 // +1 for the master
+	replicas := desiredSTSReplicas(c) // +1 for the master, or 0 while bootstrapping
 	accessModes := c.Spec.Storage.AccessModes
 	if len(accessModes) == 0 {
 		accessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}

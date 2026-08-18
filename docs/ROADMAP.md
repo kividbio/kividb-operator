@@ -94,7 +94,7 @@ moved under 0.3.0 / Before 1.0.0.
   decision (who publishes as kividb's own maintainers), not an engineering
   task.
 
-## 0.3.0 (shipped / in progress)
+## 0.3.0 (shipped)
 
 - **Multi-arch operator images** (`linux/amd64` + `linux/arm64`) — fixes
   the Apple Silicon / arm64 `ErrImagePull` on the 0.2.0 Quay tags.
@@ -107,21 +107,35 @@ moved under 0.3.0 / Before 1.0.0.
   tags). Upstream TLS / ACL / replication caveats from the 2026-07-23
   live test are re-verified by e2e rather than assumed fixed.
 
-## 0.4.0 and beyond (less firm)
+## 0.4.0 (this release)
 
-- **`KividbCluster` horizontal read scaling helpers** -- e.g. a
-  `spec.replicas` autoscaling hook driven by replica CPU/connection count,
-  rather than always-manual `replicas`.
-- **Multi-cluster / cross-region replication** -- explicitly out of scope
-  for the current architecture (see ARCHITECTURE.md's "what this operator
-  deliberately does not do").
-- **Admission webhooks** for stricter validation than the CRD schema alone
-  can express (e.g. "if `spec.variant` is `tls`, `configRef` must point at
-  a `KividbConfig` with `spec.tls.enabled: true`"). Deferred because it
-  adds a cert-manager (or self-signed cert rotation) dependency to
-  installation, which the project has otherwise deliberately avoided.
-- **PVC online expansion automation** when `spec.storage.size` changes
-  (currently manual -- see TROUBLESHOOTING.md).
+- **Management GUI:** Basic auth, RESP explorer (`POST /exec` via agent),
+  pod logs, live status, DbOps restart actions, 24h local metrics
+  (PVC-backed scraper; no Prometheus required for the dashboard).
+- **`KividbDbOps`:** InPlace rolling restart.
+- **Bootstrap restore:** `spec.bootstrapFromSnapshot` on a **new**
+  `KividbCluster` (not in-place rewrite of a live PVC).
+- **Engine pin:** default / samples / docs → **kividb v1.0.4**. Pre-GA
+  testing may override with `v1.0.4-rc2` via `spec.image` /
+  `KIVIDB_VERSION`.
+- **e2e:** `08-resp-acl-select.sh` (RESP3, ACL deny smoke, SELECT on
+  replica, single-master after failover).
+
+### Still deferred after 0.4.0
+
+- **`ReducedImpact` restart** (temporary extra replica).
+- **In-place restore** of an already-running cluster from a snapshot.
+- **Engine ACL model gaps** (Cloud-safe; document only in this release):
+  - Unauthenticated `PING` → `PONG` when the default user has a password
+    but `requirepass` is empty (connections still implicitly auth as
+    `default`).
+  - Multiple `keyPatterns` on one user: operator renders `~a ~b` but
+    kividb `apply_rule` keeps a single `keys` string (last wins). Prefer
+    `~*` or a single pattern until the engine supports multi-pattern.
+- **`KividbCluster` horizontal read scaling helpers**
+- **Multi-cluster / cross-region replication** — out of scope
+- **Admission webhooks** for stricter validation
+- **PVC online expansion automation**
 
 ## Before 1.0.0
 
@@ -138,6 +152,6 @@ Semver 1.0.0 is a deliberate milestone, not just "whatever's next after
    to visibly settle first.
 3. The kividb upstream replication bug above is fixed, or explicitly
    documented as a known, permanent limitation rather than an open bug.
-4. At least one restore has been exercised end-to-end (manual is fine, but
-   it needs to have actually happened, not just be theoretically
-   documented).
+4. At least one restore has been exercised end-to-end — **bootstrap-from-
+   snapshot is implemented in 0.4.0**; keep exercising it in e2e before
+   calling the API frozen for 1.0.0.

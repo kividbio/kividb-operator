@@ -70,6 +70,20 @@ type BackupResult struct {
 	Error string `json:"error,omitempty"`
 }
 
+// ExecRequest is the body of POST /exec: a RESP command as string args.
+type ExecRequest struct {
+	Args []string `json:"args"`
+}
+
+// ExecResponse is returned by POST /exec.
+type ExecResponse struct {
+	Type  string         `json:"type"` // status|error|integer|bulk|array|nil
+	Str   string         `json:"str,omitempty"`
+	Int   int64          `json:"int,omitempty"`
+	Array []ExecResponse `json:"array,omitempty"`
+	IsNil bool           `json:"isNil,omitempty"`
+}
+
 // OKResponse is returned by simple actions that have no extra payload.
 type OKResponse struct {
 	OK bool `json:"ok"`

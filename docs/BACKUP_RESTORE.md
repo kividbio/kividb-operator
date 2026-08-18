@@ -141,62 +141,57 @@ enough.
 
 ## Restoring a backup
 
-**There is no automated restore yet** (see [ROADMAP.md](ROADMAP.md) for a
-planned `KividbRestore` CRD). Restoring means putting a snapshot back onto
-a pod's `/data` volume before kividb starts reading it, which is
-inherently a "the cluster is down for this" operation, so today it's a
-manual procedure:
+### Supported: bootstrap a **new** cluster from a snapshot (0.4.0+)
 
-1. **Find the object key** you want to restore from a `KividbSnapshot`'s
-   `status.objectKey`, then download and extract it locally:
+Create a new `KividbCluster` with `spec.bootstrapFromSnapshot` pointing at a
+`Succeeded` `KividbSnapshot` in the same namespace. The operator seeds
+pod-0's PVC from S3 before starting the StatefulSet; replicas then
+full-sync via the normal `REPLICAOF` path.
+
+```yaml
+apiVersion: kividb.io/v1alpha1
+kind: KividbCluster
+metadata:
+  name: my-cluster-restored
+spec:
+  image: quay.io/kividbio/kividb:v1.0.4
+  replicas: 1
+  storage:
+    size: 5Gi
+  bootstrapFromSnapshot:
+    snapshotRef:
+      name: my-cluster-backups-20260721t000004z
+```
+
+Watch progress on `status.bootstrap` / cluster conditions (`Bootstrapping`
+until the Job finishes). Once `status.bootstrap.completed` is true, the
+field is ignored on later reconciles (immutable bootstrap).
+
+This is **not** an in-place restore of a live cluster — that remains out of
+scope (see [ROADMAP.md](ROADMAP.md)).
+
+### Manual restore (legacy / emergency)
+
+If you need to rewrite an existing PVC by hand:
+
+1. **Find the object key** from a `KividbSnapshot`'s `status.objectKey`,
+   then download and extract it locally:
 
    ```bash
    aws s3 cp s3://my-kividb-backups/prod/my-cluster/my-cluster-1-20260721T000004Z.tar.gz .
-   # or: mc cp minio/my-kividb-backups/... .   (MinIO client)
    tar xzf my-cluster-1-20260721T000004Z.tar.gz   # produces dump.kdb (and appendonly.aof)
    ```
 
-2. **Scale the StatefulSet to 0** to stop all kividb processes cleanly
-   (avoids a running process overwriting the file you're about to copy
-   in):
+2. **Scale the StatefulSet to 0**:
 
    ```bash
    kubectl scale statefulset my-cluster --replicas=0
    ```
 
-3. **Copy the files onto the PVC** you want to restore into. The
-   simplest way is a short-lived debug pod that mounts the same PVC:
+3. **Copy the files onto the PVC** (short-lived debug pod mounting
+   `data-<sts>-0`).
 
-   ```bash
-   kubectl run restore-helper --rm -i --restart=Never \
-     --image=busybox --overrides='{
-       "spec": {"containers": [{"name":"restore-helper","image":"busybox","command":["sleep","3600"],
-       "volumeMounts":[{"name":"data","mountPath":"/data"}]}],
-       "volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"data-my-cluster-0"}}]}}' &
-   sleep 5
-   kubectl cp ./dump.kdb restore-helper:/data/dump.kdb
-   kubectl cp ./appendonly.aof restore-helper:/data/appendonly.aof   # if present
-   kubectl delete pod restore-helper
-   ```
+4. **Scale back up** to `replicas+1` and verify with
+   `kubectl get kividbcluster my-cluster`.
 
-   PVC names follow the StatefulSet's volume claim template naming:
-   `data-<statefulset-name>-<ordinal>`, e.g. `data-my-cluster-0`.
-
-4. **Scale back up**:
-
-   ```bash
-   kubectl scale statefulset my-cluster --replicas=<replicas+1>
-   ```
-
-   The operator's role-election logic will pick a master on next
-   reconcile (within ~10s) and point the other pods' `REPLICAOF` at it —
-   but note it will only find data on whichever pod(s) you actually
-   restored into. If you're restoring the *whole* cluster from one
-   snapshot (the common case — e.g. recovering from a bad write), restore
-   the same `dump.kdb` onto **every** pod's PVC before scaling back up, so
-   whichever one gets elected master has the data and the others don't
-   diverge before their first `REPLICAOF` full resync overwrites their
-   copy anyway.
-
-5. Verify: `kubectl get kividbcluster my-cluster -o jsonpath='{.status}'`
-   and connect with `redis-cli` to spot-check the restored keys.
+Prefer `bootstrapFromSnapshot` for recovery onto a fresh cluster name.

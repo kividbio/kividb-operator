@@ -34,6 +34,7 @@ func runServe(args []string) error {
 	mux.HandleFunc("POST /replicaof", s.handleReplicaOf)
 	mux.HandleFunc("POST /acl/reload", s.handleAclReload)
 	mux.HandleFunc("POST /backup", s.handleBackup)
+	mux.HandleFunc("POST /exec", s.handleExec)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	addr := fmt.Sprintf(":%d", cfg.AgentPort)
@@ -203,6 +204,63 @@ func (s *server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *server) handleExec(w http.ResponseWriter, r *http.Request) {
+	var req agentapi.ExecRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.Args) == 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("args must be a non-empty command"))
+		return
+	}
+	c, err := s.dial()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer c.Close()
+	reply, err := c.Do(req.Args...)
+	if err != nil && reply == nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := replyToExec(reply)
+	// RESP error replies are still HTTP 200 with type=error so the GUI can
+	// display the engine message without treating transport as failed.
+	writeJSON(w, http.StatusOK, out)
+}
+
+func replyToExec(r *respclient.Reply) agentapi.ExecResponse {
+	if r == nil {
+		return agentapi.ExecResponse{Type: "nil", IsNil: true}
+	}
+	switch r.Type {
+	case '+':
+		return agentapi.ExecResponse{Type: "status", Str: r.Str}
+	case '-':
+		return agentapi.ExecResponse{Type: "error", Str: r.Str}
+	case ':':
+		return agentapi.ExecResponse{Type: "integer", Int: r.Int}
+	case '$':
+		if r.IsNil {
+			return agentapi.ExecResponse{Type: "nil", IsNil: true}
+		}
+		return agentapi.ExecResponse{Type: "bulk", Str: r.Str}
+	case '*':
+		if r.IsNil {
+			return agentapi.ExecResponse{Type: "nil", IsNil: true}
+		}
+		arr := make([]agentapi.ExecResponse, len(r.Array))
+		for i, item := range r.Array {
+			arr[i] = replyToExec(item)
+		}
+		return agentapi.ExecResponse{Type: "array", Array: arr}
+	default:
+		return agentapi.ExecResponse{Type: "bulk", Str: r.Str}
+	}
 }
 
 func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {

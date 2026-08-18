@@ -66,8 +66,8 @@ spec:
                   type: string
                   description: >-
                     kividb container image, e.g.
-                    "quay.io/kividbio/kividb:v1.0.3". Defaults to
-                    quay.io/kividbio/kividb:v1.0.3 if unset -- set this explicitly
+                    "quay.io/kividbio/kividb:v1.0.4". Defaults to
+                    quay.io/kividbio/kividb:v1.0.4 if unset -- set this explicitly
                     to pin a version. Used verbatim; never derived or
                     modified from variant below.
                 variant:
@@ -128,6 +128,19 @@ spec:
                     Optional: omit to disable scheduled backups.
                   properties:
                     name: {type: string}
+                bootstrapFromSnapshot:
+                  type: object
+                  description: >-
+                    Seed a brand-new cluster's pod-0 data volume from a
+                    successful KividbSnapshot before kividb starts. Only
+                    honored until status.bootstrap.completed is true.
+                  required: [snapshotRef]
+                  properties:
+                    snapshotRef:
+                      type: object
+                      required: [name]
+                      properties:
+                        name: {type: string}
                 storage:
                   type: object
                   required: [size]
@@ -242,6 +255,20 @@ spec:
                 observedGeneration:
                   type: integer
                   format: int64
+                bootstrap:
+                  type: object
+                  description: Snapshot-bootstrap progress for this cluster.
+                  properties:
+                    phase:
+                      type: string
+                      enum: [Pending, InProgress, Completed, Failed]
+                    snapshotName: {type: string}
+                    completed: {type: boolean}
+                    message: {type: string}
+                    error: {type: string}
+                    completionTime:
+                      type: string
+                      format: date-time
                 conditions:
                   type: array
                   items:

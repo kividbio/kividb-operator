@@ -54,7 +54,7 @@ manager:
 
   image:
     repository: quay.io/kividbio/kividb-operator
-    tag: "0.3.0"
+    tag: "0.4.0"
     pullPolicy: IfNotPresent
 
   resources:
@@ -104,7 +104,7 @@ manager:
 agent:
   image:
     repository: quay.io/kividbio/kividb-operator-agent
-    tag: "0.3.0"
+    tag: "0.4.0"
     pullPolicy: IfNotPresent
   resources:
     requests:
@@ -135,10 +135,9 @@ exporter:
       memory: 128Mi
 
 # -----------------------------------------------------------------------
-# Read-only web GUI (cmd/gui, Dockerfile.gui) -- optional Deployment with
-# its own narrow, secrets-free RBAC. Contract frozen in docs/_internal-spec.md:
-# port 8090, get/list/watch only on kividbclusters/pods/statefulsets/
-# cronjobs/services, never secrets.
+# Management web GUI (cmd/gui, Dockerfile.gui) -- optional Deployment with
+# its own narrow RBAC (never Secrets to the browser). Auth Secret is
+# required for RESP explorer; metrics PVC backs the 24h local scraper.
 # -----------------------------------------------------------------------
 gui:
   enabled: true
@@ -146,12 +145,25 @@ gui:
 
   image:
     repository: quay.io/kividbio/kividb-operator-gui
-    tag: "0.3.0"
+    tag: "0.4.0"
     pullPolicy: IfNotPresent
 
   service:
     type: ClusterIP
     port: 8090
+
+  # existingSecret must contain username/password keys (override key names
+  # below). When unset, Basic auth is disabled and RESP explorer returns 403.
+  auth:
+    existingSecret: ""
+    usernameKey: username
+    passwordKey: password
+
+  metrics:
+    persistence:
+      enabled: true
+      size: 1Gi
+      storageClass: ""
 
   resources:
     requests:

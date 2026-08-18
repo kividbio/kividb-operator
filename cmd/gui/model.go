@@ -114,6 +114,7 @@ type ClusterDetail struct {
 	Image            string `json:"image"`
 	AgentImage       string `json:"agentImage,omitempty"`
 	Port             int32  `json:"port"`
+	Replicas         int32  `json:"replicas"` // spec.replicas (not including master)
 	StorageSize      string `json:"storageSize"`
 	StorageClassName string `json:"storageClassName,omitempty"`
 

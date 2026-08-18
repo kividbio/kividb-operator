@@ -65,6 +65,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	dbopsReconciler := &controller.KividbDbOpsReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}
+	if err := dbopsReconciler.SetupWithManager(mgr); err != nil {
+		ctrl.Log.Error(err, "unable to create controller", "controller", "KividbDbOps")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		ctrl.Log.Error(err, "unable to set up health check")
 		os.Exit(1)
