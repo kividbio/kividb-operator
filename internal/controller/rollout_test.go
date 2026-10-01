@@ -29,6 +29,10 @@ func TestReplicaSynced(t *testing.T) {
 	elsewhere.MasterHost = "10.0.0.9"
 	portUnknown := replica(500, 10)
 	portUnknown.MasterPort = 0
+	hostUnknown := replica(500, 10)
+	hostUnknown.MasterHost, hostUnknown.MasterPort = "", 0
+	hostUnknownLoading := replica(0, 0)
+	hostUnknownLoading.MasterHost, hostUnknownLoading.MasterPort = "", 0
 
 	tests := []struct {
 		name            string
@@ -43,6 +47,8 @@ func TestReplicaSynced(t *testing.T) {
 		{"replicating from a different master", masterAt(500, 10), elsewhere, true, false},
 		{"agent unreachable", masterAt(500, 10), nil, true, false},
 		{"older agent that reports master port 0", masterAt(500, 10), portUnknown, false, true},
+		{"older engine that reports no master host", masterAt(500, 10), hostUnknown, false, true},
+		{"older engine, no master host, still loading", masterAt(500, 10), hostUnknownLoading, false, false},
 		{"idle master, same key count", masterAt(0, 948_398), replica(0, 948_398), false, true},
 		{"idle master, replica still empty", masterAt(0, 948_398), replica(0, 0), false, false},
 		{"idle and empty cluster", masterAt(0, 0), replica(0, 0), false, true},

@@ -46,7 +46,15 @@ const (
 // master cannot be queried: a replica does not stop being the best
 // failover candidate because its master just died.
 func replicaSynced(master, replica *agentapi.StatusResponse, masterIP string, port int32, previously bool) bool {
-	if replica == nil || replica.Role != agentapi.RoleReplica || !followsMaster(replica, masterIP, port) {
+	if replica == nil || replica.Role != agentapi.RoleReplica {
+		return false
+	}
+	// kividb before v1.0.4 answers ROLE on a replica with an empty master
+	// host, so on those pods there is nothing to check here and the
+	// offsets below have to carry the verdict. Insisting on a match would
+	// leave every replica "not in sync" forever, and with it block the
+	// very rollout that upgrades the engine.
+	if replica.MasterHost != "" && !followsMaster(replica, masterIP, port) {
 		return false
 	}
 	if master == nil {
