@@ -151,6 +151,7 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 	}
 	if info, err := c.Info("keyspace"); err == nil {
 		out.KeyCount = keyspaceKeyCount(info)
+		out.KeyCountKnown = true
 	}
 	return out, nil
 }

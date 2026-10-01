@@ -168,6 +168,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	r.reconcileAclReload(ctx, &c, podList.Items, aclContent, generations)
+	r.reconcileStepDown(ctx, &c, podList.Items, statuses, masterPod)
 	r.reconcileRollout(ctx, &c, podList.Items, statuses, masterPod)
 
 	if statusErr := r.updateStatus(ctx, &c, statuses, masterPod, previousMasterPod, failoverHappened, err); statusErr != nil {

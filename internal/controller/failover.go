@@ -78,8 +78,12 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	currentMasterName := resolveCurrentMaster(pods, views, c.Status.MasterPod)
 
 	previouslySynced := make(map[string]bool, len(c.Status.Pods))
+	var masterKeysLastSeen int64
 	for _, ps := range c.Status.Pods {
 		previouslySynced[ps.Name] = ps.Synced
+		if ps.Name == currentMasterName {
+			masterKeysLastSeen = ps.Keys
+		}
 	}
 
 	threshold := defaultUnhealthyThreshold
@@ -133,12 +137,33 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	}
 
 	if needsElection || needsFailover {
+		// A replica can be Ready, connected and "in sync" by every other
+		// measure and still hold nothing: kividb drops a replica's dataset
+		// when a full resync fails part-way, which is what happens to
+		// every replica at once when the master is crash-looping (it dies
+		// again mid-transfer). Promoting one of those turns a master
+		// outage into total data loss -- the old master still has the
+		// data on disk, and would be made to resync from the empty one
+		// the moment it came back. So when the master was last seen
+		// holding data, only replicas that still hold some are eligible,
+		// and if none does the failover waits for the master.
+		eligible := views
+		if needsFailover && masterKeysLastSeen > 0 && c.Annotations[kividbv1alpha1.AllowEmptyFailoverAnnotation] != "true" {
+			eligible = withoutEmptied(views)
+			if electReplica(eligible, currentMasterName) == "" && electReplica(views, currentMasterName) != "" {
+				r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
+					"master %s is unavailable, but no ready replica holds any data (the master last reported %d keys); waiting for it to return rather than promoting an empty replica. Set the %s annotation to \"true\" to fail over anyway.",
+					currentMasterName, masterKeysLastSeen, kividbv1alpha1.AllowEmptyFailoverAnnotation)
+				return nil, currentMasterName, false, fmt.Errorf("failover blocked: no ready replica holds any data, master %s last reported %d keys", currentMasterName, masterKeysLastSeen)
+			}
+		}
+
 		// Prefer a replica that was in sync the last time that could be
 		// established. Offsets alone do not rule out a replica that had
 		// only just started resyncing when the master went away.
-		candidate := electReplica(onlySynced(views, previouslySynced), currentMasterName)
+		candidate := electReplica(onlySynced(eligible, previouslySynced), currentMasterName)
 		if candidate == "" {
-			candidate = electReplica(views, currentMasterName)
+			candidate = electReplica(eligible, currentMasterName)
 		}
 		if seeded := bootstrapSeededPod(c); needsElection && seeded != "" {
 			// The very first election of a cluster bootstrapped from a
@@ -199,8 +224,11 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	for _, p := range pods {
 		v := views[p.Name]
 		role := kividbv1alpha1.RoleUnknown
-		var offset int64
+		var offset, keys int64
 		synced := false
+		if v.status != nil {
+			keys = v.status.KeyCount
+		}
 
 		switch {
 		case p.Name == newMasterName:
@@ -241,6 +269,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			Ready:             v.ready,
 			ReplicationOffset: offset,
 			Synced:            synced,
+			Keys:              keys,
 		})
 	}
 
@@ -299,6 +328,20 @@ func resolveCurrentMaster(pods []corev1.Pod, views map[string]*podView, statusMa
 // "unknown" here, not a mismatch.
 func followsMaster(replica *agentapi.StatusResponse, masterIP string, port int32) bool {
 	return replica.MasterHost == masterIP && (replica.MasterPort == 0 || replica.MasterPort == port)
+}
+
+// withoutEmptied returns views minus the pods whose agent positively
+// reports holding no keys. A pod whose agent is unreachable or too old to
+// report a key count stays in: nothing is known against it.
+func withoutEmptied(views map[string]*podView) map[string]*podView {
+	out := make(map[string]*podView, len(views))
+	for name, v := range views {
+		if v.status != nil && v.status.KeyCountKnown && v.status.KeyCount == 0 {
+			continue
+		}
+		out[name] = v
+	}
+	return out
 }
 
 // onlySynced returns the views of the pods marked in synced.

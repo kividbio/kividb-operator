@@ -132,6 +132,26 @@ func (r *KividbDbOpsReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: dbOpsRequeue}, nil
 	}
 
+	// The master hands its role to an in-sync replica before it is
+	// restarted (see switchover in rollout.go for why it must not simply
+	// be restarted in place). The cluster controller does the handover;
+	// this only asks for it and waits.
+	if next == cluster.Status.MasterPod && hasSyncedReplica(&cluster, next) {
+		if p.Annotations[StepDownAnnotation] != "true" {
+			patch := client.MergeFrom(p.DeepCopy())
+			if p.Annotations == nil {
+				p.Annotations = map[string]string{}
+			}
+			p.Annotations[StepDownAnnotation] = "true"
+			if err := r.Patch(ctx, p, patch); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		op.Status.Message = fmt.Sprintf("waiting for %s to hand over the master role", next)
+		_ = r.Status().Update(ctx, &op)
+		return ctrl.Result{RequeueAfter: dbOpsRequeue}, nil
+	}
+
 	log.Info("deleting pod for restart", "pod", next, "cluster", cluster.Name)
 	if err := r.Delete(ctx, p); err != nil && !apierrors.IsNotFound(err) {
 		return r.fail(ctx, &op, fmt.Sprintf("deleting %s: %v", next, err))
@@ -189,6 +209,17 @@ func restartPending(p *corev1.Pod, deletedUID string, cluster *kividbv1alpha1.Ki
 		}
 	}
 	return "to rejoin the cluster"
+}
+
+// hasSyncedReplica reports whether some pod other than master is a Ready,
+// in-sync replica, i.e. whether the master has anyone to hand over to.
+func hasSyncedReplica(cluster *kividbv1alpha1.KividbCluster, master string) bool {
+	for _, ps := range cluster.Status.Pods {
+		if ps.Name != master && ps.Ready && ps.Synced && ps.Role == kividbv1alpha1.RoleReplica {
+			return true
+		}
+	}
+	return false
 }
 
 // restartOrder lists replica pods first (lexicographically), then the

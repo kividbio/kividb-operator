@@ -248,6 +248,9 @@ spec:
                       role: {type: string}
                       ready: {type: boolean}
                       synced: {type: boolean}
+                      keys:
+                        type: integer
+                        format: int64
                       replicationOffset:
                         type: integer
                         format: int64

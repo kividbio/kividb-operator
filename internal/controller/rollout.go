@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -72,6 +74,88 @@ func replicaSynced(master, replica *agentapi.StatusResponse, masterIP string, po
 		diff = -diff
 	}
 	return diff <= slack
+}
+
+// switchover hands the master role from masterPod to the most caught-up
+// replica that is in sync, and returns that replica's name. It is the
+// planned counterpart of a failover: the old master is alive, so it is
+// turned into a replica of the new one rather than left behind.
+//
+// The order is chosen to keep the window in which a write can be lost as
+// short as possible: the old master leaves the master Service first, so no
+// new connection reaches it; the replica is then promoted and takes its
+// place in the Service; and the old master is pointed at it last. Only a
+// write sent on an already-open connection to the old master during those
+// few calls is not carried over.
+func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []corev1.Pod, statuses []kividbv1alpha1.KividbPodStatus, masterPod string) (string, error) {
+	byName := make(map[string]*corev1.Pod, len(pods))
+	for i := range pods {
+		byName[pods[i].Name] = &pods[i]
+	}
+	old, ok := byName[masterPod]
+	if !ok {
+		return "", fmt.Errorf("master pod %s not found", masterPod)
+	}
+
+	var target *corev1.Pod
+	var targetOffset int64
+	for _, s := range statuses {
+		p := byName[s.Name]
+		if s.Name == masterPod || p == nil || !s.Ready || !s.Synced || s.Role != kividbv1alpha1.RoleReplica {
+			continue
+		}
+		if target == nil || s.ReplicationOffset > targetOffset || (s.ReplicationOffset == targetOffset && s.Name < target.Name) {
+			target, targetOffset = p, s.ReplicationOffset
+		}
+	}
+	if target == nil {
+		return "", fmt.Errorf("no replica is in sync to take over from %s", masterPod)
+	}
+
+	logf.FromContext(ctx).Info("switchover: moving the master role", "from", masterPod, "to", target.Name)
+	if err := r.setRoleLabel(ctx, old, kividbv1alpha1.RoleReplica); err != nil {
+		return "", err
+	}
+	if err := r.Agent.Promote(ctx, target.Status.PodIP); err != nil {
+		// Nothing has changed on the kividb side: give the label back.
+		_ = r.setRoleLabel(ctx, old, kividbv1alpha1.RoleMaster)
+		return "", fmt.Errorf("promoting %s: %w", target.Name, err)
+	}
+	if err := r.setRoleLabel(ctx, target, kividbv1alpha1.RoleMaster); err != nil {
+		return "", err
+	}
+	if err := r.Agent.ReplicaOf(ctx, old.Status.PodIP, target.Status.PodIP, getPort(c)); err != nil {
+		// The next reconcileRoles pass sees a replica-labeled pod that
+		// still reports master and re-points it.
+		logf.FromContext(ctx).Error(err, "switchover: pointing the old master at the new one", "pod", masterPod)
+	}
+	r.event(c, corev1.EventTypeNormal, "Switchover", "moved the master role from %s to %s", masterPod, target.Name)
+	return target.Name, nil
+}
+
+// reconcileStepDown performs the switchover a StepDownAnnotation on the
+// master's pod asks for, then removes the annotation. If no replica is in
+// sync yet the request simply stays until one is.
+func (r *KividbClusterReconciler) reconcileStepDown(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []corev1.Pod, statuses []kividbv1alpha1.KividbPodStatus, masterPod string) {
+	log := logf.FromContext(ctx)
+	for i := range pods {
+		p := &pods[i]
+		if p.Annotations[StepDownAnnotation] != "true" || p.DeletionTimestamp != nil {
+			continue
+		}
+		if p.Name == masterPod {
+			if _, err := r.switchover(ctx, c, pods, statuses, masterPod); err != nil {
+				log.V(1).Info("step-down requested but not possible yet", "pod", p.Name, "reason", err.Error())
+				continue
+			}
+		}
+		// Not (or no longer) the master: the request is fulfilled.
+		patch := client.MergeFrom(p.DeepCopy())
+		delete(p.Annotations, StepDownAnnotation)
+		if err := r.Client.Patch(ctx, p, patch); err != nil {
+			log.Error(err, "removing step-down annotation", "pod", p.Name)
+		}
+	}
 }
 
 // unreadySince returns when pod last stopped being (or never became)
@@ -171,6 +255,20 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 		return outdated[i].Name > outdated[j].Name
 	})
 	next := outdated[0]
+
+	// The master is never replaced while it is the master. Its replacement
+	// would come back with whatever its volume holds, every replica would
+	// resync from that, and anything written since the master's last save
+	// would be gone from all of them -- kividb's save on shutdown cannot
+	// be relied on to close that gap. Move the role to an in-sync replica
+	// first; the old master is then just another outdated replica and is
+	// replaced on a later pass.
+	if next.Name == masterPod && len(pods) > 1 {
+		if _, err := r.switchover(ctx, c, pods, statuses, masterPod); err != nil {
+			log.Error(err, "rollout: moving the master role before replacing the master", "pod", masterPod)
+		}
+		return
+	}
 	log.Info("rollout: replacing pod to apply the updated pod template", "pod", next.Name, "remaining", len(outdated)-1)
 	if err := r.Delete(ctx, next); err != nil && !apierrors.IsNotFound(err) {
 		log.Error(err, "rollout: deleting pod", "pod", next.Name)

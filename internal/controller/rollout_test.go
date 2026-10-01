@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"sort"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -84,6 +87,75 @@ func TestReconcileRoles_FailoverPrefersSyncedReplica(t *testing.T) {
 	}
 }
 
+// The master was holding data and is gone; what the replicas hold decides
+// whether, and to whom, the cluster fails over.
+func TestReconcileRoles_FailoverSkipsEmptiedReplicas(t *testing.T) {
+	emptied := func(host string) *agentapi.StatusResponse {
+		s := replicaOf(host, 0)
+		s.KeyCountKnown = true
+		return s
+	}
+	holding := func(host string, keys int64) *agentapi.StatusResponse {
+		s := replicaOf(host, 0)
+		s.KeyCount, s.KeyCountKnown = keys, true
+		return s
+	}
+	setup := func(t *testing.T, r1, r2 *agentapi.StatusResponse) *rolesHarness {
+		h := newRolesHarness(t, "c1-0",
+			testPod{name: "c1-0", ip: "10.0.0.1", label: "master", unreadyFor: time.Minute},
+			testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: r1},
+			testPod{name: "c1-2", ip: "10.0.0.3", label: "replica", ready: true, agent: r2},
+		)
+		h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+			{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Synced: true, Keys: 261704},
+			{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Synced: true, Keys: 261704},
+			{Name: "c1-2", Role: kividbv1alpha1.RoleReplica, Synced: true, Keys: 261704},
+		}
+		return h
+	}
+	tryReconcile := func(h *rolesHarness) (string, error) {
+		var list corev1.PodList
+		if err := h.r.List(context.Background(), &list, client.InNamespace(h.cluster.Namespace)); err != nil {
+			t.Fatal(err)
+		}
+		_, m, _, err := h.r.reconcileRoles(context.Background(), h.cluster, list.Items)
+		return m, err
+	}
+
+	t.Run("every replica emptied: no failover", func(t *testing.T) {
+		h := setup(t, emptied("10.0.0.1"), emptied("10.0.0.1"))
+		if m, err := tryReconcile(h); err == nil {
+			t.Fatalf("promoted %q, want the failover to be refused", m)
+		}
+		if len(h.agents.calls) != 0 {
+			t.Fatalf("unexpected agent calls: %v", h.agents.calls)
+		}
+		h.assertLabels(map[string]string{"c1-0": "master", "c1-1": "replica", "c1-2": "replica"})
+	})
+
+	t.Run("one replica still holds data: it is promoted", func(t *testing.T) {
+		h := setup(t, emptied("10.0.0.1"), holding("10.0.0.1", 261704))
+		if m, err := tryReconcile(h); err != nil || m != "c1-2" {
+			t.Fatalf("master=%q err=%v, want c1-2", m, err)
+		}
+	})
+
+	t.Run("every replica emptied, override annotation set: failover proceeds", func(t *testing.T) {
+		h := setup(t, emptied("10.0.0.1"), emptied("10.0.0.1"))
+		h.cluster.Annotations = map[string]string{kividbv1alpha1.AllowEmptyFailoverAnnotation: "true"}
+		if m, err := tryReconcile(h); err != nil || m != "c1-1" {
+			t.Fatalf("master=%q err=%v, want c1-1", m, err)
+		}
+	})
+
+	t.Run("agents too old to report key counts are not treated as empty", func(t *testing.T) {
+		h := setup(t, replicaOf("10.0.0.1", 0), replicaOf("10.0.0.1", 0))
+		if m, err := tryReconcile(h); err != nil || m != "c1-1" {
+			t.Fatalf("master=%q err=%v, want c1-1", m, err)
+		}
+	})
+}
+
 type rolloutPod struct {
 	name       string
 	revision   string
@@ -94,16 +166,17 @@ type rolloutPod struct {
 }
 
 func TestReconcileRollout(t *testing.T) {
-	const master = "c1-0"
 	healthy := func(name, revision string) rolloutPod {
 		return rolloutPod{name: name, revision: revision, ready: true, synced: true}
 	}
 
 	tests := []struct {
-		name        string
-		pods        []rolloutPod
-		noStatuses  bool // role reconciliation failed this pass
-		wantDeleted []string
+		name         string
+		master       string // defaults to c1-0
+		pods         []rolloutPod
+		noStatuses   bool // role reconciliation failed this pass
+		wantDeleted  []string
+		wantPromoted string
 	}{
 		{
 			name:        "everything outdated and healthy: one replica, highest ordinal first",
@@ -111,8 +184,19 @@ func TestReconcileRollout(t *testing.T) {
 			wantDeleted: []string{"c1-2"},
 		},
 		{
-			name:        "replicas done: the master goes last",
+			name:         "replicas done: the master hands over instead of being replaced in place",
+			pods:         []rolloutPod{healthy("c1-0", "old"), healthy("c1-1", "new"), healthy("c1-2", "new")},
+			wantPromoted: "c1-1",
+		},
+		{
+			name:        "after the handover the old master is an ordinary outdated replica",
+			master:      "c1-1",
 			pods:        []rolloutPod{healthy("c1-0", "old"), healthy("c1-1", "new"), healthy("c1-2", "new")},
+			wantDeleted: []string{"c1-0"},
+		},
+		{
+			name:        "a single-pod cluster has nobody to hand over to",
+			pods:        []rolloutPod{healthy("c1-0", "old")},
 			wantDeleted: []string{"c1-0"},
 		},
 		{
@@ -170,9 +254,23 @@ func TestReconcileRollout(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default", Generation: 3},
 				Status:     appsv1.StatefulSetStatus{UpdateRevision: "new", ObservedGeneration: 3},
 			}}
+			master := tt.master
+			if master == "" {
+				master = "c1-0"
+			}
+			agents := &fakeAgents{status: map[string]*agentapi.StatusResponse{}}
+			ips := map[string]string{}
 			var pods []corev1.Pod
 			var statuses []kividbv1alpha1.KividbPodStatus
-			for _, p := range tt.pods {
+			for i, p := range tt.pods {
+				ip := fmt.Sprintf("10.0.0.%d", i+1)
+				ips[p.name] = ip
+				role := kividbv1alpha1.RoleReplica
+				agents.status[ip] = replicaOf("10.0.0.1", 100)
+				if p.name == master {
+					role = kividbv1alpha1.RoleMaster
+					agents.status[ip] = &agentapi.StatusResponse{Role: agentapi.RoleMaster, ReplicationOffset: 100}
+				}
 				cond := corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue}
 				if !p.ready {
 					cond.Status = corev1.ConditionFalse
@@ -183,7 +281,7 @@ func TestReconcileRollout(t *testing.T) {
 						Name: p.name, Namespace: "default",
 						Labels: map[string]string{appsv1.StatefulSetRevisionLabel: p.revision},
 					},
-					Status: corev1.PodStatus{PodIP: "10.0.0.1", Conditions: []corev1.PodCondition{cond}},
+					Status: corev1.PodStatus{PodIP: ip, Conditions: []corev1.PodCondition{cond}},
 				}
 				objs = append(objs, pod.DeepCopy())
 				if p.deleting {
@@ -191,7 +289,7 @@ func TestReconcileRollout(t *testing.T) {
 					pod.DeletionTimestamp = &now
 				}
 				pods = append(pods, pod)
-				statuses = append(statuses, kividbv1alpha1.KividbPodStatus{Name: p.name, Ready: p.ready, Synced: p.synced})
+				statuses = append(statuses, kividbv1alpha1.KividbPodStatus{Name: p.name, Role: role, Ready: p.ready, Synced: p.synced, ReplicationOffset: 100})
 			}
 			if tt.noStatuses {
 				statuses = nil
@@ -200,8 +298,26 @@ func TestReconcileRollout(t *testing.T) {
 			r := &KividbClusterReconciler{
 				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
 				Scheme: scheme,
+				Agent:  &AgentClient{http: &http.Client{Transport: agents}},
 			}
 			r.reconcileRollout(context.Background(), c, pods, statuses, master)
+
+			var wantCalls []string
+			if tt.wantPromoted != "" {
+				wantCalls = []string{
+					"promote " + ips[tt.wantPromoted],
+					fmt.Sprintf("replicaof %s -> %s", ips[master], ips[tt.wantPromoted]),
+				}
+				var promoted, demoted corev1.Pod
+				_ = r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: tt.wantPromoted}, &promoted)
+				_ = r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: master}, &demoted)
+				if promoted.Labels[kividbv1alpha1.RoleLabel] != "master" || demoted.Labels[kividbv1alpha1.RoleLabel] != "replica" {
+					t.Errorf("role labels after handover: %s=%q %s=%q", tt.wantPromoted, promoted.Labels[kividbv1alpha1.RoleLabel], master, demoted.Labels[kividbv1alpha1.RoleLabel])
+				}
+			}
+			if fmt.Sprint(agents.calls) != fmt.Sprint(wantCalls) {
+				t.Errorf("agent calls %v, want %v", agents.calls, wantCalls)
+			}
 
 			var left corev1.PodList
 			if err := r.List(context.Background(), &left); err != nil {

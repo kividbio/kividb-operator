@@ -341,6 +341,12 @@ type BootstrapFromSnapshotSpec struct {
 // BootstrapPhase is the coarse state of snapshot bootstrap.
 type BootstrapPhase string
 
+// AllowEmptyFailoverAnnotation, set to "true" on a KividbCluster, lets
+// failover promote a replica that holds no keys even though the master
+// was last seen holding data. Without it the operator waits for the
+// master to come back instead; see reconcileRoles.
+const AllowEmptyFailoverAnnotation = "kividb.io/allow-empty-failover"
+
 const (
 	BootstrapPending    BootstrapPhase = "Pending"
 	BootstrapInProgress BootstrapPhase = "InProgress"
@@ -399,6 +405,12 @@ type KividbPodStatus struct {
 	// while every pod is synced, and failover prefers synced replicas.
 	// +optional
 	Synced bool `json:"synced,omitempty"`
+
+	// Keys is the last-observed number of keys held by the pod. Failover
+	// uses the master's value to recognise replicas that have lost their
+	// dataset.
+	// +optional
+	Keys int64 `json:"keys,omitempty"`
 }
 
 // KividbClusterStatus defines the observed state of a KividbCluster.

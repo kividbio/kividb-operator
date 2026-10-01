@@ -160,8 +160,14 @@ gui:
     passwordKey: password
 
   metrics:
+    # persistence keeps the GUI's 24h metrics history across restarts of
+    # the GUI pod, on a PVC. Off by default: the history is rebuilt within
+    # a day, while a PVC that cannot be provisioned keeps the GUI pod
+    # Pending forever -- which is what happens with an empty storageClass
+    # on a cluster that has no default StorageClass (EKS, for one). When
+    # enabling it there, set storageClass explicitly.
     persistence:
-      enabled: true
+      enabled: false
       size: 1Gi
       storageClass: ""
 

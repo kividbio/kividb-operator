@@ -36,7 +36,10 @@ type StatusResponse struct {
 	LastSaveUnix      int64  `json:"lastSaveUnix"`
 	AofEnabled        bool   `json:"aofEnabled"`
 	// KeyCount is the number of keys across all databases (INFO keyspace).
-	KeyCount int64 `json:"keyCount"`
+	// KeyCountKnown tells a real 0 apart from an agent too old to report
+	// the field at all.
+	KeyCount      int64 `json:"keyCount"`
+	KeyCountKnown bool  `json:"keyCountKnown,omitempty"`
 }
 
 // AclReloadRequest is the optional body of POST /acl/reload.

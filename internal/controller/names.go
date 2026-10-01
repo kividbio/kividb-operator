@@ -103,6 +103,13 @@ const (
 	AclGenerationAnnotation = "kividb.io/acl-generation"
 	AclHashAnnotation       = "kividb.io/acl-hash"
 
+	// StepDownAnnotation, set to "true" on the master's Pod, asks the
+	// cluster controller to hand the master role to a replica that is in
+	// sync (see reconcileStepDown). The KividbDbOps controller sets it
+	// before restarting the master; the cluster controller removes it once
+	// the role has moved.
+	StepDownAnnotation = "kividb.io/step-down"
+
 	// managedByValue is the standard app.kubernetes.io/managed-by value.
 	managedByValue = "kividb-operator"
 	appName        = "kividb"
