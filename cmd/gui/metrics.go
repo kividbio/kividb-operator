@@ -254,7 +254,7 @@ func (s *server) scrapeOnce(ctx context.Context) {
 	for i := range list.Items {
 		c := &list.Items[i]
 		pods, err := s.clientset.CoreV1().Pods(c.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: "kividb.io/cluster=" + c.Name,
+			LabelSelector: clusterLabelSelector(c.Name),
 		})
 		if err != nil {
 			continue

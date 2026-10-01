@@ -27,8 +27,21 @@ func masterServiceName(clusterName string) string  { return clusterName + "-mast
 func replicaServiceName(clusterName string) string { return clusterName + "-replicas" }
 func backupCronJobName(clusterName string) string  { return clusterName + "-backup" }
 
+// clusterLabelSelector selects a cluster's kividb pods. The cluster label
+// alone is not enough: the operator also puts it on the pods of backup and
+// snapshot-restore Jobs, which are not cluster members and run no agent.
 func clusterLabelSelector(clusterName string) string {
-	return fmt.Sprintf("%s=%s", kividbv1alpha1.ClusterLabel, clusterName)
+	return fmt.Sprintf("%s=%s,%s=%s", kividbv1alpha1.ClusterLabel, clusterName, appNameLabel, appNameValue)
+}
+
+const (
+	appNameLabel = "app.kubernetes.io/name"
+	appNameValue = "kividb"
+)
+
+// isClusterPod is clusterLabelSelector for a pod already in hand.
+func isClusterPod(pod *corev1.Pod, clusterName string) bool {
+	return pod.Labels[kividbv1alpha1.ClusterLabel] == clusterName && pod.Labels[appNameLabel] == appNameValue
 }
 
 func portOrDefault(p int32) int32 {

@@ -51,7 +51,7 @@ func (s *server) handleAPIExec(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
-	if pod.Labels["kividb.io/cluster"] != name {
+	if !isClusterPod(pod, name) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("pod %s is not part of cluster %s", body.Pod, name))
 		return
 	}
@@ -91,7 +91,7 @@ func (s *server) handleAPIPodLogs(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
-	if pod.Labels["kividb.io/cluster"] != name {
+	if !isClusterPod(pod, name) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("pod mismatch"))
 		return
 	}
@@ -156,7 +156,7 @@ func (s *server) handleAPILiveStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pods, err := s.clientset.CoreV1().Pods(namespace).List(r.Context(), metav1.ListOptions{
-		LabelSelector: "kividb.io/cluster=" + name,
+		LabelSelector: clusterLabelSelector(name),
 	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)
@@ -340,7 +340,7 @@ func (s *server) handleAPIRestartPod(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
-	if pod.Labels["kividb.io/cluster"] != name {
+	if !isClusterPod(pod, name) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("pod %s is not part of cluster %s", podName, name))
 		return
 	}
@@ -375,7 +375,7 @@ func (s *server) handleAPIPromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pods, err := s.clientset.CoreV1().Pods(namespace).List(r.Context(), metav1.ListOptions{
-		LabelSelector: "kividb.io/cluster=" + name,
+		LabelSelector: clusterLabelSelector(name),
 	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)
@@ -401,26 +401,35 @@ func (s *server) handleAPIPromote(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("%s is already master", body.Pod))
 		return
 	}
+	// A switchover is two steps here and the operator does the rest: make
+	// the target a master, then turn the current master into its replica.
+	// The operator sees its labeled master replicating from another healthy
+	// master, adopts that pod (moving the role label, and with it the
+	// master Service) and re-points the remaining replicas. Doing only
+	// this much keeps a half-finished switchover recoverable: if the
+	// second step fails the operator still has a healthy labeled master
+	// and simply turns the target back into its replica.
+	var current *corev1.Pod
+	for i := range pods.Items {
+		if pods.Items[i].Labels["kividb.io/role"] == "master" {
+			current = &pods.Items[i]
+			break
+		}
+	}
+	if current == nil || current.Status.PodIP == "" {
+		writeJSONError(w, http.StatusConflict, fmt.Errorf("cluster %s has no current master to switch over from; the operator will elect one", name))
+		return
+	}
 	if _, err := postAgentJSON(r.Context(), target.Status.PodIP, "/promote", nil); err != nil {
 		writeJSONError(w, http.StatusBadGateway, err)
 		return
 	}
-	port := c.Spec.Port
-	if port == 0 {
-		port = 6380
-	}
-	for i := range pods.Items {
-		p := &pods.Items[i]
-		if p.Name == target.Name || p.Status.PodIP == "" {
-			continue
-		}
-		if _, err := postAgentJSON(r.Context(), p.Status.PodIP, "/replicaof", agentapi.ReplicaOfRequest{
-			Host: target.Status.PodIP,
-			Port: port,
-		}); err != nil {
-			writeJSONError(w, http.StatusBadGateway, fmt.Errorf("pointing %s at new master: %w", p.Name, err))
-			return
-		}
+	if _, err := postAgentJSON(r.Context(), current.Status.PodIP, "/replicaof", agentapi.ReplicaOfRequest{
+		Host: target.Status.PodIP,
+		Port: portOrDefault(c.Spec.Port),
+	}); err != nil {
+		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("pointing %s at new master: %w", current.Name, err))
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"promoted": body.Pod})
 }
@@ -441,7 +450,7 @@ func (s *server) handleAPISnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pods, err := s.clientset.CoreV1().Pods(namespace).List(r.Context(), metav1.ListOptions{
-		LabelSelector: "kividb.io/cluster=" + name + ",kividb.io/role=master",
+		LabelSelector: clusterLabelSelector(name) + ",kividb.io/role=master",
 	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)
