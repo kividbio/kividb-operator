@@ -37,6 +37,20 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   replicas first, the master last, one at a time, and only while every
   pod is Ready and every replica has finished syncing. A pod that is
   unready on an outdated template is replaced without waiting.
+- **The master is never restarted in place.** A rolling update or
+  `KividbDbOps` restart first hands the master role to an in-sync replica
+  (event `Switchover`) and then replaces the old master. Restarting it in
+  place made every replica resync from whatever the master had last saved,
+  which on EKS lost 55 seconds of acknowledged writes during a config
+  change. Measured after the change: about one second of failed writes
+  and none lost.
+- **Failover will not promote an empty replica** when the master was last
+  seen holding data: kividb drops a replica's dataset when a full resync
+  fails part-way, which can empty every replica at once if the master is
+  crash-looping. The failover waits for the master instead (event
+  `FailoverBlocked`); set the `kividb.io/allow-empty-failover: "true"`
+  annotation on the `KividbCluster` to fail over regardless.
+  `status.pods[].keys` reports each pod's key count.
 - `status.pods[].synced` reports whether a replica has completed its full
   sync from the current master. `KividbDbOps` restarts wait for it, and
   failover prefers replicas that were in sync.
@@ -80,6 +94,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - **A crash-looping pod blocked every rollout**, including the template
   change meant to fix it, and **rollouts moved on to the master while the
   replaced replica was still resyncing.** See "Changed" below.
+- The GUI pod stayed `Pending` on clusters without a default StorageClass
+  (EKS): its metrics PVC was on by default and could not be provisioned.
+  `gui.metrics.persistence.enabled` now defaults to `false`.
+- Upgrading the operator while pods still ran kividb v1.0.3 never started
+  the rollout, because that engine does not report a replica's master.
 - The agent reported every replica's master port as 0, which made the
   operator re-send `REPLICAOF` to every replica on every reconcile.
 

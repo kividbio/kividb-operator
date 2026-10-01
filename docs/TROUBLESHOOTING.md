@@ -101,6 +101,31 @@ itself, not the backup Job.
 See [BACKUP_RESTORE.md](BACKUP_RESTORE.md) for how to trigger a manual
 backup while debugging.
 
+## Failover does not happen (`FailoverBlocked`)
+
+The master is down, the replicas are Ready, and the cluster stays in
+`Error` with a `FailoverBlocked` event. The operator found that no ready
+replica holds any keys although the master was last seen holding data
+(compare `status.pods[].keys`). kividb v1.0.4 empties a replica when a
+full resync from the master fails part-way, and a master that keeps
+restarting does that to all of them at once (see
+[KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md), issue 10).
+
+The data is then only on the master's volume, so the operator waits for
+that pod instead of promoting an empty replica, which would make the
+master resync from it and lose the data for good when it returned. Fix
+whatever is keeping the master down (`kubectl describe pod`, most often
+an OOM kill: raise `spec.resources.limits.memory`); once it is Ready the
+replicas resync from it.
+
+If the master's data is truly gone and an empty cluster is acceptable:
+
+```bash
+kubectl annotate kividbcluster my-cluster kividb.io/allow-empty-failover=true
+```
+
+Remove the annotation again afterwards.
+
 ## ACL / authentication errors (`NOAUTH`, `WRONGPASS`)
 
 The operator renders the referenced `KividbAclConfig` into the

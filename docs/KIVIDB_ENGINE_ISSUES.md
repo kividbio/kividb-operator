@@ -2,8 +2,8 @@
 
 Found while running kividb-operator 0.4.0 against **kividb v1.0.4**
 (`quay.io/kividbio/kividb@sha256:6bab772968654ecd357975a4f36f9e7d262ac7765be386d86170191eef1d8959`)
-on a single-node minikube cluster and in plain Docker containers, on
-2026-10-01. Each entry says what was observed, how to reproduce it without
+on a single-node minikube cluster, in plain Docker containers, and on a
+three-node, three-zone EKS cluster, on 2026-10-01 and 2026-10-02. Each entry says what was observed, how to reproduce it without
 the operator, what Redis does in the same situation, and what the operator
 does about it today.
 
@@ -18,10 +18,14 @@ does about it today.
 | [7](#7-acl-setuser-and-acl-deluser-report-an-error-after-applying-the-change) | `ACL SETUSER` / `DELUSER` return an error after applying the change | Medium | Agent re-reads the user list |
 | [8](#8-the-config-file-silently-ignores-what-it-does-not-understand) | Config file silently ignores unknown directives and bad values | Medium | None |
 | [9](#9-a-full-resync-needs-about-twice-the-datasets-memory-and-happens-on-every-replica-restart) | Full resync needs ~2x memory and runs on every replica restart | Medium | None |
+| [10](#10-a-full-resync-that-fails-part-way-leaves-the-replica-empty) | A full resync that fails part-way leaves the replica empty | Critical | Failover refuses to promote an emptied replica |
+| [11](#11-the-final-snapshot-on-sigterm-is-sometimes-not-written) | The final snapshot on SIGTERM is sometimes not written | High | Master hands over before it is restarted |
 
-Issue 1 is the one to look at first: it means **every cluster that relies
-on a `default`-user password for access control is open to anyone who can
-reach its port**, and issue 2 is what stops the operator from closing it.
+Issues 1 and 10 are the ones to look at first. Issue 1 means **every
+cluster that relies on a `default`-user password for access control is
+open to anyone who can reach its port** (and issue 2 is what stops the
+operator from closing it). Issue 10 **lost an entire dataset** in testing:
+every replica dropped its copy at the same moment.
 
 ---
 
@@ -321,6 +325,143 @@ Worth considering: partial resync (`PSYNC` with the replication ID and
 offset the replica already has) so that a quick restart does not transfer
 the whole dataset; discarding the local dataset before loading the
 received one when a full resync is unavoidable; and enforcing `maxmemory`.
+
+---
+
+## 10. A full resync that fails part-way leaves the replica empty
+
+**Severity: critical** (lost a whole dataset on EKS).
+
+When the master goes away in the middle of sending a full-sync snapshot,
+the replica logs a load error and is left holding **zero keys**. The
+dataset it held before the resync started is gone.
+
+A master that restarts in a loop does this to every replica at the same
+time: each restart gives the master a new replication ID, each replica
+starts a full resync, and the next crash cuts the transfer off. That is
+what an OOM-killed master looks like, and OOM during a full sync is likely
+given issue 9.
+
+### Observed
+
+Three-pod cluster, about 261,000 keys on every pod. The master's
+container was being killed and restarted every few seconds (its node's
+kubelet could not reach it, so liveness probes failed) while pod-to-pod
+traffic still worked. Both replicas, within the same second:
+
+```
+21:02:12 [REPL] Restored 261704 keys from full-sync KDB snapshot
+21:04:10 [REPL] Connecting to master 192.168.17.9:6380...
+21:04:10 [REPL] Full resync from 0000000031c3875d000000000000000131c3875c offset=0
+21:04:11 [REPL] Receiving RDB dump (57046214 bytes)...
+21:04:11 [REPL] Full-sync KDB load error: failed to fill whole buffer
+```
+
+Nine seconds later the operator promoted one of them; the other then
+synced from it:
+
+```
+21:04:19 [REPL] Receiving RDB dump (76 bytes)...
+21:04:19 [REPL] Restored 0 keys from full-sync KDB snapshot
+```
+
+A 76-byte snapshot with 0 keys: the promoted replica was empty. The old
+master still had the data on disk, but came back as a replica of the
+empty one and lost it too.
+
+### Reproduce
+
+Seen once, with the log evidence above, and **not reproduced on demand**:
+two later attempts on EKS (a `SIGKILL` loop on the master) and three in
+local Docker did not hit it, because the master either died before the
+replicas reconnected or finished sending the snapshot before the kill
+landed. The condition to aim for is the master dying while a replica is
+in `Receiving RDB dump`, i.e. after the size header and before the last
+byte; throttling the link between the two would widen that window.
+
+### Expected
+
+Keep the existing dataset until the new one has been received **and**
+loaded successfully; on any error, discard the partial one and carry on
+serving the old data. kividb's own log line for the successful case
+(`RDB received — loading into staging swap`) suggests this is the
+intended design, and that the error path does not honour it. Redis with
+disk-based replication only flushes the old dataset after the transfer
+is complete.
+
+### Operator workaround
+
+`status.pods[].keys` records each pod's key count. When the master was
+last seen holding data, failover only considers replicas that still hold
+some; if none does, it does not fail over and waits for the master to
+return (event `FailoverBlocked`). That trades availability for the data
+still on the master's disk, and can be overridden with the
+`kividb.io/allow-empty-failover: "true"` annotation.
+
+---
+
+## 11. The final snapshot on SIGTERM is sometimes not written
+
+**Severity: high.**
+
+On `SIGTERM` kividb announces a final snapshot. Sometimes it writes it;
+sometimes the process exits with status 0 a moment later without having
+written anything, and the next start loads the previous `dump.kdb`.
+
+### Observed
+
+Same engine version, same cluster, minutes apart. An idle three-pod
+cluster with 861k keys:
+
+```
+[INFO] SIGTERM received — shutting down gracefully
+[INFO] Writing final snapshot...
+[INFO] Saving snapshot → /data/dump.kdb
+[INFO] Snapshot saved  → /data/dump.kdb (16 databases)
+[INFO] Goodbye.
+```
+
+A master with 1.18M keys, two attached replicas and a client writing
+about five keys a second (previous-container log, `exitCode: 0`):
+
+```
+22:10:38.457 [INFO] SIGTERM received — shutting down gracefully
+22:10:38.457 [INFO] Writing final snapshot...
+```
+
+and nothing after it. The container had finished within the same second;
+the successful case above took about six. An earlier occurrence, with AOF
+off, cost data: the master was restarted, came back from a `dump.kdb`
+written 55 seconds before, and its replicas, which held the newer writes,
+resynced from it. 261 acknowledged writes were gone from every pod.
+
+What separates the two cases is not established. The failing pods had
+client connections open and replication traffic flowing at the time;
+the succeeding one was idle. That, and the fact that the process exits
+cleanly, points at the shutdown path returning before the snapshot task
+has run rather than at the snapshot failing.
+
+### Expected
+
+Do not exit until the final snapshot is on disk (or has failed, in which
+case exit non-zero and say so).
+
+### Operator workaround
+
+The operator no longer restarts a master in place. Rolling updates and
+`KividbDbOps` restarts first move the master role to an in-sync replica
+(event `Switchover`) and only then replace the old master, so nothing
+depends on what it saved on the way down. A master that restarts on its
+own (crash, OOM kill, node reboot) and comes back before the failover
+threshold is still exposed; enabling AOF (`aof yes`) closes that.
+
+---
+
+## Fixed between v1.0.3 and v1.0.4
+
+For reference, seen on v1.0.3 during the upgrade test and no longer
+present on v1.0.4: `ROLE` on a replica returned an empty master host and
+port 0 (`slave "" 0 connected <offset>`).
 
 ---
 

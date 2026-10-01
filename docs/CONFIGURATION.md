@@ -64,7 +64,9 @@ annotation for exactly this purpose).
 The operator performs these rollouts itself (the StatefulSet uses the
 `OnDelete` update strategy): replicas first, the master last, and the
 next pod is only replaced once every pod is Ready and every replica shows
-`synced: true` in `status.pods`. A pod that is unready and still on the
+`synced: true` in `status.pods`. When only the master is left, its role
+is first handed to an in-sync replica (a `Switchover` event; expect about
+a second of failed writes) and the old master is replaced afterwards. A pod that is unready and still on the
 old template is replaced without waiting, so a change that fixes a
 crash-looping pod is not held up by that pod. Changes to a `KividbAclConfig` are
 applied without a restart unless the `default` user's password changed —

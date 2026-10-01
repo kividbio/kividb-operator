@@ -29,7 +29,10 @@ success, and age. Polls `GET /api/clusters` every 10s.
 - **Live status** — agent `/status` + memory gauge per pod.
 - **Metrics (24h)** — local scraper (every 15s) of agent `/metrics`;
   sparkline charts for memory, clients, repl offset, command rate.
-  Persisted under `GUI_METRICS_DIR` when set (chart PVC).
+  Kept in memory by default; persisted under `GUI_METRICS_DIR` when set
+  (chart: `gui.metrics.persistence.enabled=true`, plus
+  `gui.metrics.persistence.storageClass` on clusters without a default
+  StorageClass).
 - **Operations** — create `KividbDbOps` InPlace restart; list recent
   DbOps.
 - **Pod logs** — `GET …/pods/{pod}/logs` (container `kividb` or `agent`).
