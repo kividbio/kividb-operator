@@ -117,3 +117,25 @@ func allReadyWithMaster(n int) []kividbv1alpha1.KividbPodStatus {
 	}
 	return out
 }
+
+func TestValidateSpec(t *testing.T) {
+	t.Parallel()
+	cluster := func(size string, replicas int32) *kividbv1alpha1.KividbCluster {
+		c := &kividbv1alpha1.KividbCluster{}
+		c.Spec.Storage.Size = size
+		c.Spec.Replicas = replicas
+		return c
+	}
+	if err := validateSpec(cluster("10Gi", 2)); err != nil {
+		t.Fatalf("valid spec rejected: %v", err)
+	}
+	for name, c := range map[string]*kividbv1alpha1.KividbCluster{
+		"unparseable size":  cluster("lots", 2),
+		"empty size":        cluster("", 2),
+		"negative replicas": cluster("10Gi", -1),
+	} {
+		if err := validateSpec(c); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}

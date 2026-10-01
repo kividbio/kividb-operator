@@ -18,7 +18,7 @@ func TestRenderACLFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(got, "user default on nopass ~* &* +@all\n") {
+		if !strings.Contains(got, "user default reset on nopass ~* &* +@all\n") {
 			t.Fatalf("expected open default user, got:\n%s", got)
 		}
 
@@ -27,7 +27,7 @@ func TestRenderACLFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !strings.Contains(got2, "user default on nopass ~* &* +@all\n") {
+		if !strings.Contains(got2, "user default reset on nopass ~* &* +@all\n") {
 			t.Fatalf("expected open default user for empty acl config, got:\n%s", got2)
 		}
 	})
@@ -46,7 +46,7 @@ func TestRenderACLFile(t *testing.T) {
 		}
 		sum := sha256.Sum256([]byte("s3cret"))
 		wantHash := "#" + hex.EncodeToString(sum[:])
-		wantLine := "user default on " + wantHash + " ~* &* +@all\n"
+		wantLine := "user default reset on " + wantHash + " ~* &* +@all\n"
 		if !strings.Contains(got, wantLine) {
 			t.Fatalf("expected hashed requirepass default user, got:\n%s", got)
 		}
@@ -77,12 +77,12 @@ func TestRenderACLFile(t *testing.T) {
 		}
 		sum := sha256.Sum256([]byte("hunter2"))
 		wantHash := "#" + hex.EncodeToString(sum[:])
-		wantApp := "user app on " + wantHash + " ~app:* &app:* +@read +@write\n"
+		wantApp := "user app reset on " + wantHash + " ~app:* &app:* +@read +@write\n"
 		if !strings.Contains(got, wantApp) {
 			t.Fatalf("expected app user line, got:\n%s", got)
 		}
 		// Still synthesizes default nopass since no default / requirepass.
-		if !strings.Contains(got, "user default on nopass ~* &* +@all\n") {
+		if !strings.Contains(got, "user default reset on nopass ~* &* +@all\n") {
 			t.Fatalf("expected synthesized default user, got:\n%s", got)
 		}
 	})

@@ -82,6 +82,7 @@ func agentEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbA
 		{Name: "KIVIDB_ADDR", Value: fmt.Sprintf("127.0.0.1:%d", getPort(c))},
 		{Name: "AGENT_PORT", Value: fmt.Sprintf("%d", AgentPort)},
 		{Name: "DATA_DIR", Value: DataDir},
+		{Name: "ACL_FILE", Value: AclDir + "/" + AclFileName},
 		{Name: "CLUSTER_NAME", Value: c.Name},
 		{
 			Name: "POD_NAME",
@@ -306,6 +307,9 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "data", MountPath: DataDir},
+			// Read-only, and only so the agent can report the mounted ACL
+			// file's hash in /status (see reconcileAclReload).
+			{Name: "acl", MountPath: AclDir, ReadOnly: true},
 		},
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt(AgentPort)}},

@@ -8,6 +8,7 @@ import (
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/controller"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -65,13 +66,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	dbopsReconciler := &controller.KividbDbOpsReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}
-	if err := dbopsReconciler.SetupWithManager(mgr); err != nil {
-		ctrl.Log.Error(err, "unable to create controller", "controller", "KividbDbOps")
-		os.Exit(1)
+	// The KividbDbOps CRD is newer than the others, and `helm upgrade` never
+	// installs or updates CRDs, so an upgraded installation can be missing
+	// it. A controller whose kind is not served never syncs its cache, and
+	// that takes the whole manager down after the sync timeout -- failover
+	// for every cluster included. Run without DbOps instead.
+	dbopsGK := kividbv1alpha1.GroupVersion.WithKind("KividbDbOps").GroupKind()
+	if _, err := mgr.GetRESTMapper().RESTMapping(dbopsGK, kividbv1alpha1.GroupVersion.Version); err != nil {
+		if !meta.IsNoMatchError(err) {
+			ctrl.Log.Error(err, "unable to look up the KividbDbOps CRD")
+			os.Exit(1)
+		}
+		ctrl.Log.Error(err, "the KividbDbOps CRD is not installed: KividbDbOps objects will not be processed. "+
+			"Apply the chart's crds/ directory (kubectl apply -f charts/kividb-operator/crds/) and restart the operator to enable them.")
+	} else {
+		dbopsReconciler := &controller.KividbDbOpsReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		}
+		if err := dbopsReconciler.SetupWithManager(mgr); err != nil {
+			ctrl.Log.Error(err, "unable to create controller", "controller", "KividbDbOps")
+			os.Exit(1)
+		}
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

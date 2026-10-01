@@ -1,12 +1,16 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kividbio/kividb-operator/internal/agentapi"
@@ -146,6 +150,20 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 	return out, nil
 }
 
+// fileHash returns the hex SHA-256 of path's contents, or "" if path is
+// unset or unreadable.
+func fileHash(path string) string {
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 func (s *server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	c, err := s.dial()
 	if err != nil {
@@ -184,6 +202,12 @@ func (s *server) handleReplicaOf(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAclReload(w http.ResponseWriter, r *http.Request) {
+	var req agentapi.AclReloadRequest
+	_ = json.NewDecoder(r.Body).Decode(&req) // the body is optional
+	if req.IfFileHash != "" && fileHash(s.cfg.AclFile) != req.IfFileHash {
+		writeError(w, http.StatusConflict, fmt.Errorf("the ACL file mounted in this pod does not have the expected content yet"))
+		return
+	}
 	c, err := s.dial()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -194,7 +218,70 @@ func (s *server) handleAclReload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if err := s.dropUsersNotInAclFile(c); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, agentapi.OKResponse{OK: true})
+}
+
+// dropUsersNotInAclFile deletes every kividb user the ACL file no longer
+// defines. kividb's ACL LOAD only adds and updates the users it finds in
+// the file; one that was removed from it stays, password and all, until
+// the process restarts.
+func (s *server) dropUsersNotInAclFile(c *respclient.Client) error {
+	if s.cfg.AclFile == "" {
+		return nil
+	}
+	content, err := os.ReadFile(s.cfg.AclFile)
+	if err != nil {
+		return fmt.Errorf("reading ACL file: %w", err)
+	}
+	defined := aclFileUsers(string(content))
+
+	stale := func() ([]string, error) {
+		reply, err := c.Do("ACL", "USERS")
+		if err != nil {
+			return nil, fmt.Errorf("ACL USERS: %w", err)
+		}
+		var names []string
+		for _, u := range reply.Array {
+			if !defined[u.Str] && u.Str != "default" {
+				names = append(names, u.Str)
+			}
+		}
+		return names, nil
+	}
+
+	names, err := stale()
+	if err != nil || len(names) == 0 {
+		return err
+	}
+	// The reply to DELUSER is not what decides success: with the ACL file
+	// on a read-only Secret mount kividb deletes the user and then reports
+	// that it could not rewrite the file. Look at the user list again
+	// instead.
+	_, _ = c.Do(append([]string{"ACL", "DELUSER"}, names...)...)
+	left, err := stale()
+	if err != nil {
+		return err
+	}
+	if len(left) > 0 {
+		return fmt.Errorf("could not delete users removed from the ACL file: %s", strings.Join(left, ", "))
+	}
+	return nil
+}
+
+// aclFileUsers returns the names defined by "user <name> ..." lines.
+func aclFileUsers(content string) map[string]bool {
+	names := map[string]bool{}
+	for _, line := range strings.Split(content, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "user" {
+			names[fields[1]] = true
+		}
+	}
+	return names
 }
 
 func (s *server) handleBackup(w http.ResponseWriter, r *http.Request) {
