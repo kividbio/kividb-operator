@@ -81,17 +81,19 @@ func (r *KividbDbOpsReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	st := op.Status.Restart
 
-	// Wait for the pod we deleted to come back Ready before advancing.
+	// Wait for the pod we deleted to be replaced, become Ready and rejoin
+	// the cluster before advancing.
 	if st.CurrentPod != "" {
 		p := findPod(podList.Items, st.CurrentPod)
-		if p == nil || !isPodReady(p) {
-			op.Status.Message = fmt.Sprintf("waiting for %s to become Ready", st.CurrentPod)
+		if waiting := restartPending(p, st.CurrentPodUID, &cluster); waiting != "" {
+			op.Status.Message = fmt.Sprintf("waiting for %s %s", st.CurrentPod, waiting)
 			_ = r.Status().Update(ctx, &op)
 			return ctrl.Result{RequeueAfter: dbOpsRequeue}, nil
 		}
 		st.CompletedPods = appendUnique(st.CompletedPods, st.CurrentPod)
 		st.PendingPods = removeString(st.PendingPods, st.CurrentPod)
 		st.CurrentPod = ""
+		st.CurrentPodUID = ""
 		op.Status.Message = fmt.Sprintf("restarted %s", st.CompletedPods[len(st.CompletedPods)-1])
 		if err := r.Status().Update(ctx, &op); err != nil {
 			return ctrl.Result{}, err
@@ -135,6 +137,7 @@ func (r *KividbDbOpsReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return r.fail(ctx, &op, fmt.Sprintf("deleting %s: %v", next, err))
 	}
 	st.CurrentPod = next
+	st.CurrentPodUID = string(p.UID)
 	op.Status.Message = fmt.Sprintf("restarting %s", next)
 	if err := r.Status().Update(ctx, &op); err != nil {
 		return ctrl.Result{}, err
@@ -155,6 +158,34 @@ func (r *KividbDbOpsReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kividbv1alpha1.KividbDbOps{}).
 		Complete(r)
+}
+
+// restartPending returns what a restart of one pod is still waiting for,
+// or "" once it is done. p is the pod currently holding the restarted
+// pod's name (nil if there is none) and deletedUID the UID of the pod the
+// op deleted.
+//
+// The UID comparison is what makes this a *rolling* restart. A deleted pod
+// stays in the API, still Ready, for its whole termination grace period,
+// so "the pod with this name is Ready" is true the instant after the
+// delete call; advancing on that takes down every pod of the cluster at
+// once. The role check then holds the next deletion until the cluster
+// controller has seen the replacement and re-attached it to replication.
+func restartPending(p *corev1.Pod, deletedUID string, cluster *kividbv1alpha1.KividbCluster) string {
+	switch {
+	case p == nil:
+		return "to be recreated"
+	case string(p.UID) == deletedUID || p.DeletionTimestamp != nil:
+		return "to terminate"
+	case !isPodReady(p):
+		return "to become Ready"
+	}
+	for _, ps := range cluster.Status.Pods {
+		if ps.Name == p.Name && ps.Ready && ps.Role != kividbv1alpha1.RoleUnknown && ps.Role != "" {
+			return ""
+		}
+	}
+	return "to rejoin the cluster"
 }
 
 // restartOrder lists replica pods first (lexicographically), then the

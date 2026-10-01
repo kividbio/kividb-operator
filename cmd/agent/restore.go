@@ -94,6 +94,14 @@ func runRestoreFromS3(args []string) error {
 	return nil
 }
 
+// restoredFileMode is group-read/writable on purpose. This process runs as
+// the agent image's UID, but the files are for kividb, which runs as a
+// different UID and reaches the data volume only through the pod's shared
+// fsGroup. Owner-only files here are unreadable to it: kividb logs
+// "Permission denied", starts empty, and the bootstrap still looks
+// successful.
+const restoredFileMode = 0o660
+
 func extractSnapshotTarGz(r io.Reader, dataDir string) error {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -116,7 +124,7 @@ func extractSnapshotTarGz(r io.Reader, dataDir string) error {
 			continue
 		}
 		dest := filepath.Join(dataDir, base)
-		f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, restoredFileMode)
 		if err != nil {
 			return err
 		}
@@ -124,7 +132,15 @@ func extractSnapshotTarGz(r io.Reader, dataDir string) error {
 			f.Close()
 			return err
 		}
-		f.Close()
+		// Chmod explicitly: OpenFile's mode is filtered by the umask, and
+		// is ignored entirely when the file already existed.
+		if err := f.Chmod(restoredFileMode); err != nil {
+			f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
 		wrote = true
 		log.Printf("wrote %s", dest)
 	}

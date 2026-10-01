@@ -48,6 +48,10 @@ const (
 	// (a different, distroless-assigned UID) -- see statefulset.go.
 	DataVolumeFSGroup = 1000
 
+	// AgentImageUID is the user the agent image runs as (the distroless
+	// "nonroot" user, see Dockerfile.agent).
+	AgentImageUID = 65532
+
 	// DefaultAgentImage is used when KividbClusterSpec.AgentImage is unset.
 	// Bumped by hand alongside VERSION/Chart.yaml on every release (see the
 	// pre-release checklist in docs/RELEASING.md) -- there is currently no
@@ -75,6 +79,29 @@ const (
 	// exporter for Redis-protocol stores -- kividb speaks enough of the
 	// INFO/CONFIG surface for its core metric set to work unmodified.
 	DefaultExporterImage = "oliver006/redis_exporter:v1.66.0"
+
+	// ConfigHashAnnotation, on the pod template, is a hash of the rendered
+	// kividb.conf. kividb only reads its config file at startup, so a
+	// change has to roll the pods; changing this annotation is what makes
+	// the StatefulSet do that.
+	ConfigHashAnnotation = "kividb.io/config-hash"
+
+	// AuthGenerationAnnotation, on the pod template, is a counter that
+	// goes up whenever the default user's password changes. The agent and
+	// exporter sidecars get that password as an environment variable,
+	// which a running container never sees change, so this too has to
+	// roll the pods. It is a counter kept on the operator's own Secret
+	// (next to AuthHashAnnotation) rather than a hash of the password,
+	// because pod metadata is readable far more widely than Secrets are.
+	AuthGenerationAnnotation = "kividb.io/auth-generation"
+	AuthHashAnnotation       = "kividb.io/auth-hash"
+
+	// AclGenerationAnnotation counts changes to the rendered ACL file the
+	// same way: kept on the operator's Secret next to AclHashAnnotation,
+	// and stamped on each pod once its kividb has loaded that version (see
+	// reconcileAclReload).
+	AclGenerationAnnotation = "kividb.io/acl-generation"
+	AclHashAnnotation       = "kividb.io/acl-hash"
 
 	// managedByValue is the standard app.kubernetes.io/managed-by value.
 	managedByValue = "kividb-operator"
@@ -117,6 +144,18 @@ func commonLabels(c *kividbv1alpha1.KividbCluster) map[string]string {
 func backupLabels(c *kividbv1alpha1.KividbCluster) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "kividb-backup",
+		"app.kubernetes.io/instance":   c.Name,
+		"app.kubernetes.io/managed-by": managedByValue,
+		kividbv1alpha1.ClusterLabel:    c.Name,
+	}
+}
+
+// bootstrapLabels labels the snapshot-restore Job and its pod. Like
+// backupLabels, and for the same reason, it must not match selectorLabels:
+// the restore pod is not a cluster member and must not be listed as one.
+func bootstrapLabels(c *kividbv1alpha1.KividbCluster) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       "kividb-bootstrap",
 		"app.kubernetes.io/instance":   c.Name,
 		"app.kubernetes.io/managed-by": managedByValue,
 		kividbv1alpha1.ClusterLabel:    c.Name,

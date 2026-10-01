@@ -102,6 +102,8 @@ spec:
                       items: {type: string}
                     currentPod:
                       type: string
+                    currentPodUID:
+                      type: string
                 conditions:
                   type: array
                   x-kubernetes-list-type: map

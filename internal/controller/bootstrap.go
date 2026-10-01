@@ -133,9 +133,11 @@ func (r *KividbClusterReconciler) ensureBootstrapPVC(ctx context.Context, c *kiv
 	if c.Spec.Storage.StorageClassName != nil {
 		pvc.Spec.StorageClassName = c.Spec.Storage.StorageClassName
 	}
-	if err := controllerutil.SetControllerReference(c, &pvc, r.Scheme); err != nil {
-		return err
-	}
+	// Deliberately no OwnerReference: this is the same PVC the StatefulSet's
+	// volumeClaimTemplate would have created for pod-0 (it adopts it by
+	// name), and those are retained when the cluster is deleted. Owning this
+	// one would make pod-0's data the only volume garbage-collected with
+	// the KividbCluster.
 	return r.Create(ctx, &pvc)
 }
 
@@ -159,29 +161,28 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 		secretKeyKey = "secretAccessKey"
 	}
 
-	agentImg := c.Spec.AgentImage
-	if agentImg == "" {
-		agentImg = DefaultAgentImage
-	}
-
 	backoff := int32(1)
 	ttl := int32(86400)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: c.Namespace,
-			Labels:    commonLabels(c),
+			Labels:    bootstrapLabels(c),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoff,
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: commonLabels(c)},
+				ObjectMeta: metav1.ObjectMeta{Labels: bootstrapLabels(c)},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
+					RestartPolicy:    corev1.RestartPolicyNever,
+					ImagePullSecrets: c.Spec.ImagePullSecrets,
+					Tolerations:      c.Spec.Tolerations,
+					NodeSelector:     c.Spec.NodeSelector,
 					Containers: []corev1.Container{{
-						Name:  "restore",
-						Image: agentImg,
+						Name:            "restore",
+						Image:           agentImage(c),
+						ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
 						Args: []string{
 							"restore-from-s3",
 							"--endpoint", snapCfg.Spec.S3.Endpoint,
@@ -220,7 +221,23 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: bootstrapPVCName(c)},
 						},
 					}},
-					SecurityContext: &corev1.PodSecurityContext{FSGroup: int64Ptr(DataVolumeFSGroup)},
+					// The restore container runs as the agent image's own
+					// UID, not kividb's, so what it writes is only readable
+					// by kividb through group permissions. fsGroup alone
+					// does not guarantee the group: not every volume type
+					// applies it (hostPath-backed provisioners don't), in
+					// which case new files get the process's primary GID.
+					// Pinning that GID to the same value every kividb pod
+					// gets as fsGroup makes the restored files (written
+					// group-read/writable, see cmd/agent/restore.go) usable
+					// by kividb either way. runAsUser only restates the
+					// agent image's own user: the kubelet refuses a
+					// runAsGroup without one.
+					SecurityContext: &corev1.PodSecurityContext{
+						FSGroup:    int64Ptr(DataVolumeFSGroup),
+						RunAsUser:  int64Ptr(AgentImageUID),
+						RunAsGroup: int64Ptr(DataVolumeFSGroup),
+					},
 				},
 			},
 		},
@@ -232,6 +249,15 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 		return nil, err
 	}
 	return job, nil
+}
+
+// bootstrapSeededPod names the pod whose volume reconcileBootstrap seeded
+// from a snapshot, or "" if the cluster is not bootstrapped from one.
+func bootstrapSeededPod(c *kividbv1alpha1.KividbCluster) string {
+	if c.Spec.BootstrapFromSnapshot == nil {
+		return ""
+	}
+	return statefulSetName(c) + "-0"
 }
 
 // bootstrapBlocksSTS is true when the StatefulSet must not run (or must

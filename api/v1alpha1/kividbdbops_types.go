@@ -83,6 +83,12 @@ type DbOpsRestartStatus struct {
 	// CurrentPod is the pod currently being restarted, if any.
 	// +optional
 	CurrentPod string `json:"currentPod,omitempty"`
+
+	// CurrentPodUID is the UID of the pod that was deleted for CurrentPod.
+	// The restart of that pod is only complete once a pod with a different
+	// UID has taken its place.
+	// +optional
+	CurrentPodUID string `json:"currentPodUID,omitempty"`
 }
 
 // KividbDbOpsStatus reports operation progress.
