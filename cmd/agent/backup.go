@@ -184,12 +184,20 @@ func writeTarGz(pw *io.PipeWriter, dataDir string, files []string) error {
 	var wrote bool
 	for _, name := range files {
 		path := filepath.Join(dataDir, name)
-		fi, err := os.Stat(path)
-		if err != nil {
+		f, err := os.Open(path)
+		if os.IsNotExist(err) {
 			continue // file doesn't exist yet (e.g. AOF disabled) -- skip, not an error
 		}
-		f, err := os.Open(path)
 		if err != nil {
+			return closeAllAndErr(tw, gz, pw, err)
+		}
+		// Size comes from the handle that is about to be read, not from a
+		// separate os.Stat of the path, so both describe the same file
+		// even if kividb swaps it (BGSAVE / AOF rewrite both rename a new
+		// file into place) in between.
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
 			return closeAllAndErr(tw, gz, pw, err)
 		}
 		hdr := &tar.Header{Name: name, Mode: 0o600, Size: fi.Size(), ModTime: fi.ModTime()}
@@ -197,9 +205,13 @@ func writeTarGz(pw *io.PipeWriter, dataDir string, files []string) error {
 			f.Close()
 			return closeAllAndErr(tw, gz, pw, err)
 		}
-		if _, err := io.Copy(tw, f); err != nil {
+		// Copy exactly the size the header promised. kividb keeps appending
+		// to appendonly.aof while this runs; copying to EOF would write
+		// more than hdr.Size and fail the whole backup with "archive/tar:
+		// write too long" on any cluster taking writes.
+		if _, err := io.CopyN(tw, f, fi.Size()); err != nil {
 			f.Close()
-			return closeAllAndErr(tw, gz, pw, err)
+			return closeAllAndErr(tw, gz, pw, fmt.Errorf("%s: %w", name, err))
 		}
 		f.Close()
 		wrote = true
