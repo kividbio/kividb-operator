@@ -32,6 +32,14 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   samples). Default agent image **`…-agent:0.4.0`**.
 - GUI ClusterRole gains `create` on `kividbdbops` and `get` on `pods/log`
   (still never Secrets to the browser).
+- **Rolling updates are now done by the operator.** The StatefulSet uses
+  the `OnDelete` update strategy and the operator replaces pods itself:
+  replicas first, the master last, one at a time, and only while every
+  pod is Ready and every replica has finished syncing. A pod that is
+  unready on an outdated template is replaced without waiting.
+- `status.pods[].synced` reports whether a replica has completed its full
+  sync from the current master. `KividbDbOps` restarts wait for it, and
+  failover prefers replicas that were in sync.
 
 ### Fixed
 
@@ -69,6 +77,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   `Ready` condition.
 - The snapshot-restore pod was listed in `status.pods` as a cluster
   member, and pod-0's volume was the only one deleted with the cluster.
+- **A crash-looping pod blocked every rollout**, including the template
+  change meant to fix it, and **rollouts moved on to the master while the
+  replaced replica was still resyncing.** See "Changed" below.
+- The agent reported every replica's master port as 0, which made the
+  operator re-send `REPLICAOF` to every replica on every reconcile.
 
 ### Upgrade notes
 
@@ -80,6 +93,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   mount and the `kividb.io/config-hash` / `kividb.io/auth-generation`
   annotations.
 - The GUI refuses all writes until `gui.auth.existingSecret` is set.
+- **A `default`-user password does not stop unauthenticated clients on
+  kividb v1.0.4.** This is an engine issue the operator cannot work
+  around; see `docs/KIVIDB_ENGINE_ISSUES.md` and restrict network access
+  to the cluster's Services.
 
 ### Notes
 

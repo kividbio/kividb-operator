@@ -59,7 +59,14 @@ restart, since `VolumeClaimTemplates`/data are untouched).
 Editing the referenced `KividbConfig` does the same: kividb only reads
 `kividb.conf` at startup, so a change to its directives rolls the pods
 one at a time (the pod template carries a `kividb.io/config-hash`
-annotation for exactly this purpose). Changes to a `KividbAclConfig` are
+annotation for exactly this purpose).
+
+The operator performs these rollouts itself (the StatefulSet uses the
+`OnDelete` update strategy): replicas first, the master last, and the
+next pod is only replaced once every pod is Ready and every replica shows
+`synced: true` in `status.pods`. A pod that is unready and still on the
+old template is replaced without waiting, so a change that fixes a
+crash-looping pod is not held up by that pod. Changes to a `KividbAclConfig` are
 applied without a restart unless the `default` user's password changed —
 see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#acl--authentication-errors-noauth-wrongpass).
 
@@ -330,6 +337,13 @@ error on that cluster (see [ROADMAP.md](ROADMAP.md) for planned
 usage-tracking to catch this earlier).
 
 ## KividbAclConfig
+
+> **The `default` user's password does not keep unauthenticated clients
+> out on kividb v1.0.4.** A client that never sends `AUTH` is treated as
+> `default` (see [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md), issue
+> 1). Passwords of other users are checked when a client authenticates as
+> them. Until the engine enforces authentication, limit who can reach the
+> cluster's Services with a NetworkPolicy.
 
 ```yaml
 apiVersion: kividb.io/v1alpha1
