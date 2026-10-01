@@ -182,6 +182,9 @@ func restartPending(p *corev1.Pod, deletedUID string, cluster *kividbv1alpha1.Ki
 	}
 	for _, ps := range cluster.Status.Pods {
 		if ps.Name == p.Name && ps.Ready && ps.Role != kividbv1alpha1.RoleUnknown && ps.Role != "" {
+			if !ps.Synced {
+				return "to finish syncing from the master"
+			}
 			return ""
 		}
 	}

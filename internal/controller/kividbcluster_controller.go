@@ -55,7 +55,7 @@ func (r *KividbClusterReconciler) scheme() *runtime.Scheme { return r.Scheme }
 //+kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=services;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
+//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile implements the main control loop for a single KividbCluster.
@@ -168,6 +168,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	r.reconcileAclReload(ctx, &c, podList.Items, aclContent, generations)
+	r.reconcileRollout(ctx, &c, podList.Items, statuses, masterPod)
 
 	if statusErr := r.updateStatus(ctx, &c, statuses, masterPod, previousMasterPod, failoverHappened, err); statusErr != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", statusErr)

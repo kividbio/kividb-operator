@@ -35,6 +35,8 @@ type StatusResponse struct {
 	ReplicationOffset int64  `json:"replicationOffset"`
 	LastSaveUnix      int64  `json:"lastSaveUnix"`
 	AofEnabled        bool   `json:"aofEnabled"`
+	// KeyCount is the number of keys across all databases (INFO keyspace).
+	KeyCount int64 `json:"keyCount"`
 }
 
 // AclReloadRequest is the optional body of POST /acl/reload.

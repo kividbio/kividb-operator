@@ -30,9 +30,9 @@ func TestRestartPending(t *testing.T) {
 		}
 		return p
 	}
-	clusterWith := func(role kividbv1alpha1.NodeRole, ready bool) *kividbv1alpha1.KividbCluster {
+	clusterWith := func(role kividbv1alpha1.NodeRole, synced bool) *kividbv1alpha1.KividbCluster {
 		c := &kividbv1alpha1.KividbCluster{}
-		c.Status.Pods = []kividbv1alpha1.KividbPodStatus{{Name: "c1-1", Role: role, Ready: ready}}
+		c.Status.Pods = []kividbv1alpha1.KividbPodStatus{{Name: "c1-1", Role: role, Ready: true, Synced: synced}}
 		return c
 	}
 	joined := clusterWith(kividbv1alpha1.RoleReplica, true)
@@ -48,6 +48,7 @@ func TestRestartPending(t *testing.T) {
 		{"no pod yet", nil, joined, "to be recreated"},
 		{"replacement not Ready", pod("new", false, false), joined, "to become Ready"},
 		{"replacement Ready, role not assigned yet", pod("new", true, false), clusterWith(kividbv1alpha1.RoleUnknown, true), "to rejoin the cluster"},
+		{"replacement Ready, still resyncing", pod("new", true, false), clusterWith(kividbv1alpha1.RoleReplica, false), "to finish syncing from the master"},
 		{"replacement Ready, missing from cluster status", pod("new", true, false), &kividbv1alpha1.KividbCluster{}, "to rejoin the cluster"},
 		{"replacement Ready and rejoined", pod("new", true, false), joined, ""},
 	}

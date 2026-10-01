@@ -417,8 +417,10 @@ func desiredStatefulSet(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alph
 			Selector:             &metav1.LabelSelector{MatchLabels: selectorLabels(c)},
 			Template:             podTemplate(c, kdbConfig, aclConfig, snapCfg),
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{pvc},
+			// Pods are moved onto a changed template by reconcileRollout,
+			// not by the StatefulSet controller; see there for why.
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
-				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+				Type: appsv1.OnDeleteStatefulSetStrategyType,
 			},
 		},
 	}

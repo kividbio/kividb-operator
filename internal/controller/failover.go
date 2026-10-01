@@ -77,6 +77,11 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 
 	currentMasterName := resolveCurrentMaster(pods, views, c.Status.MasterPod)
 
+	previouslySynced := make(map[string]bool, len(c.Status.Pods))
+	for _, ps := range c.Status.Pods {
+		previouslySynced[ps.Name] = ps.Synced
+	}
+
 	threshold := defaultUnhealthyThreshold
 	if c.Spec.Failover.UnhealthyThresholdSeconds != nil {
 		threshold = time.Duration(*c.Spec.Failover.UnhealthyThresholdSeconds) * time.Second
@@ -128,7 +133,13 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	}
 
 	if needsElection || needsFailover {
-		candidate := electReplica(views, currentMasterName)
+		// Prefer a replica that was in sync the last time that could be
+		// established. Offsets alone do not rule out a replica that had
+		// only just started resyncing when the master went away.
+		candidate := electReplica(onlySynced(views, previouslySynced), currentMasterName)
+		if candidate == "" {
+			candidate = electReplica(views, currentMasterName)
+		}
 		if seeded := bootstrapSeededPod(c); needsElection && seeded != "" {
 			// The very first election of a cluster bootstrapped from a
 			// snapshot. Only one pod holds the restored data, and it is
@@ -179,11 +190,17 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		masterIP = v.pod.Status.PodIP
 	}
 
+	var masterStatus *agentapi.StatusResponse
+	if v, ok := views[newMasterName]; ok && v.ready {
+		masterStatus = v.status
+	}
+
 	statuses := make([]kividbv1alpha1.KividbPodStatus, 0, len(pods))
 	for _, p := range pods {
 		v := views[p.Name]
 		role := kividbv1alpha1.RoleUnknown
 		var offset int64
+		synced := false
 
 		switch {
 		case p.Name == newMasterName:
@@ -194,10 +211,12 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			if v.status != nil {
 				offset = v.status.ReplicationOffset
 			}
+			synced = v.ready && v.status != nil
 		case v.ready && v.status != nil:
 			role = kividbv1alpha1.RoleReplica
 			offset = v.status.ReplicationOffset
-			if masterIP != "" && (v.status.MasterHost != masterIP || v.status.MasterPort != port) {
+			synced = replicaSynced(masterStatus, v.status, masterIP, port, previouslySynced[p.Name])
+			if masterIP != "" && !followsMaster(v.status, masterIP, port) {
 				if err := r.Agent.ReplicaOf(ctx, p.Status.PodIP, masterIP, port); err != nil {
 					log.Error(err, "failed to point replica at master", "pod", p.Name, "master", masterIP)
 				}
@@ -221,6 +240,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			Role:              role,
 			Ready:             v.ready,
 			ReplicationOffset: offset,
+			Synced:            synced,
 		})
 	}
 
@@ -271,6 +291,25 @@ func resolveCurrentMaster(pods []corev1.Pod, views map[string]*podView, statusMa
 		}
 	}
 	return labeled[0]
+}
+
+// followsMaster reports whether a replica is already configured to
+// replicate from the master at masterIP:port. Agents before 0.4.0 always
+// report master port 0 (they misread ROLE's integer port), so 0 means
+// "unknown" here, not a mismatch.
+func followsMaster(replica *agentapi.StatusResponse, masterIP string, port int32) bool {
+	return replica.MasterHost == masterIP && (replica.MasterPort == 0 || replica.MasterPort == port)
+}
+
+// onlySynced returns the views of the pods marked in synced.
+func onlySynced(views map[string]*podView, synced map[string]bool) map[string]*podView {
+	out := make(map[string]*podView, len(views))
+	for name, v := range views {
+		if synced[name] {
+			out[name] = v
+		}
+	}
+	return out
 }
 
 // actualMasterOf returns the pod that demoted (a Ready pod reporting role

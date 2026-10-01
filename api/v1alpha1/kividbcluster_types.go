@@ -392,6 +392,13 @@ type KividbPodStatus struct {
 	// during failover.
 	// +optional
 	ReplicationOffset int64 `json:"replicationOffset,omitempty"`
+
+	// Synced is true for the master, and for a replica that has finished
+	// its initial full sync from the current master and is keeping up
+	// with it. Rolling updates and restarts only move on to the next pod
+	// while every pod is synced, and failover prefers synced replicas.
+	// +optional
+	Synced bool `json:"synced,omitempty"`
 }
 
 // KividbClusterStatus defines the observed state of a KividbCluster.

@@ -133,7 +133,9 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 		out.Role = agentapi.RoleReplica
 		if len(roleReply.Array) > 4 {
 			out.MasterHost = roleReply.Array[1].Str
-			if p, err := strconv.Atoi(roleReply.Array[2].Str); err == nil {
+			// The port is a RESP integer (as in Redis), not a string.
+			out.MasterPort = int32(roleReply.Array[2].Int)
+			if p, err := strconv.Atoi(roleReply.Array[2].Str); err == nil && out.MasterPort == 0 {
 				out.MasterPort = int32(p)
 			}
 			out.ReplicationOffset = roleReply.Array[4].Int
@@ -147,7 +149,29 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 		fields := respclient.ParseInfo(info)
 		out.AofEnabled = fields["aof_enabled"] == "1"
 	}
+	if info, err := c.Info("keyspace"); err == nil {
+		out.KeyCount = keyspaceKeyCount(info)
+	}
 	return out, nil
+}
+
+// keyspaceKeyCount sums keys=N over the "dbN:keys=N,expires=M,..." lines
+// of INFO keyspace.
+func keyspaceKeyCount(info string) int64 {
+	var total int64
+	for name, value := range respclient.ParseInfo(info) {
+		if !strings.HasPrefix(name, "db") {
+			continue
+		}
+		for _, field := range strings.Split(value, ",") {
+			if n, ok := strings.CutPrefix(field, "keys="); ok {
+				if v, err := strconv.ParseInt(n, 10, 64); err == nil {
+					total += v
+				}
+			}
+		}
+	}
+	return total
 }
 
 // fileHash returns the hex SHA-256 of path's contents, or "" if path is
