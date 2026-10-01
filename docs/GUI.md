@@ -35,6 +35,11 @@ success, and age. Polls `GET /api/clusters` every 10s.
 - **Pod logs** — `GET …/pods/{pod}/logs` (container `kividb` or `agent`).
 - **RESP explorer** — `POST …/exec` → agent `POST /exec`. Requires GUI
   Basic auth; refused with 403 when auth is unset.
+- **Promote** — switches the master to the chosen pod: the GUI promotes
+  it and makes the current master its replica, and the operator then
+  moves the `kividb.io/role` label (and so the master Service) and
+  re-points the other replicas. Writes that reach the old master in the
+  moment between those two steps are not carried over.
 
 Default engine image shown when `spec.image` is empty:
 `quay.io/kividbio/kividb:v1.0.4`.
@@ -64,7 +69,13 @@ gui:
     existingSecret: my-gui-auth   # keys: username, password
 ```
 
-Without auth, the UI still serves read APIs; **exec returns 403**.
+Without auth the GUI is a read-only dashboard: it still serves the read
+APIs, and **every write returns 403** — the RESP explorer as well as
+restart, scale, promote, snapshot and delete.
+
+Writes are also refused when the request's `Origin` is a different site,
+so a page open in the same browser cannot use your saved credentials
+against the GUI.
 
 ## Running locally
 

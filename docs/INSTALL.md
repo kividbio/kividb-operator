@@ -57,14 +57,19 @@ helm upgrade kividb-operator charts/kividb-operator -n kividb-operator-system
 **Helm never touches CRDs on upgrade** — anything under
 `charts/kividb-operator/crds/` is installed once, on the very first
 `helm install`, and ignored by every subsequent `helm upgrade` (this is a
-deliberate Helm 3 design choice, not a bug). If a release changes the CRD
-schema, its `CHANGELOG.md` entry will say so; apply the new CRD manually
-first:
+deliberate Helm 3 design choice, not a bug). A release can both change
+existing CRDs and add new ones, so apply the whole directory first, every
+time:
 
 ```bash
-kubectl apply -f charts/kividb-operator/crds/kividb.io_kividbclusters.yaml
+kubectl apply -f charts/kividb-operator/crds/
 helm upgrade kividb-operator charts/kividb-operator -n kividb-operator-system
 ```
+
+If you skip this when upgrading to a release that adds a kind (0.4.0 adds
+`KividbDbOps`), the operator keeps managing clusters but logs that the
+kind is not installed and ignores objects of it; apply the CRDs and
+restart the operator Deployment to enable it.
 
 ### Uninstalling
 

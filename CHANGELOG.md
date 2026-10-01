@@ -33,6 +33,54 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - GUI ClusterRole gains `create` on `kividbdbops` and `get` on `pods/log`
   (still never Secrets to the browser).
 
+### Fixed
+
+- **Failover could hand the cluster back to the old master and lose
+  writes.** The pod being failed away from kept its `role=master` label;
+  when it came back it rejoined the master Service, was picked as the
+  master again, and the pod that had been promoted was made its replica.
+  The old master is now relabeled before its replacement is promoted and
+  rejoins as a replica. `status.phase` also no longer sticks at
+  `FailingOver` with `lastFailoverTime` advancing every reconcile.
+- **A master that had been turned into a replica was never repaired**
+  (cluster reported `Running`, every write failed with `READONLY`). The
+  operator now follows the pod it is replicating from if that is a healthy
+  master of the same cluster, and otherwise promotes it again.
+- **`bootstrapFromSnapshot` produced an empty cluster.** The restored
+  files were readable only by the restore Job's own user, so kividb could
+  not load them and started empty while the bootstrap reported success.
+- **`KividbDbOps` restart deleted every pod at once.** A pod counted as
+  restarted while the deleted one was still terminating. Each pod must now
+  be replaced, Ready and back in the cluster before the next is deleted.
+- **Backups failed with `archive/tar: write too long`** whenever kividb
+  appended to `appendonly.aof` during the upload.
+- **ACL changes were never applied to running pods.** The operator now
+  has each pod run `ACL LOAD` once the updated file has reached it.
+- **`KividbConfig` changes were never applied to running pods.** They now
+  roll the pods, as does a change of the `default` user's password.
+- GUI: write endpoints (RESP explorer, restart, scale, promote, snapshot,
+  delete) were open when no auth Secret was configured, and accepted
+  cross-site requests. Promote sent `REPLICAOF` to backup Job pods, failed
+  halfway and could leave the cluster without a master.
+- The operator crash-looped if the `KividbDbOps` CRD was not installed,
+  which is the case after a `helm upgrade` from 0.3.0.
+- An unparseable `spec.storage.size` made the reconciler panic in a loop;
+  it is now rejected by the CRD schema and reported on the cluster's
+  `Ready` condition.
+- The snapshot-restore pod was listed in `status.pods` as a cluster
+  member, and pod-0's volume was the only one deleted with the cluster.
+
+### Upgrade notes
+
+- Apply the CRDs before upgrading the chart
+  (`kubectl apply -f charts/kividb-operator/crds/`): `KividbDbOps` is new
+  and `KividbCluster` gained validation. Helm does not do this for you.
+- **Every existing cluster's pods are rolled once** after the operator
+  is upgraded, one at a time: the pod template gains the agent's ACL
+  mount and the `kividb.io/config-hash` / `kividb.io/auth-generation`
+  annotations.
+- The GUI refuses all writes until `gui.auth.existingSecret` is set.
+
 ### Notes
 
 - Engine ACL caveats (implicit default auth when `requirepass` empty;

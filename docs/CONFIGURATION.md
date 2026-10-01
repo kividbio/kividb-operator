@@ -56,6 +56,13 @@ To move to a later version, just change this value — same as any other
 Kubernetes Deployment/StatefulSet image bump (a rolling pod-by-pod
 restart, since `VolumeClaimTemplates`/data are untouched).
 
+Editing the referenced `KividbConfig` does the same: kividb only reads
+`kividb.conf` at startup, so a change to its directives rolls the pods
+one at a time (the pod template carries a `kividb.io/config-hash`
+annotation for exactly this purpose). Changes to a `KividbAclConfig` are
+applied without a restart unless the `default` user's password changed —
+see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#acl--authentication-errors-noauth-wrongpass).
+
 `variant` is a **separate, informational** field — it tells the operator
 which kind of build `image` is (`standard`, `tls`, `lua`, or `full`
 [TLS+Lua]), so the operator knows whether to wire up variant-specific
