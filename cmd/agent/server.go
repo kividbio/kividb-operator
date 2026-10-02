@@ -219,11 +219,30 @@ func (s *server) handleReplicaOf(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
+	s.setMasterAuth(c)
 	if err := c.ReplicaOf(req.Host, req.Port); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, agentapi.OKResponse{OK: true})
+}
+
+// setMasterAuth gives kividb the password to present to its master. From
+// kividb v1.0.5 a master whose default user has a password refuses an
+// unauthenticated replication handshake, so without this no replica of an
+// ACL-protected cluster ever syncs. Every pod of a cluster shares the
+// default user's password, so the one this agent authenticates with
+// locally is also the one the master expects.
+//
+// It is set at runtime rather than as a --masterauth flag because the
+// operator does not know which engine version an image is: older engines
+// reject the flag at startup, whereas CONFIG SET of a parameter they do not
+// have is just an error reply, ignored here.
+func (s *server) setMasterAuth(c *respclient.Client) {
+	if s.cfg.AuthPassword == "" {
+		return
+	}
+	_, _ = c.Do("CONFIG", "SET", "masterauth", s.cfg.AuthPassword)
 }
 
 func (s *server) handleAclReload(w http.ResponseWriter, r *http.Request) {

@@ -240,21 +240,40 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 	if int32(len(pods)) != c.Spec.Replicas+1 || len(statuses) != len(pods) {
 		return
 	}
+	healthy := make(map[string]bool, len(statuses))
+	unhealthy := 0
 	for _, s := range statuses {
-		if !s.Ready || !s.Synced {
-			return
+		healthy[s.Name] = s.Ready && s.Synced
+		if !healthy[s.Name] {
+			unhealthy++
 		}
 	}
 
-	// Replicas first, highest ordinal first; the master last, once every
-	// replica is on the new template and back in sync.
+	// Replicas first, the master last, once every replica is on the new
+	// template and back in sync. Among replicas, one that is not in sync
+	// goes before the healthy ones (it is the least use as it stands),
+	// then highest ordinal first.
 	sort.Slice(outdated, func(i, j int) bool {
-		if (outdated[i].Name == masterPod) != (outdated[j].Name == masterPod) {
-			return outdated[j].Name == masterPod
+		a, b := outdated[i].Name, outdated[j].Name
+		if (a == masterPod) != (b == masterPod) {
+			return b == masterPod
 		}
-		return outdated[i].Name > outdated[j].Name
+		if healthy[a] != healthy[b] {
+			return !healthy[a]
+		}
+		return a > b
 	})
 	next := outdated[0]
+
+	// What has to hold is that every pod *other than* the one being
+	// replaced is Ready and in sync; the pod itself need not be. Requiring
+	// it of that pod too deadlocks whenever an outdated pod cannot sync
+	// until it is replaced -- a kividb v1.0.4 replica, for instance, has
+	// no way to authenticate to a v1.0.5 master, so the last old pod of an
+	// engine upgrade would wait forever to be "in sync" first.
+	if unhealthy > 1 || (unhealthy == 1 && healthy[next.Name]) {
+		return
+	}
 
 	// The master is never replaced while it is the master. Its replacement
 	// would come back with whatever its volume holds, every replica would

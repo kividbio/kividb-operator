@@ -200,6 +200,20 @@ func TestReconcileRollout(t *testing.T) {
 			wantDeleted: []string{"c1-0"},
 		},
 		{
+			name:        "an outdated replica that cannot sync is replaced while the others are healthy",
+			pods:        []rolloutPod{healthy("c1-0", "new"), {name: "c1-1", revision: "old", ready: true}, healthy("c1-2", "new")},
+			wantDeleted: []string{"c1-1"},
+		},
+		{
+			name:        "the unsynced outdated replica goes before the healthy outdated one",
+			pods:        []rolloutPod{healthy("c1-0", "new"), {name: "c1-1", revision: "old", ready: true}, healthy("c1-2", "old")},
+			wantDeleted: []string{"c1-1"},
+		},
+		{
+			name: "two pods not in sync: wait",
+			pods: []rolloutPod{healthy("c1-0", "old"), {name: "c1-1", revision: "old", ready: true}, {name: "c1-2", revision: "old", ready: true}},
+		},
+		{
 			name: "nothing outdated",
 			pods: []rolloutPod{healthy("c1-0", "new"), healthy("c1-1", "new"), healthy("c1-2", "new")},
 		},
@@ -221,8 +235,13 @@ func TestReconcileRollout(t *testing.T) {
 			wantDeleted: []string{"c1-1"},
 		},
 		{
-			name: "an outdated pod that only just went unready is given time",
-			pods: []rolloutPod{healthy("c1-0", "old"), {name: "c1-1", revision: "old", unreadyFor: 5 * time.Second}, healthy("c1-2", "old")},
+			name:        "an outdated pod that just went unready is next in line when it is the only unhealthy pod",
+			pods:        []rolloutPod{healthy("c1-0", "old"), {name: "c1-1", revision: "old", unreadyFor: 5 * time.Second}, healthy("c1-2", "old")},
+			wantDeleted: []string{"c1-1"},
+		},
+		{
+			name: "an outdated pod that just went unready is given time while another pod is unhealthy too",
+			pods: []rolloutPod{healthy("c1-0", "old"), {name: "c1-1", revision: "old", unreadyFor: 5 * time.Second}, {name: "c1-2", revision: "new", ready: true}},
 		},
 		{
 			name:        "no healthy pod at all: every stuck outdated pod is replaced",

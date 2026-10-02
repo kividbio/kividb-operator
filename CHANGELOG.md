@@ -6,6 +6,19 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Replication with kividb v1.0.5 and a `default`-user password.** From
+  v1.0.5 the engine enforces that password, including on the replication
+  handshake, so replicas never synced. The agent now sets `masterauth` to
+  the default user's password before every `REPLICAOF` (at runtime, so
+  images of older engines, which have no such setting, keep working).
+- **Rolling updates no longer require the pod being replaced to be in
+  sync**, only every other pod. Upgrading the engine from v1.0.4 to v1.0.5
+  otherwise stalled on the last old pod: after the master role moved to a
+  v1.0.5 pod, the v1.0.4 pod could not authenticate to it, never became
+  "synced", and so was never replaced.
+
 ## [0.4.0] - 2026-08-18
 
 ### Added
