@@ -108,9 +108,11 @@ select_out="$(kubectl -n "${E2E_KIVIDB_NS}" exec "${REPLICA}" -c kividb -- \
 if ! echo "${select_out}" | grep -q "val"; then
   die "GET on replica did not return seeded value (got: ${select_out})"
 fi
-# Explicit SELECT 0 then GET (logical DB)
+# Explicit SELECT 0 then GET (logical DB). `-n 0` makes redis-cli send
+# SELECT 0 before the command; "SELECT 0 GET key" on the command line would
+# be one malformed SELECT with extra arguments.
 select_out2="$(kubectl -n "${E2E_KIVIDB_NS}" exec "${REPLICA}" -c kividb -- \
-  redis-cli -p "${KIVIDB_PORT}" -a "${PASS}" --no-auth-warning SELECT 0 GET e2e:select:key 2>/dev/null || true)"
+  redis-cli -p "${KIVIDB_PORT}" -a "${PASS}" --no-auth-warning -n 0 GET e2e:select:key 2>/dev/null || true)"
 if ! echo "${select_out2}" | grep -q "val"; then
   die "SELECT 0 + GET on replica failed (got: ${select_out2})"
 fi

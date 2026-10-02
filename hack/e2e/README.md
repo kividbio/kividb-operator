@@ -29,7 +29,7 @@ minikube start --cpus=4 --memory=6144 --driver=docker
 | `quay.io/kividbio/kividb-operator-agent:${OPERATOR_TAG}` | Sidecar + backup-trigger |
 | `quay.io/kividbio/kividb-operator-gui:${OPERATOR_TAG}` | Optional GUI |
 | `quay.io/kividbio/kividb:v1.0.4` (+ `-tls`, `-lua`, `-full`) | Engine variants |
-| `quay.io/minio/minio`, `quay.io/minio/mc` | In-cluster S3 for snapshots |
+| `bitnamilegacy/minio`, `bitnamilegacy/minio-client` | In-cluster S3 for snapshots (override with `MINIO_IMAGE` / `MINIO_MC_IMAGE`) |
 | `prometheus-community/kube-prometheus-stack` | Optional monitoring |
 
 Build operator images locally, then load them into minikube:

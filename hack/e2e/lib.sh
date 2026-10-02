@@ -45,6 +45,12 @@ MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 MINIO_BUCKET="${MINIO_BUCKET:-kividb-e2e-backups}"
 MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://minio.${E2E_NS}.svc.cluster.local:9000}"
+# quay.io/minio/minio and quay.io/minio/mc can no longer be pulled (MinIO
+# stopped publishing container images), so the suite defaults to the frozen
+# Bitnami builds. Any image with a `minio` binary / an `mc` binary plus
+# /bin/sh works.
+MINIO_IMAGE="${MINIO_IMAGE:-bitnamilegacy/minio:latest}"
+MINIO_MC_IMAGE="${MINIO_MC_IMAGE:-bitnamilegacy/minio-client:latest}"
 
 STRICT_TLS="${STRICT_TLS:-0}"
 LOAD_IMAGES="${LOAD_IMAGES:-0}"
@@ -325,11 +331,17 @@ ensure_tls_secret() {
     return 0
   fi
   require openssl
-  local tmp
+  local tmp subj="/CN=kividb-e2e"
+  # Git Bash / MSYS rewrites an argument that looks like an absolute path
+  # into a Windows path; a doubled leading slash turns that off.
+  case "$(uname -s)" in
+    MINGW*|MSYS*) subj="//CN=kividb-e2e" ;;
+  esac
   tmp="$(mktemp -d)"
   openssl req -x509 -nodes -newkey rsa:2048 \
     -keyout "${tmp}/tls.key" -out "${tmp}/tls.crt" \
-    -days 1 -subj "/CN=kividb-e2e" >/dev/null 2>&1
+    -days 1 -subj "${subj}" >/dev/null 2>&1 \
+    || die "openssl could not generate the self-signed TLS certificate"
   kubectl create secret tls "${name}" -n "${ns}" \
     --cert="${tmp}/tls.crt" --key="${tmp}/tls.key"
   rm -rf "${tmp}"
