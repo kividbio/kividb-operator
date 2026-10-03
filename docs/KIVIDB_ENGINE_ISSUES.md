@@ -26,7 +26,7 @@ should be fixed before 1.0.5 is final.
 | [9](#9-a-full-resync-needs-about-twice-the-datasets-memory-and-happens-on-every-replica-restart) | Full resync needs ~2x memory and runs on every replica restart | Medium | Fixed (peak memory not measured) |
 | [10](#10-a-full-resync-that-fails-part-way-leaves-the-replica-empty) | A crash-looping master can empty every replica | Critical | Fixed (by refusing to start empty and refusing empty masters) |
 | [11](#11-the-final-snapshot-on-sigterm-is-sometimes-not-written) | The final snapshot on SIGTERM is sometimes not written | High | Fixed |
-| [12](#12-new-in-v105-rc1-a-replica-panics-on-full-resync-after-its-cpu-limit-changes) | **New in rc1:** replica panics on full resync after its CPU limit changes | High | **Open** |
+| [12](#12-new-in-v105-rc1-a-replica-panics-on-full-resync-after-its-cpu-limit-changes) | **New in rc1:** replica panics on full resync after its CPU limit changes | High | **Open, also in v1.0.5 final** |
 
 See also [Changes in v1.0.5-rc1 that clients and operators must handle](#changes-in-v105-rc1-that-clients-and-operators-must-handle).
 
@@ -531,7 +531,9 @@ threshold is still exposed; enabling AOF (`aof yes`) closes that.
 ## 12. New in v1.0.5-rc1: a replica panics on full resync after its CPU limit changes
 
 **Severity: high.** Found while re-testing; not present in v1.0.4, which has
-no staging shards.
+no staging shards. **Still present in v1.0.5 final**
+(`quay.io/kividbio/kividb@sha256:85749cef2de731750ec7848f50703a8039638d4856bfb282e9513ace13bbff5a`):
+the reproduction below panics the same way.
 
 If the CPU quota of a running replica changes (in Kubernetes: an in-place
 CPU resize of the pod) and the replica later does a full resync, its

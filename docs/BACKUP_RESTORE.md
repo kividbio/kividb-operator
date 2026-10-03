@@ -154,7 +154,7 @@ kind: KividbCluster
 metadata:
   name: my-cluster-restored
 spec:
-  image: quay.io/kividbio/kividb:v1.0.4
+  image: quay.io/kividbio/kividb:v1.0.5
   replicas: 1
   storage:
     size: 5Gi

@@ -62,10 +62,10 @@ const (
 	// DefaultKividbImage is used when KividbClusterSpec.Image is unset.
 	// Pinned to the kividb engine line this operator release was validated
 	// against (see CHANGELOG / hack/e2e). Override with spec.image for a
-	// different tag or variant (e.g. ...:v1.0.4-tls). Deliberately not
+	// different tag or variant (e.g. ...:v1.0.5-tls). Deliberately not
 	// derived from spec.variant: the operator never guesses an image tag
 	// from spec.variant.
-	DefaultKividbImage = "quay.io/kividbio/kividb:v1.0.4"
+	DefaultKividbImage = "quay.io/kividbio/kividb:v1.0.5"
 
 	// ExporterPort is the redis_exporter sidecar's standard listen port
 	// (its own documented default -- not something this project invented).

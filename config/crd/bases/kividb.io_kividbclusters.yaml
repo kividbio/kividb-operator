@@ -66,8 +66,8 @@ spec:
                   type: string
                   description: >-
                     kividb container image, e.g.
-                    "quay.io/kividbio/kividb:v1.0.4". Defaults to
-                    quay.io/kividbio/kividb:v1.0.4 if unset -- set this explicitly
+                    "quay.io/kividbio/kividb:v1.0.5". Defaults to
+                    quay.io/kividbio/kividb:v1.0.5 if unset -- set this explicitly
                     to pin a version. Used verbatim; never derived or
                     modified from variant below.
                 variant:

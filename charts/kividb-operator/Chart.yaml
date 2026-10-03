@@ -74,7 +74,7 @@ annotations:
       metadata:
         name: kividb-sample
       spec:
-        image: quay.io/kividbio/kividb:v1.0.4
+        image: quay.io/kividbio/kividb:v1.0.5
         replicas: 2
         storage:
           size: 10Gi

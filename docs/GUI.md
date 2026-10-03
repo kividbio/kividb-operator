@@ -45,7 +45,7 @@ success, and age. Polls `GET /api/clusters` every 10s.
   moment between those two steps are not carried over.
 
 Default engine image shown when `spec.image` is empty:
-`quay.io/kividbio/kividb:v1.0.4`.
+`quay.io/kividbio/kividb:v1.0.5`.
 
 ### JSON API
 

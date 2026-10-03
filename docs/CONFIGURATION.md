@@ -30,7 +30,7 @@ All fields below are under `spec:` unless stated otherwise.
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `replicas` | int32 | `2` | Replica pods **in addition to** the single master. Total pods = `replicas + 1`. |
-| `image` | string | `quay.io/kividbio/kividb:v1.0.3` | Explicit kividb container image, e.g. `quay.io/kividbio/kividb:v1.0.3` or `quay.io/kividbio/kividb:v1.0.3-tls`. Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
+| `image` | string | `quay.io/kividbio/kividb:v1.0.5` | Explicit kividb container image, e.g. `quay.io/kividbio/kividb:v1.0.3` or `quay.io/kividbio/kividb:v1.0.3-tls`. Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
 | `variant` | string | `standard` | One of `standard`, `tls`, `lua`, `full`. See [Image and variant](#image-and-variant) — informational only, does not affect which image gets pulled. |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
 | `imagePullSecrets` | `[]LocalObjectReference` | — | Standard Kubernetes image pull secrets. |
@@ -44,12 +44,12 @@ All fields below are under `spec:` unless stated otherwise.
 `image` is the **only** field that determines which container actually
 runs — the operator uses it verbatim and never constructs, guesses, or
 modifies it. Leave it unset to use the release default
-(`quay.io/kividbio/kividb:v1.0.3` for operator 0.3.0); set it explicitly
+(`quay.io/kividbio/kividb:v1.0.5` for operator 0.4.0); set it explicitly
 to pin a different tag or variant:
 
 ```yaml
 spec:
-  image: quay.io/kividbio/kividb:v1.0.3-tls
+  image: quay.io/kividbio/kividb:v1.0.5-tls
 ```
 
 To move to a later version, just change this value — same as any other
@@ -80,7 +80,7 @@ a referenced [`KividbConfig`](#kividbconfig)'s `spec.tls`). It does
 **not** change which image tag gets pulled — there is no "tls variant
 tag" the operator appends or looks for. If you want a TLS-capable build,
 you set `image` to one yourself (e.g.
-`quay.io/kividbio/kividb:v1.0.3-tls`) *and* set `variant: tls` to match;
+`quay.io/kividbio/kividb:v1.0.5-tls`) *and* set `variant: tls` to match;
 the two aren't cross-validated by the API server, since only you know
 what a given `image` value actually contains.
 
@@ -340,12 +340,12 @@ usage-tracking to catch this earlier).
 
 ## KividbAclConfig
 
-> **The `default` user's password does not keep unauthenticated clients
-> out on kividb v1.0.4.** A client that never sends `AUTH` is treated as
-> `default` (see [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md), issue
-> 1). Passwords of other users are checked when a client authenticates as
-> them. Until the engine enforces authentication, limit who can reach the
-> cluster's Services with a NetworkPolicy.
+> **On kividb before v1.0.5 the `default` user's password does not keep
+> unauthenticated clients out.** A client that never sends `AUTH` is
+> treated as `default` (see [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md),
+> issue 1). v1.0.5, the default image of this release, enforces it. If you
+> pin an older engine with `spec.image`, limit who can reach the cluster's
+> Services with a NetworkPolicy.
 
 ```yaml
 apiVersion: kividb.io/v1alpha1

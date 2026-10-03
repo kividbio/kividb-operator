@@ -115,8 +115,8 @@ moved under 0.3.0 / Before 1.0.0.
 - **`KividbDbOps`:** InPlace rolling restart.
 - **Bootstrap restore:** `spec.bootstrapFromSnapshot` on a **new**
   `KividbCluster` (not in-place rewrite of a live PVC).
-- **Engine pin:** default / samples / docs → **kividb v1.0.4**. Pre-GA
-  testing may override with `v1.0.4-rc2` via `spec.image` /
+- **Engine pin:** default / samples / docs → **kividb v1.0.5**. Pre-GA
+  testing may override with a release candidate via `spec.image` /
   `KIVIDB_VERSION`.
 - **e2e:** `08-resp-acl-select.sh` (RESP3, ACL deny smoke, SELECT on
   replica, single-master after failover).
@@ -127,11 +127,11 @@ moved under 0.3.0 / Before 1.0.0.
 - **In-place restore** of an already-running cluster from a snapshot.
 - **Engine ACL model gaps** (not fixable in the operator; see
   [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md)):
-  - **A password on the `default` user is not enforced.** A connection
-    that never authenticates is treated as `default` and can run
-    everything that user may, not only `PING`. Until the engine fixes
-    this, a `KividbAclConfig` does not keep unauthenticated clients out:
-    restrict access to the cluster's Services with a NetworkPolicy.
+  - **A password on the `default` user was not enforced** before
+    kividb v1.0.5 (now the default image): a connection that never
+    authenticated was treated as `default`. Clusters pinned to an older
+    engine are still exposed; restrict access to their Services with a
+    NetworkPolicy.
   - Multiple `keyPatterns` on one user: operator renders `~a ~b` but
     kividb `apply_rule` keeps a single `keys` string (last wins). Prefer
     `~*` or a single pattern until the engine supports multi-pattern.

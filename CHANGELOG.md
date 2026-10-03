@@ -6,19 +6,6 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
-
-- **Replication with kividb v1.0.5 and a `default`-user password.** From
-  v1.0.5 the engine enforces that password, including on the replication
-  handshake, so replicas never synced. The agent now sets `masterauth` to
-  the default user's password before every `REPLICAOF` (at runtime, so
-  images of older engines, which have no such setting, keep working).
-- **Rolling updates no longer require the pod being replaced to be in
-  sync**, only every other pod. Upgrading the engine from v1.0.4 to v1.0.5
-  otherwise stalled on the last old pod: after the master role moved to a
-  v1.0.5 pod, the v1.0.4 pod could not authenticate to it, never became
-  "synced", and so was never replaced.
-
 ## [0.4.0] - 2026-08-18
 
 ### Added
@@ -41,8 +28,15 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Default engine pin **`quay.io/kividbio/kividb:v1.0.4`** (and docs/
-  samples). Default agent image **`…-agent:0.4.0`**.
+- Default engine pin **`quay.io/kividbio/kividb:v1.0.5`** (and docs/
+  samples). Default agent image **`…-agent:0.4.0`**. v1.0.5 fixes all eleven
+  engine issues recorded in `docs/KIVIDB_ENGINE_ISSUES.md`, among them
+  unauthenticated access as the `default` user and the data-loss paths
+  around failed resyncs and skipped shutdown snapshots.
+- The agent sets `masterauth` to the `default` user's password before
+  every `REPLICAOF`. kividb v1.0.5 refuses an unauthenticated replication
+  handshake, so without it replicas of a password-protected cluster never
+  sync. It is set at runtime, so images of older engines keep working.
 - GUI ClusterRole gains `create` on `kividbdbops` and `get` on `pods/log`
   (still never Secrets to the browser).
 - **Rolling updates are now done by the operator.** The StatefulSet uses
@@ -104,6 +98,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   `Ready` condition.
 - The snapshot-restore pod was listed in `status.pods` as a cluster
   member, and pod-0's volume was the only one deleted with the cluster.
+- A rolling update required the pod being replaced to be in sync as well
+  as every other pod. Upgrading the engine from v1.0.4 to v1.0.5 stalled on
+  the last old pod: once the master role was on a v1.0.5 pod, the v1.0.4
+  pod could not authenticate to it and never became "synced".
 - **A crash-looping pod blocked every rollout**, including the template
   change meant to fix it, and **rollouts moved on to the master while the
   replaced replica was still resyncing.** See "Changed" below.
@@ -125,16 +123,27 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   mount and the `kividb.io/config-hash` / `kividb.io/auth-generation`
   annotations.
 - The GUI refuses all writes until `gui.auth.existingSecret` is set.
-- **A `default`-user password does not stop unauthenticated clients on
-  kividb v1.0.4.** This is an engine issue the operator cannot work
-  around; see `docs/KIVIDB_ENGINE_ISSUES.md` and restrict network access
-  to the cluster's Services.
+- **Clusters without `spec.image` move to kividb v1.0.5** in that same
+  rolling restart (from v1.0.3 if they were created by 0.3.0, or v1.0.4).
+  Pin `spec.image` first to upgrade the engine separately. v1.0.5 changes
+  behaviour that worked before:
+  - **The `default` user's password is now enforced.** Clients that never
+    sent `AUTH` (which worked, wrongly, on older engines) now get
+    `NOAUTH`. Check client configuration before upgrading.
+  - **Unknown or malformed directives in a `KividbConfig` are fatal**: the
+    pod will not start. Older engines ignored them silently.
+  - **`maxmemory` is enforced**, with `noeviction` by default: writes over
+    the limit are refused.
+- Clusters pinned to an engine older than v1.0.5 keep the old behaviour,
+  including unauthenticated access as the `default` user; restrict
+  network access to their Services.
 
 ### Notes
 
-- Engine ACL caveats (implicit default auth when `requirepass` empty;
-  last-wins multi `keyPatterns`) remain documented in ROADMAP — Cloud-safe;
-  not fixed in this operator release.
+- Known engine issue in v1.0.5: a replica whose CPU limit is changed in
+  place (for example by the Vertical Pod Autoscaler) panics on its next
+  full resync and stops replicating until restarted. The operator itself
+  never resizes pods in place. See `docs/KIVIDB_ENGINE_ISSUES.md`, issue 12.
 - Out of scope: `ReducedImpact` restart, in-place restore of a live
   cluster.
 

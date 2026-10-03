@@ -2,7 +2,7 @@
 # 08-resp-acl-select.sh — RESP3 smoke, command ACL deny, SELECT on replica,
 # failover re-point (exactly one master).
 #
-# Parameterize engine with KIVIDB_VERSION (default v1.0.4; use v1.0.4-rc2
+# Parameterize engine with KIVIDB_VERSION (default v1.0.5; use v1.0.5-rc1
 # for pre-GA testing).
 set -euo pipefail
 

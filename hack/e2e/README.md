@@ -28,7 +28,7 @@ minikube start --cpus=4 --memory=6144 --driver=docker
 | `quay.io/kividbio/kividb-operator:${OPERATOR_TAG}` | Manager |
 | `quay.io/kividbio/kividb-operator-agent:${OPERATOR_TAG}` | Sidecar + backup-trigger |
 | `quay.io/kividbio/kividb-operator-gui:${OPERATOR_TAG}` | Optional GUI |
-| `quay.io/kividbio/kividb:v1.0.4` (+ `-tls`, `-lua`, `-full`) | Engine variants |
+| `quay.io/kividbio/kividb:v1.0.5` (+ `-tls`, `-lua`, `-full`) | Engine variants |
 | `bitnamilegacy/minio`, `bitnamilegacy/minio-client` | In-cluster S3 for snapshots (override with `MINIO_IMAGE` / `MINIO_MC_IMAGE`) |
 | `prometheus-community/kube-prometheus-stack` | Optional monitoring |
 
@@ -38,7 +38,7 @@ Build operator images locally, then load them into minikube:
 make docker-build VERSION=0.4.0-local
 # or: docker build -t quay.io/kividbio/kividb-operator:0.4.0-local -f Dockerfile .
 LOAD_IMAGES=1 OPERATOR_TAG=0.4.0-local make e2e
-# Pre-GA engine: KIVIDB_VERSION=v1.0.4-rc2 LOAD_IMAGES=1 OPERATOR_TAG=0.4.0-local make e2e
+# Pre-GA engine: KIVIDB_VERSION=v1.0.5-rc1 LOAD_IMAGES=1 OPERATOR_TAG=0.4.0-local make e2e
 ```
 
 ## Quick start
@@ -65,7 +65,7 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 |----------|---------|---------|
 | `OPERATOR_TAG` | `0.4.0-local` | Manager / agent / GUI image tag |
 | `OPERATOR_REGISTRY` | `quay.io/kividbio` | Image registry prefix |
-| `KIVIDB_VERSION` | `v1.0.4` | Engine tag prefix (`v1.0.4`, or `v1.0.4-rc2` pre-GA) |
+| `KIVIDB_VERSION` | `v1.0.5` | Engine tag prefix (`v1.0.5`, or e.g. `v1.0.5-rc1` pre-GA) |
 | `LOAD_IMAGES` | `0` | `1` → `minikube image load` for operator (+ engine in compat) |
 | `STRICT_TLS` | `0` | `1` → fail if TLS port is not LISTEN (else warn; ROADMAP) |
 | `STORAGE_CLASS` | `standard` | PVC StorageClass (minikube default) |

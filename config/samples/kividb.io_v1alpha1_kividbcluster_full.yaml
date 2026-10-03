@@ -13,7 +13,7 @@ metadata:
   namespace: default
 spec:
   replicas: 3 # 1 master + 3 replicas = 4 pods total
-  image: quay.io/kividbio/kividb:v1.0.4
+  image: quay.io/kividbio/kividb:v1.0.5
   imagePullPolicy: IfNotPresent
   # imagePullSecrets:
   #   - name: quay-pull-secret

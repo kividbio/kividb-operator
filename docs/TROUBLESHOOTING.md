@@ -106,9 +106,8 @@ backup while debugging.
 The master is down, the replicas are Ready, and the cluster stays in
 `Error` with a `FailoverBlocked` event. The operator found that no ready
 replica holds any keys although the master was last seen holding data
-(compare `status.pods[].keys`). kividb v1.0.4 empties a replica when a
-full resync from the master fails part-way, and a master that keeps
-restarting does that to all of them at once (see
+(compare `status.pods[].keys`). On kividb before v1.0.5 a replica could be
+emptied by a master that keeps restarting, all of them at once (see
 [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md), issue 10).
 
 The data is then only on the master's volume, so the operator waits for
