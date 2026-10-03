@@ -31,7 +31,7 @@ MANAGER_IMG="${MANAGER_IMG:-${OPERATOR_REGISTRY}/kividb-operator:${OPERATOR_TAG}
 AGENT_IMG="${AGENT_IMG:-${OPERATOR_REGISTRY}/kividb-operator-agent:${OPERATOR_TAG}}"
 GUI_IMG="${GUI_IMG:-${OPERATOR_REGISTRY}/kividb-operator-gui:${OPERATOR_TAG}}"
 
-KIVIDB_VERSION="${KIVIDB_VERSION:-v1.0.4}"
+KIVIDB_VERSION="${KIVIDB_VERSION:-v1.0.5}"
 KIVIDB_IMAGE_BASE="${KIVIDB_IMAGE_BASE:-quay.io/kividbio/kividb}"
 KIVIDB_PORT="${KIVIDB_PORT:-6380}"
 TLS_PORT="${TLS_PORT:-6443}"
@@ -186,7 +186,10 @@ redis_cli_master() {
   pf_pid=$!
   ready=0
   for i in $(seq 1 30); do
-    if redis-cli -h 127.0.0.1 -p "${local_port}" PING 2>/dev/null | grep -qi pong; then
+    # Any RESP reply means the port-forward is up. kividb v1.0.5+ answers an
+    # unauthenticated PING with NOAUTH on a cluster with a default-user
+    # password, which is correct and must not count as "not ready".
+    if redis-cli -h 127.0.0.1 -p "${local_port}" PING 2>/dev/null | grep -Eqi 'pong|noauth'; then
       ready=1
       break
     fi
@@ -219,7 +222,10 @@ generate_load() {
   pf_pid=$!
   ready=0
   for i in $(seq 1 30); do
-    if redis-cli -h 127.0.0.1 -p "${local_port}" PING 2>/dev/null | grep -qi pong; then
+    # Any RESP reply means the port-forward is up. kividb v1.0.5+ answers an
+    # unauthenticated PING with NOAUTH on a cluster with a default-user
+    # password, which is correct and must not count as "not ready".
+    if redis-cli -h 127.0.0.1 -p "${local_port}" PING 2>/dev/null | grep -Eqi 'pong|noauth'; then
       ready=1
       break
     fi
