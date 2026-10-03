@@ -3,33 +3,42 @@
 Found while running kividb-operator 0.4.0 against **kividb v1.0.4**
 (`quay.io/kividbio/kividb@sha256:6bab772968654ecd357975a4f36f9e7d262ac7765be386d86170191eef1d8959`)
 on a single-node minikube cluster, in plain Docker containers, and on a
-three-node, three-zone EKS cluster, on 2026-10-01 and 2026-10-02. Each entry says what was observed, how to reproduce it without
-the operator, what Redis does in the same situation, and what the operator
-does about it today.
+three-node, three-zone EKS cluster, on 2026-10-01 and 2026-10-02. Each
+entry says what was observed, how to reproduce it without the operator,
+what Redis does in the same situation, and what the operator does about it.
 
-| # | Issue | Severity | Operator workaround |
+**Re-tested on v1.0.5-rc1** (`quay.io/kividbio/kividb@sha256:13190fa19dd4d289eccd67841781bc4bc79829fc62fd8f60111b6731fbdfa94d`)
+on 2026-10-03. Every issue was run on v1.0.4 and on rc1 with the same
+procedure, so "fixed" means the same test changed outcome. All eleven
+are fixed in rc1. The re-test found one **new** problem, issue 12, which
+should be fixed before 1.0.5 is final.
+
+| # | Issue | Severity | v1.0.5-rc1 |
 |---|---|---|---|
-| [1](#1-a-password-on-the-default-user-in-an-acl-file-is-not-enforced) | Password on `default` in an ACL file is not enforced | Critical | None possible (see 2) |
-| [2](#2-a-replica-cannot-authenticate-to-its-master) | A replica cannot authenticate to its master | High | None |
-| [3](#3-a-snapshot-that-cannot-be-read-is-skipped-and-the-server-starts-empty) | Unreadable snapshot is skipped; server starts empty | High | Restore Job fixed; engine behaviour unchanged |
-| [4](#4-a-replica-reports-itself-in-sync-while-it-is-still-doing-its-first-full-sync) | Replica reports "connected" during its first full sync | High | Offset heuristic |
-| [5](#5-acl-load-merges-into-existing-users-instead-of-replacing-them) | `ACL LOAD` merges instead of replacing | High | `reset` in every line; agent deletes stale users |
-| [6](#6-only-the-last-key-pattern-of-a-user-is-kept) | Only the last key pattern of a user is kept | Medium | None |
-| [7](#7-acl-setuser-and-acl-deluser-report-an-error-after-applying-the-change) | `ACL SETUSER` / `DELUSER` return an error after applying the change | Medium | Agent re-reads the user list |
-| [8](#8-the-config-file-silently-ignores-what-it-does-not-understand) | Config file silently ignores unknown directives and bad values | Medium | None |
-| [9](#9-a-full-resync-needs-about-twice-the-datasets-memory-and-happens-on-every-replica-restart) | Full resync needs ~2x memory and runs on every replica restart | Medium | None |
-| [10](#10-a-full-resync-that-fails-part-way-leaves-the-replica-empty) | A full resync that fails part-way leaves the replica empty | Critical | Failover refuses to promote an emptied replica |
-| [11](#11-the-final-snapshot-on-sigterm-is-sometimes-not-written) | The final snapshot on SIGTERM is sometimes not written | High | Master hands over before it is restarted |
+| [1](#1-a-password-on-the-default-user-in-an-acl-file-is-not-enforced) | Password on `default` in an ACL file is not enforced | Critical | Fixed |
+| [2](#2-a-replica-cannot-authenticate-to-its-master) | A replica cannot authenticate to its master | High | Fixed |
+| [3](#3-a-snapshot-that-cannot-be-read-is-skipped-and-the-server-starts-empty) | Unreadable snapshot is skipped; server starts empty | High | Fixed |
+| [4](#4-a-replica-reports-itself-in-sync-while-it-is-still-doing-its-first-full-sync) | Replica reports "connected" during its first full sync | High | Fixed |
+| [5](#5-acl-load-merges-into-existing-users-instead-of-replacing-them) | `ACL LOAD` merges instead of replacing | High | Fixed |
+| [6](#6-only-the-last-key-pattern-of-a-user-is-kept) | Only the last key pattern of a user is kept | Medium | Fixed (key patterns; channel patterns not re-tested) |
+| [7](#7-acl-setuser-and-acl-deluser-report-an-error-after-applying-the-change) | `ACL SETUSER` / `DELUSER` return an error after applying the change | Medium | Fixed |
+| [8](#8-the-config-file-silently-ignores-what-it-does-not-understand) | Config file silently ignores unknown directives and bad values | Medium | Fixed |
+| [9](#9-a-full-resync-needs-about-twice-the-datasets-memory-and-happens-on-every-replica-restart) | Full resync needs ~2x memory and runs on every replica restart | Medium | Fixed (peak memory not measured) |
+| [10](#10-a-full-resync-that-fails-part-way-leaves-the-replica-empty) | A crash-looping master can empty every replica | Critical | Fixed (by refusing to start empty and refusing empty masters) |
+| [11](#11-the-final-snapshot-on-sigterm-is-sometimes-not-written) | The final snapshot on SIGTERM is sometimes not written | High | Fixed |
+| [12](#12-new-in-v105-rc1-a-replica-panics-on-full-resync-after-its-cpu-limit-changes) | **New in rc1:** replica panics on full resync after its CPU limit changes | High | **Open** |
 
-Issues 1 and 10 are the ones to look at first. Issue 1 means **every
-cluster that relies on a `default`-user password for access control is
-open to anyone who can reach its port** (and issue 2 is what stops the
-operator from closing it). Issue 10 **lost an entire dataset** in testing:
-every replica dropped its copy at the same moment.
+See also [Changes in v1.0.5-rc1 that clients and operators must handle](#changes-in-v105-rc1-that-clients-and-operators-must-handle).
 
 ---
 
 ## 1. A password on the `default` user in an ACL file is not enforced
+
+> **v1.0.5-rc1: fixed.** The same file and commands now answer
+> `NOAUTH Authentication required.` to `SET`, `ACL LIST` and `PING`; after a
+> failed `AUTH` the next command also gets `NOAUTH`. Confirmed on an
+> operator-managed EKS cluster: an unauthenticated write through the master
+> Service is refused.
 
 **Severity: critical.**
 
@@ -78,6 +87,12 @@ because of issue 2.
 
 ## 2. A replica cannot authenticate to its master
 
+> **v1.0.5-rc1: fixed.** `--masterauth` / `--masteruser` and `CONFIG SET
+> masterauth` all work, against a `--requirepass` master and against an
+> ACL-file master with a dedicated replication user. Without them the replica
+> now reports `slave … connect` and logs `master requires authentication — set
+> masterauth`, instead of claiming to be a master.
+
 **Severity: high** (blocks the only mitigation for issue 1).
 
 There is no `masterauth` / `masteruser` option (flag, config directive or
@@ -110,6 +125,11 @@ in the handshake. While the link is down the node should still report
 ---
 
 ## 3. A snapshot that cannot be read is skipped and the server starts empty
+
+> **v1.0.5-rc1: fixed.** An unreadable `dump.kdb` and one truncated to half
+> its size both stop startup: `[FATAL] dump.kdb cannot be loaded: …` /
+> `Refusing to start with an empty dataset in place of one that could not be
+> loaded`, exit status 1. v1.0.4 started empty in both cases.
 
 **Severity: high** (silent data loss).
 
@@ -145,6 +165,11 @@ right outcome when no file exists.
 ---
 
 ## 4. A replica reports itself in sync while it is still doing its first full sync
+
+> **v1.0.5-rc1: fixed.** During the full sync the replica reports `connecting`
+> then `sync`, `master_link_status:down`, `master_sync_in_progress:1`, and the
+> master reports `wait_bgsave` then `send_bulk`; `connected` / `online` only
+> once the dataset is loaded. While loading, commands get a `LOADING` error.
 
 **Severity: high** for anything that orchestrates restarts or failover.
 
@@ -189,6 +214,11 @@ state field would replace.
 
 ## 5. `ACL LOAD` merges into existing users instead of replacing them
 
+> **v1.0.5-rc1: fixed.** With lines that do *not* start with `reset`, a
+> reload replaces the password (the old one is rejected), removes the dropped
+> command rule, and deletes the user that left the file. A file with an
+> invalid line is rejected as a whole and the previous users stay in force.
+
 **Severity: high** (revoked credentials keep working).
 
 `ACL LOAD` applies each line of the file on top of the user as it already
@@ -226,6 +256,9 @@ the agent runs `ACL DELUSER` for users the file no longer defines.
 
 ## 6. Only the last key pattern of a user is kept
 
+> **v1.0.5-rc1: fixed** for key patterns: `~app:* ~session:*` allows both
+> prefixes and still denies others. Channel patterns were not re-tested.
+
 **Severity: medium.** Already noted in the operator's ROADMAP; included
 here for completeness.
 
@@ -242,6 +275,11 @@ matches any of them. The same should be checked for channel patterns.
 ---
 
 ## 7. `ACL SETUSER` and `ACL DELUSER` report an error after applying the change
+
+> **v1.0.5-rc1: fixed.** With the ACL file mounted read-only, `ACL SETUSER`
+> answers `OK` and `ACL DELUSER` the number deleted; the file is no longer
+> written implicitly. `ACL SAVE` still reports the read-only file system,
+> which is correct.
 
 **Severity: medium.**
 
@@ -269,6 +307,10 @@ its reply and re-reads `ACL USERS` to see whether it worked.
 ---
 
 ## 8. The config file silently ignores what it does not understand
+
+> **v1.0.5-rc1: fixed.** `appendonly yes` enables AOF. An unknown directive
+> or an unparseable value stops startup with `[FATAL] Bad directive or wrong
+> number of arguments — <file>: line N: …`. `maxmemory` is now enforced.
 
 **Severity: medium.**
 
@@ -301,6 +343,16 @@ which is why the operator passes them as command-line flags.
 
 ## 9. A full resync needs about twice the dataset's memory, and happens on every replica restart
 
+> **v1.0.5-rc1: fixed.** A restarted replica records the replication ID and
+> offset of its dataset and continues with a partial resync (`Partial resync:
+> continuing from offset … — no dataset transfer`); no full resync in the test.
+> `--maxmemory` is enforced (writes refused with OOM, or eviction per
+> `--maxmemory-policy`). By default (`repl-diskless-load disabled`) a full
+> resync drops the local dataset after receiving the payload and before
+> loading it (`Dropped the N local keys before loading M from the master`), so
+> it needs memory for one dataset; `swapdb` keeps serving the old one at the
+> cost of two. Peak memory was not measured.
+
 **Severity: medium.**
 
 A restarted replica that has its own `dump.kdb` / `appendonly.aof` loads
@@ -329,6 +381,18 @@ received one when a full resync is unavoidable; and enforcing `maxmemory`.
 ---
 
 ## 10. A full resync that fails part-way leaves the replica empty
+
+> **v1.0.5-rc1: fixed**, though the exact mechanism below was never caught
+> on demand. On EKS a master was killed repeatedly at timed delays after its
+> replicas registered for a full sync (failover disabled, ~700k keys). On
+> v1.0.4 the master's `dump.kdb` ended up damaged, it restarted with
+> `Could not load snapshot: failed to fill whole buffer`, sent a 76-byte empty
+> snapshot, and **both replicas replaced 695,857 keys with 0**. On rc1 the same
+> sweep left every pod with all ~718k keys. rc1 closes that path twice: it
+> refuses to start on a damaged snapshot (issue 3), and replicas refuse a full
+> sync from an empty master by default (`replica-full-sync-guard empty`). A
+> transfer cut off mid-way leaves the local dataset untouched, because the
+> payload is received completely before anything is dropped.
 
 **Severity: critical** (lost a whole dataset on EKS).
 
@@ -402,6 +466,13 @@ still on the master's disk, and can be overridden with the
 
 ## 11. The final snapshot on SIGTERM is sometimes not written
 
+> **v1.0.5-rc1: fixed.** Reproduced on v1.0.4 once the master had clients
+> opening a new connection per command (as the operator's agent and exporter
+> do): on minikube 1 of 1 attempts and on EKS 1 of 1 lost the final snapshot,
+> on EKS together with the whole 696k-key dataset. With the same load rc1
+> wrote it 7 of 7 times (3 on minikube, 4 on EKS), each ending in `Snapshot
+> saved` and `Goodbye`, and restarted with every key.
+
 **Severity: high.**
 
 On `SIGTERM` kividb announces a final snapshot. Sometimes it writes it;
@@ -454,6 +525,81 @@ The operator no longer restarts a master in place. Rolling updates and
 depends on what it saved on the way down. A master that restarts on its
 own (crash, OOM kill, node reboot) and comes back before the failover
 threshold is still exposed; enabling AOF (`aof yes`) closes that.
+
+---
+
+## 12. New in v1.0.5-rc1: a replica panics on full resync after its CPU limit changes
+
+**Severity: high.** Found while re-testing; not present in v1.0.4, which has
+no staging shards.
+
+If the CPU quota of a running replica changes (in Kubernetes: an in-place
+CPU resize of the pod) and the replica later does a full resync, its
+replication thread panics. The process stays up and keeps answering as a
+replica, but replication never resumes:
+
+```
+[INFO] Shards per DB  : 128                     <- at startup (16 CPUs visible)
+...
+thread 'kividb-replica' panicked at src/store/mod.rs:227:9:
+assertion `left == right` failed: staging shard count mismatch
+  left: 128
+ right: 16
+```
+
+Afterwards `ROLE` reports `slave <master> <port> connect <offset>`, the master
+lists no connected replica, and `REPLICAOF <same master>` is answered with
+`already following this master, no operation performed`, so nothing short
+of a restart (or `REPLICAOF NO ONE` first) brings it back. A replica in this
+state is Ready and looks healthy to anything that only checks that it is up.
+
+### Reproduce
+
+```bash
+docker network create kvp
+for n in pm1 pm2 pr; do docker run -d --name $n --network kvp quay.io/kividbio/kividb:v1.0.5-rc1; done
+for m in pm1 pm2; do docker exec $m redis-benchmark -p 6380 -n 200000 -t set -r 200000 -q; done
+docker exec pr redis-cli -p 6380 replicaof pm1 6380     # full sync: fine
+docker exec pr redis-cli -p 6380 replicaof pm2 6380     # full sync from another master: fine
+docker update --cpus 2 pr
+docker exec pr redis-cli -p 6380 replicaof pm1 6380     # full sync: panics
+docker logs pr | grep -A3 panicked
+```
+
+Deterministic in every attempt; the control step (a second full sync with
+the CPU quota unchanged) never panics.
+
+### Expected
+
+The staging store for a full sync uses the shard count the server was
+started with, not one recomputed from the CPUs visible at that moment. More
+generally, a panic in the replication thread should not leave the process
+running as a replica that can never reconnect; restarting the thread, or
+the process, would at least make the failure visible.
+
+---
+
+## Changes in v1.0.5-rc1 that clients and operators must handle
+
+Correct behaviour, but it breaks setups that worked on v1.0.4:
+
+- **Replicas must authenticate.** With a password on the `default` user (or
+  `requirepass`), a replica without `masterauth` never syncs. kividb-operator
+  now sets `masterauth` through its agent before `REPLICAOF`.
+- **Mixed-version clusters cannot replicate from a v1.0.5 master** when the
+  default user has a password: v1.0.4 has no `masterauth`. During an engine
+  upgrade the remaining v1.0.4 pods stop syncing once the master is on
+  v1.0.5. kividb-operator now replaces such a pod instead of waiting for it.
+- **Unknown or malformed config directives are fatal.** A `KividbConfig` with
+  a directive v1.0.4 silently ignored makes v1.0.5 pods crash-loop; check
+  configs before upgrading.
+- **`maxmemory` is enforced**, with `noeviction` by default: writes beyond it
+  are refused. A value set long ago and never noticed now takes effect.
+- **Replicas refuse a full sync from an empty master** while they hold keys
+  (`replica-full-sync-guard empty`); a deliberate wipe of the master needs
+  `CONFIG SET replica-full-sync-guard off` on the replicas.
+- **`LOADING` replies** while a dataset is being loaded; clients and
+  readiness checks see an error rather than an empty database.
 
 ---
 
