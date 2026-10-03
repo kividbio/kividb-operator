@@ -37,7 +37,7 @@ const ClusterLabel = "kividb.io/cluster"
 
 // KividbVariant selects which build of the kividb image to run. Each
 // variant beyond "standard" corresponds to a real, separately-published
-	// image tag suffix (e.g. quay.io/kividbio/kividb:v1.0.5-tls) -- the
+// image tag suffix (e.g. quay.io/kividbio/kividb:v1.0.5-tls) -- the
 // features aren't runtime-togglable, they're compiled in.
 type KividbVariant string
 

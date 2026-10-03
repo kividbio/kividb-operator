@@ -23,17 +23,18 @@ func TestBumpAuthGenerations(t *testing.T) {
 	t.Parallel()
 	secret := &corev1.Secret{}
 
-	first := bumpAuthGenerations(secret, "acl v1", "pw1")
+	c := &kividbv1alpha1.KividbCluster{}
+	first := bumpAuthGenerations(c, secret, "acl v1", "pw1")
 	if first.auth != "1" || first.acl != "1" {
 		t.Fatalf("first call: %+v, want both generations at 1", first)
 	}
-	if again := bumpAuthGenerations(secret, "acl v1", "pw1"); again != first {
+	if again := bumpAuthGenerations(c, secret, "acl v1", "pw1"); again != first {
 		t.Fatalf("unchanged input moved the generations: %+v", again)
 	}
-	if got := bumpAuthGenerations(secret, "acl v2", "pw1"); got.auth != "1" || got.acl != "2" {
+	if got := bumpAuthGenerations(c, secret, "acl v2", "pw1"); got.auth != "1" || got.acl != "2" {
 		t.Fatalf("ACL-only change: %+v, want auth=1 acl=2", got)
 	}
-	if got := bumpAuthGenerations(secret, "acl v3", "pw2"); got.auth != "2" || got.acl != "3" {
+	if got := bumpAuthGenerations(c, secret, "acl v3", "pw2"); got.auth != "2" || got.acl != "3" {
 		t.Fatalf("default password change: %+v, want auth=2 acl=3", got)
 	}
 }
@@ -90,10 +91,10 @@ func TestReconcileAclReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	agents := &aclAgents{fileHash: map[string]string{
-		"10.0.0.1": contentHash(acl),
-		"10.0.0.2": contentHash("the previous file"),
-		"10.0.0.3": contentHash(acl),
-		"10.0.0.4": contentHash(acl),
+		"10.0.0.1": aclFileFingerprint(acl),
+		"10.0.0.2": aclFileFingerprint("the previous file"),
+		"10.0.0.3": aclFileFingerprint(acl),
+		"10.0.0.4": aclFileFingerprint(acl),
 	}}
 	r := &KividbClusterReconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pods...).Build(),

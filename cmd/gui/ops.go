@@ -118,7 +118,7 @@ func (s *server) handleAPICreateRestart(w http.ResponseWriter, r *http.Request) 
 			Name:      opName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"kividb.io/cluster": name,
+				"kividb.io/cluster":            name,
 				"app.kubernetes.io/managed-by": "kividb-operator-gui",
 			},
 		},

@@ -128,7 +128,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	rollout := map[string]string{
-		ConfigHashAnnotation:     contentHash(renderKividbConf(&c, kdbConfig))[:16],
+		ConfigHashAnnotation:     configHash(renderKividbConf(&c, kdbConfig))[:16],
 		AuthGenerationAnnotation: generations.auth,
 	}
 	if err := r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg, rollout); err != nil {
@@ -277,7 +277,7 @@ func (r *KividbClusterReconciler) reconcileSecret(ctx context.Context, c *kividb
 		secret.Labels = desired.Labels
 		secret.Type = desired.Type
 		secret.StringData = desired.StringData
-		generations = bumpAuthGenerations(secret, aclContent, defaultPassword)
+		generations = bumpAuthGenerations(c, secret, aclContent, defaultPassword)
 		return controllerutil.SetControllerReference(c, secret, r.scheme())
 	})
 	return generations, err

@@ -109,7 +109,11 @@ func extractSnapshotTarGz(r io.Reader, dataDir string) error {
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
-	allowed := map[string]bool{"dump.kdb": true, "appendonly.aof": true}
+	// The only files ever written, by fixed name. An entry's own name is
+	// used just to pick one of these and never becomes part of a path, so
+	// a crafted archive ("../../etc/x", absolute paths, links) cannot
+	// write anywhere else.
+	targets := map[string]string{"dump.kdb": "dump.kdb", "appendonly.aof": "appendonly.aof"}
 	var wrote bool
 	for {
 		hdr, err := tr.Next()
@@ -119,11 +123,11 @@ func extractSnapshotTarGz(r io.Reader, dataDir string) error {
 		if err != nil {
 			return err
 		}
-		base := filepath.Base(hdr.Name)
-		if !allowed[base] || hdr.Typeflag != tar.TypeReg {
+		name, ok := targets[filepath.Base(hdr.Name)]
+		if !ok || hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		dest := filepath.Join(dataDir, base)
+		dest := filepath.Join(dataDir, name)
 		f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, restoredFileMode)
 		if err != nil {
 			return err

@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	metricsTTL         = 24 * time.Hour
-	metricsScrapeEvery = 15 * time.Second
+	metricsTTL          = 24 * time.Hour
+	metricsScrapeEvery  = 15 * time.Second
 	metricsPersistEvery = 1 * time.Minute
 )
 
@@ -33,10 +33,10 @@ type metricPoint struct {
 }
 
 type podSeries struct {
-	Memory   []metricPoint `json:"memory"`
-	Clients  []metricPoint `json:"clients"`
+	Memory     []metricPoint `json:"memory"`
+	Clients    []metricPoint `json:"clients"`
 	ReplOffset []metricPoint `json:"replOffset"`
-	Commands []metricPoint `json:"commands"` // total_commands_processed (counter; chart diffs client-side)
+	Commands   []metricPoint `json:"commands"` // total_commands_processed (counter; chart diffs client-side)
 }
 
 type metricsSnapshot struct {
@@ -47,9 +47,9 @@ type metricsSnapshot struct {
 // metricsStore holds ~24h of agent scrapes, optionally persisted under
 // GUI_METRICS_DIR (chart PVC). No Prometheus dependency.
 type metricsStore struct {
-	mu       sync.RWMutex
-	series   map[string]*podSeries
-	dataDir  string
+	mu          sync.RWMutex
+	series      map[string]*podSeries
+	dataDir     string
 	persistPath string
 }
 
@@ -285,7 +285,7 @@ func podReady(p *corev1.Pod) bool {
 }
 
 type agentGauges struct {
-	memory, clients, replOffset, commands float64
+	memory, clients, replOffset, commands   float64
 	haveMem, haveClients, haveRepl, haveCmd bool
 }
 

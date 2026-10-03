@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -133,10 +131,17 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 		out.Role = agentapi.RoleReplica
 		if len(roleReply.Array) > 4 {
 			out.MasterHost = roleReply.Array[1].Str
-			// The port is a RESP integer (as in Redis), not a string.
-			out.MasterPort = int32(roleReply.Array[2].Int)
-			if p, err := strconv.Atoi(roleReply.Array[2].Str); err == nil && out.MasterPort == 0 {
-				out.MasterPort = int32(p)
+			// The port is a RESP integer (as in Redis); older engines sent
+			// a string. Anything outside the TCP port range is ignored and
+			// reported as 0, i.e. unknown.
+			port := roleReply.Array[2].Int
+			if port == 0 {
+				if p, err := strconv.ParseInt(roleReply.Array[2].Str, 10, 32); err == nil {
+					port = p
+				}
+			}
+			if port > 0 && port <= 65535 {
+				out.MasterPort = int32(port)
 			}
 			out.ReplicationOffset = roleReply.Array[4].Int
 		}
@@ -175,8 +180,8 @@ func keyspaceKeyCount(info string) int64 {
 	return total
 }
 
-// fileHash returns the hex SHA-256 of path's contents, or "" if path is
-// unset or unreadable.
+// fileHash returns the ACL-file fingerprint of path's contents (see
+// agentapi.Fingerprint), or "" if path is unset or unreadable.
 func fileHash(path string) string {
 	if path == "" {
 		return ""
@@ -185,8 +190,7 @@ func fileHash(path string) string {
 	if err != nil {
 		return ""
 	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	return agentapi.Fingerprint(string(b), agentapi.AclFileFingerprintSalt)
 }
 
 func (s *server) handlePromote(w http.ResponseWriter, r *http.Request) {

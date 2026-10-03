@@ -44,8 +44,9 @@ type StatusResponse struct {
 
 // AclReloadRequest is the optional body of POST /acl/reload.
 type AclReloadRequest struct {
-	// IfFileHash, when set, is the hex SHA-256 of the ACL file the caller
-	// expects kividb to load. The agent answers 409 without reloading if
+	// IfFileHash, when set, is the Fingerprint (with
+	// AclFileFingerprintSalt) of the ACL file the caller expects kividb to
+	// load. The agent answers 409 without reloading if
 	// the file mounted in the pod does not match: an updated Secret takes
 	// a while to reach a running pod's volume, and reloading before then
 	// would just re-read the old content.

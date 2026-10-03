@@ -7,14 +7,30 @@ import (
 	"strconv"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
+	"github.com/kividbio/kividb-operator/internal/agentapi"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-func contentHash(s string) string {
+// configHash fingerprints the rendered kividb.conf, which holds no
+// credentials (the ACL file and passwords live elsewhere).
+func configHash(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+// aclFileFingerprint fingerprints the rendered ACL file the same way the
+// agent fingerprints the file mounted in its pod.
+func aclFileFingerprint(aclContent string) string {
+	return agentapi.Fingerprint(aclContent, agentapi.AclFileFingerprintSalt)
+}
+
+// passwordFingerprint fingerprints the default user's password, salted
+// per cluster, so that a change can be detected without keeping a fast
+// hash of it.
+func passwordFingerprint(c *kividbv1alpha1.KividbCluster, password string) string {
+	return agentapi.Fingerprint(password, "kividb-operator/default-password/"+c.Namespace+"/"+c.Name)
 }
 
 // authGenerations are the current values of the two change counters kept
@@ -28,7 +44,7 @@ type authGenerations struct {
 // bumpAuthGenerations records the hashes of the ACL file and the default
 // user's password on secret, advancing the matching counter whenever one
 // differs from what was recorded last time, and returns the counters.
-func bumpAuthGenerations(secret *corev1.Secret, aclContent, defaultPassword string) authGenerations {
+func bumpAuthGenerations(c *kividbv1alpha1.KividbCluster, secret *corev1.Secret, aclContent, defaultPassword string) authGenerations {
 	if secret.Annotations == nil {
 		secret.Annotations = map[string]string{}
 	}
@@ -43,8 +59,8 @@ func bumpAuthGenerations(secret *corev1.Secret, aclContent, defaultPassword stri
 		return generation
 	}
 	return authGenerations{
-		auth: bump(AuthHashAnnotation, AuthGenerationAnnotation, contentHash(defaultPassword)),
-		acl:  bump(AclHashAnnotation, AclGenerationAnnotation, contentHash(aclContent)),
+		auth: bump(AuthHashAnnotation, AuthGenerationAnnotation, passwordFingerprint(c, defaultPassword)),
+		acl:  bump(AclHashAnnotation, AclGenerationAnnotation, aclFileFingerprint(aclContent)),
 	}
 }
 
@@ -69,7 +85,7 @@ func bumpAuthGenerations(secret *corev1.Secret, aclContent, defaultPassword stri
 // an ACL that is slow to apply must not hold up role management.
 func (r *KividbClusterReconciler) reconcileAclReload(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []corev1.Pod, aclContent string, generations authGenerations) {
 	log := logf.FromContext(ctx)
-	fileHash := contentHash(aclContent)
+	fileHash := aclFileFingerprint(aclContent)
 
 	for i := range pods {
 		p := &pods[i]
