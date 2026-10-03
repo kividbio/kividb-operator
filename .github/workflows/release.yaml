@@ -140,7 +140,11 @@ jobs:
         if: steps.check.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.image }}-${{ matrix.arch }}
+          # "--" before the arch: image names share prefixes
+          # (kividb-operator, kividb-operator-agent, ...), so with a single
+          # "-" the merge job's pattern for one image also matched the
+          # others' digests.
+          name: digests-${{ matrix.image }}--${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -170,7 +174,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-${{ matrix.image }}-*
+          pattern: digests-${{ matrix.image }}--*
           merge-multiple: true
 
       - name: Create and push manifest list
