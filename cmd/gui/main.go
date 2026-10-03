@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -66,18 +67,30 @@ func main() {
 		log.Fatalf("building Kubernetes clientset: %v", err)
 	}
 
+	metricsDir := os.Getenv("GUI_METRICS_DIR")
 	srv := &server{
 		ctrlClient:     ctrlClient,
 		clientset:      clientset,
 		watchNamespace: watchNamespace,
+		auth:           loadAuthConfig(),
+		metrics:        newMetricsStore(metricsDir),
 	}
+	srv.startMetricsScraper(context.Background())
 
 	addr := fmt.Sprintf(":%d", port)
 	scope := "all namespaces"
 	if watchNamespace != "" {
 		scope = fmt.Sprintf("namespace %q", watchNamespace)
 	}
-	log.Printf("kividb-operator GUI listening on %s (watching %s)", addr, scope)
+	authNote := "auth disabled"
+	if srv.auth.enabled() {
+		authNote = "basic auth enabled"
+	}
+	metricsNote := "metrics in-memory only"
+	if metricsDir != "" {
+		metricsNote = "metrics dir " + metricsDir
+	}
+	log.Printf("kividb-operator GUI listening on %s (watching %s, %s, %s)", addr, scope, authNote, metricsNote)
 
 	if err := http.ListenAndServe(addr, srv.routes()); err != nil {
 		log.Fatal(err)

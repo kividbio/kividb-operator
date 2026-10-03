@@ -30,7 +30,7 @@ All fields below are under `spec:` unless stated otherwise.
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `replicas` | int32 | `2` | Replica pods **in addition to** the single master. Total pods = `replicas + 1`. |
-| `image` | string | `quay.io/kividbio/kividb:v1.0.3` | Explicit kividb container image, e.g. `quay.io/kividbio/kividb:v1.0.3` or `quay.io/kividbio/kividb:v1.0.3-tls`. Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
+| `image` | string | `quay.io/kividbio/kividb:v1.0.5` | Explicit kividb container image, e.g. `quay.io/kividbio/kividb:v1.0.3` or `quay.io/kividbio/kividb:v1.0.3-tls`. Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
 | `variant` | string | `standard` | One of `standard`, `tls`, `lua`, `full`. See [Image and variant](#image-and-variant) — informational only, does not affect which image gets pulled. |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
 | `imagePullSecrets` | `[]LocalObjectReference` | — | Standard Kubernetes image pull secrets. |
@@ -44,17 +44,33 @@ All fields below are under `spec:` unless stated otherwise.
 `image` is the **only** field that determines which container actually
 runs — the operator uses it verbatim and never constructs, guesses, or
 modifies it. Leave it unset to use the release default
-(`quay.io/kividbio/kividb:v1.0.3` for operator 0.3.0); set it explicitly
+(`quay.io/kividbio/kividb:v1.0.5` for operator 0.4.0); set it explicitly
 to pin a different tag or variant:
 
 ```yaml
 spec:
-  image: quay.io/kividbio/kividb:v1.0.3-tls
+  image: quay.io/kividbio/kividb:v1.0.5-tls
 ```
 
 To move to a later version, just change this value — same as any other
 Kubernetes Deployment/StatefulSet image bump (a rolling pod-by-pod
 restart, since `VolumeClaimTemplates`/data are untouched).
+
+Editing the referenced `KividbConfig` does the same: kividb only reads
+`kividb.conf` at startup, so a change to its directives rolls the pods
+one at a time (the pod template carries a `kividb.io/config-hash`
+annotation for exactly this purpose).
+
+The operator performs these rollouts itself (the StatefulSet uses the
+`OnDelete` update strategy): replicas first, the master last, and the
+next pod is only replaced once every pod is Ready and every replica shows
+`synced: true` in `status.pods`. When only the master is left, its role
+is first handed to an in-sync replica (a `Switchover` event; expect about
+a second of failed writes) and the old master is replaced afterwards. A pod that is unready and still on the
+old template is replaced without waiting, so a change that fixes a
+crash-looping pod is not held up by that pod. Changes to a `KividbAclConfig` are
+applied without a restart unless the `default` user's password changed —
+see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#acl--authentication-errors-noauth-wrongpass).
 
 `variant` is a **separate, informational** field — it tells the operator
 which kind of build `image` is (`standard`, `tls`, `lua`, or `full`
@@ -64,7 +80,7 @@ a referenced [`KividbConfig`](#kividbconfig)'s `spec.tls`). It does
 **not** change which image tag gets pulled — there is no "tls variant
 tag" the operator appends or looks for. If you want a TLS-capable build,
 you set `image` to one yourself (e.g.
-`quay.io/kividbio/kividb:v1.0.3-tls`) *and* set `variant: tls` to match;
+`quay.io/kividbio/kividb:v1.0.5-tls`) *and* set `variant: tls` to match;
 the two aren't cross-validated by the API server, since only you know
 what a given `image` value actually contains.
 
@@ -323,6 +339,13 @@ error on that cluster (see [ROADMAP.md](ROADMAP.md) for planned
 usage-tracking to catch this earlier).
 
 ## KividbAclConfig
+
+> **On kividb before v1.0.5 the `default` user's password does not keep
+> unauthenticated clients out.** A client that never sends `AUTH` is
+> treated as `default` (see [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md),
+> issue 1). v1.0.5, the default image of this release, enforces it. If you
+> pin an older engine with `spec.image`, limit who can reach the cluster's
+> Services with a NetworkPolicy.
 
 ```yaml
 apiVersion: kividb.io/v1alpha1

@@ -234,9 +234,11 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          image: quay.io/minio/mc:latest
+          image: ${MINIO_MC_IMAGE}
           imagePullPolicy: IfNotPresent
           env:
+            - name: MC_CONFIG_DIR
+              value: /tmp/.mc
             - name: MINIO_ROOT_USER
               valueFrom:
                 secretKeyRef:

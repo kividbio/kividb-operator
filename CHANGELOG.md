@@ -6,13 +6,146 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-03
+
+### Added
+
+- **`KividbDbOps` CRD** with `op: restart` / `method: InPlace` rolling
+  restart (replicas first, then master). GUI can create/list these.
+- **`spec.bootstrapFromSnapshot`** on `KividbCluster`: seed a **new**
+  cluster's pod-0 PVC from a Succeeded `KividbSnapshot` before the
+  StatefulSet starts (supported restore path; see
+  `docs/BACKUP_RESTORE.md`).
+- Agent **`POST /exec`** for authenticated RESP commands (used by the GUI
+  explorer).
+- Agent **`restore-from-s3`** subcommand used by the bootstrap Job.
+- Management GUI: Basic auth (`GUI_AUTH_*` / chart `gui.auth.existingSecret`),
+  live status gauges, pod logs, RESP explorer, DbOps restart actions,
+  24h local metrics scraper (PVC-backed) with sparkline charts.
+- e2e suite **`08-resp-acl-select.sh`**: RESP3 `HELLO 3`, ACL deny smoke,
+  `SELECT` on replica, failover single-master re-point. Override
+  `KIVIDB_VERSION` (e.g. `v1.0.4-rc2`) for pre-GA engine testing.
+
 ### Changed
 
-- Release and CI Docker builds use **native** multi-arch runners
-  (`ubuntu-latest` for amd64, `ubuntu-24.04-arm` for arm64), push each
-  arch by digest, then merge into one OCI index — replacing the previous
-  QEMU-emulated `platforms: linux/amd64,linux/arm64` single-runner model
-  that made arm64 release builds very slow.
+- Default engine pin **`quay.io/kividbio/kividb:v1.0.5`** (and docs/
+  samples). Default agent image **`…-agent:0.4.0`**. v1.0.5 fixes all eleven
+  engine issues recorded in `docs/KIVIDB_ENGINE_ISSUES.md`, among them
+  unauthenticated access as the `default` user and the data-loss paths
+  around failed resyncs and skipped shutdown snapshots.
+- The agent sets `masterauth` to the `default` user's password before
+  every `REPLICAOF`. kividb v1.0.5 refuses an unauthenticated replication
+  handshake, so without it replicas of a password-protected cluster never
+  sync. It is set at runtime, so images of older engines keep working.
+- GUI ClusterRole gains `create` on `kividbdbops` and `get` on `pods/log`
+  (still never Secrets to the browser).
+- **Rolling updates are now done by the operator.** The StatefulSet uses
+  the `OnDelete` update strategy and the operator replaces pods itself:
+  replicas first, the master last, one at a time, and only while every
+  pod is Ready and every replica has finished syncing. A pod that is
+  unready on an outdated template is replaced without waiting.
+- **The master is never restarted in place.** A rolling update or
+  `KividbDbOps` restart first hands the master role to an in-sync replica
+  (event `Switchover`) and then replaces the old master. Restarting it in
+  place made every replica resync from whatever the master had last saved,
+  which on EKS lost 55 seconds of acknowledged writes during a config
+  change. Measured after the change: about one second of failed writes
+  and none lost.
+- **Failover will not promote an empty replica** when the master was last
+  seen holding data: kividb drops a replica's dataset when a full resync
+  fails part-way, which can empty every replica at once if the master is
+  crash-looping. The failover waits for the master instead (event
+  `FailoverBlocked`); set the `kividb.io/allow-empty-failover: "true"`
+  annotation on the `KividbCluster` to fail over regardless.
+  `status.pods[].keys` reports each pod's key count.
+- `status.pods[].synced` reports whether a replica has completed its full
+  sync from the current master. `KividbDbOps` restarts wait for it, and
+  failover prefers replicas that were in sync.
+
+### Fixed
+
+- **Failover could hand the cluster back to the old master and lose
+  writes.** The pod being failed away from kept its `role=master` label;
+  when it came back it rejoined the master Service, was picked as the
+  master again, and the pod that had been promoted was made its replica.
+  The old master is now relabeled before its replacement is promoted and
+  rejoins as a replica. `status.phase` also no longer sticks at
+  `FailingOver` with `lastFailoverTime` advancing every reconcile.
+- **A master that had been turned into a replica was never repaired**
+  (cluster reported `Running`, every write failed with `READONLY`). The
+  operator now follows the pod it is replicating from if that is a healthy
+  master of the same cluster, and otherwise promotes it again.
+- **`bootstrapFromSnapshot` produced an empty cluster.** The restored
+  files were readable only by the restore Job's own user, so kividb could
+  not load them and started empty while the bootstrap reported success.
+- **`KividbDbOps` restart deleted every pod at once.** A pod counted as
+  restarted while the deleted one was still terminating. Each pod must now
+  be replaced, Ready and back in the cluster before the next is deleted.
+- **Backups failed with `archive/tar: write too long`** whenever kividb
+  appended to `appendonly.aof` during the upload.
+- **ACL changes were never applied to running pods.** The operator now
+  has each pod run `ACL LOAD` once the updated file has reached it.
+- **`KividbConfig` changes were never applied to running pods.** They now
+  roll the pods, as does a change of the `default` user's password.
+- GUI: write endpoints (RESP explorer, restart, scale, promote, snapshot,
+  delete) were open when no auth Secret was configured, and accepted
+  cross-site requests. Promote sent `REPLICAOF` to backup Job pods, failed
+  halfway and could leave the cluster without a master.
+- The operator crash-looped if the `KividbDbOps` CRD was not installed,
+  which is the case after a `helm upgrade` from 0.3.0.
+- An unparseable `spec.storage.size` made the reconciler panic in a loop;
+  it is now rejected by the CRD schema and reported on the cluster's
+  `Ready` condition.
+- The snapshot-restore pod was listed in `status.pods` as a cluster
+  member, and pod-0's volume was the only one deleted with the cluster.
+- A rolling update required the pod being replaced to be in sync as well
+  as every other pod. Upgrading the engine from v1.0.4 to v1.0.5 stalled on
+  the last old pod: once the master role was on a v1.0.5 pod, the v1.0.4
+  pod could not authenticate to it and never became "synced".
+- **A crash-looping pod blocked every rollout**, including the template
+  change meant to fix it, and **rollouts moved on to the master while the
+  replaced replica was still resyncing.** See "Changed" below.
+- The GUI pod stayed `Pending` on clusters without a default StorageClass
+  (EKS): its metrics PVC was on by default and could not be provisioned.
+  `gui.metrics.persistence.enabled` now defaults to `false`.
+- Upgrading the operator while pods still ran kividb v1.0.3 never started
+  the rollout, because that engine does not report a replica's master.
+- The agent reported every replica's master port as 0, which made the
+  operator re-send `REPLICAOF` to every replica on every reconcile.
+
+### Upgrade notes
+
+- Apply the CRDs before upgrading the chart
+  (`kubectl apply -f charts/kividb-operator/crds/`): `KividbDbOps` is new
+  and `KividbCluster` gained validation. Helm does not do this for you.
+- **Every existing cluster's pods are rolled once** after the operator
+  is upgraded, one at a time: the pod template gains the agent's ACL
+  mount and the `kividb.io/config-hash` / `kividb.io/auth-generation`
+  annotations.
+- The GUI refuses all writes until `gui.auth.existingSecret` is set.
+- **Clusters without `spec.image` move to kividb v1.0.5** in that same
+  rolling restart (from v1.0.3 if they were created by 0.3.0, or v1.0.4).
+  Pin `spec.image` first to upgrade the engine separately. v1.0.5 changes
+  behaviour that worked before:
+  - **The `default` user's password is now enforced.** Clients that never
+    sent `AUTH` (which worked, wrongly, on older engines) now get
+    `NOAUTH`. Check client configuration before upgrading.
+  - **Unknown or malformed directives in a `KividbConfig` are fatal**: the
+    pod will not start. Older engines ignored them silently.
+  - **`maxmemory` is enforced**, with `noeviction` by default: writes over
+    the limit are refused.
+- Clusters pinned to an engine older than v1.0.5 keep the old behaviour,
+  including unauthenticated access as the `default` user; restrict
+  network access to their Services.
+
+### Notes
+
+- Known engine issue in v1.0.5: a replica whose CPU limit is changed in
+  place (for example by the Vertical Pod Autoscaler) panics on its next
+  full resync and stops replicating until restarted. The operator itself
+  never resizes pods in place. See `docs/KIVIDB_ENGINE_ISSUES.md`, issue 12.
+- Out of scope: `ReducedImpact` restart, in-place restore of a live
+  cluster.
 
 ## [0.3.0] - 2026-08-02
 
@@ -156,7 +289,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Helm chart (`charts/kividb-operator`) and kustomize bases
   (`config/`) for installation.
 
-[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.3.0...main
+[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.4.0...main
+[0.4.0]: https://github.com/kividbio/kividb-operator/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kividbio/kividb-operator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kividbio/kividb-operator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kividbio/kividb-operator/releases/tag/v0.1.0

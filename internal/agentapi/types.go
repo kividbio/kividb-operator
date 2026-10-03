@@ -35,6 +35,22 @@ type StatusResponse struct {
 	ReplicationOffset int64  `json:"replicationOffset"`
 	LastSaveUnix      int64  `json:"lastSaveUnix"`
 	AofEnabled        bool   `json:"aofEnabled"`
+	// KeyCount is the number of keys across all databases (INFO keyspace).
+	// KeyCountKnown tells a real 0 apart from an agent too old to report
+	// the field at all.
+	KeyCount      int64 `json:"keyCount"`
+	KeyCountKnown bool  `json:"keyCountKnown,omitempty"`
+}
+
+// AclReloadRequest is the optional body of POST /acl/reload.
+type AclReloadRequest struct {
+	// IfFileHash, when set, is the Fingerprint (with
+	// AclFileFingerprintSalt) of the ACL file the caller expects kividb to
+	// load. The agent answers 409 without reloading if
+	// the file mounted in the pod does not match: an updated Secret takes
+	// a while to reach a running pod's volume, and reloading before then
+	// would just re-read the old content.
+	IfFileHash string `json:"ifFileHash,omitempty"`
 }
 
 // ReplicaOfRequest is the body of POST /replicaof.
@@ -68,6 +84,20 @@ type BackupResult struct {
 	Success bool `json:"success"`
 	BackupResponse
 	Error string `json:"error,omitempty"`
+}
+
+// ExecRequest is the body of POST /exec: a RESP command as string args.
+type ExecRequest struct {
+	Args []string `json:"args"`
+}
+
+// ExecResponse is returned by POST /exec.
+type ExecResponse struct {
+	Type  string         `json:"type"` // status|error|integer|bulk|array|nil
+	Str   string         `json:"str,omitempty"`
+	Int   int64          `json:"int,omitempty"`
+	Array []ExecResponse `json:"array,omitempty"`
+	IsNil bool           `json:"isNil,omitempty"`
 }
 
 // OKResponse is returned by simple actions that have no extra payload.

@@ -7,6 +7,7 @@
     { "slug": "backup-restore", "title": "Backups and restore", "file": "BACKUP_RESTORE.md" },
     { "slug": "gui", "title": "Web GUI", "file": "GUI.md" },
     { "slug": "troubleshooting", "title": "Troubleshooting", "file": "TROUBLESHOOTING.md" },
-    { "slug": "roadmap", "title": "Roadmap", "file": "ROADMAP.md" }
+    { "slug": "roadmap", "title": "Roadmap", "file": "ROADMAP.md" },
+    { "slug": "engine-issues", "title": "Known kividb engine issues", "file": "KIVIDB_ENGINE_ISSUES.md" }
   ]
 }

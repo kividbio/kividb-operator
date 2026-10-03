@@ -46,7 +46,12 @@ func joinOrDefault(vals []string, def string) string {
 
 // renderUserLine renders one Redis/kividb-ACL-file line:
 //
-//	user <name> <on|off> <nopass|#hash> <keypatterns> <channelpatterns> <cmdrules>
+//	user <name> reset <on|off> <nopass|#hash> <keypatterns> <channelpatterns> <cmdrules>
+//
+// The leading "reset" is what makes a reload replace the user. kividb's
+// ACL LOAD applies each line on top of the user as it already exists, so
+// without it a rotated password is added next to the old one (which keeps
+// working) and a removed key pattern or command rule is never taken away.
 func renderUserLine(u kividbv1alpha1.KividbUser, secretValues map[string]string) (string, error) {
 	onOff := "on"
 	if !boolOr(u.Enabled, true) {
@@ -69,7 +74,7 @@ func renderUserLine(u kividbv1alpha1.KividbUser, secretValues map[string]string)
 	channelPatterns := joinOrDefault(u.ChannelPatterns, "&*")
 	cmdRules := joinOrDefault(u.CommandRules, "+@all")
 
-	return fmt.Sprintf("user %s %s %s %s %s %s", u.Name, onOff, authToken, keyPatterns, channelPatterns, cmdRules), nil
+	return fmt.Sprintf("user %s reset %s %s %s %s %s", u.Name, onOff, authToken, keyPatterns, channelPatterns, cmdRules), nil
 }
 
 // aclUsers returns the user list a (possibly nil) KividbAclConfig

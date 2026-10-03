@@ -82,6 +82,7 @@ func agentEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbA
 		{Name: "KIVIDB_ADDR", Value: fmt.Sprintf("127.0.0.1:%d", getPort(c))},
 		{Name: "AGENT_PORT", Value: fmt.Sprintf("%d", AgentPort)},
 		{Name: "DATA_DIR", Value: DataDir},
+		{Name: "ACL_FILE", Value: AclDir + "/" + AclFileName},
 		{Name: "CLUSTER_NAME", Value: c.Name},
 		{
 			Name: "POD_NAME",
@@ -306,6 +307,9 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "data", MountPath: DataDir},
+			// Read-only, and only so the agent can report the mounted ACL
+			// file's hash in /status (see reconcileAclReload).
+			{Name: "acl", MountPath: AclDir, ReadOnly: true},
 		},
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt(AgentPort)}},
@@ -381,7 +385,7 @@ func pullPolicyOrDefault(p corev1.PullPolicy) corev1.PullPolicy {
 }
 
 func desiredStatefulSet(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) *appsv1.StatefulSet {
-	replicas := c.Spec.Replicas + 1 // +1 for the master
+	replicas := desiredSTSReplicas(c) // +1 for the master, or 0 while bootstrapping
 	accessModes := c.Spec.Storage.AccessModes
 	if len(accessModes) == 0 {
 		accessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
@@ -413,8 +417,10 @@ func desiredStatefulSet(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alph
 			Selector:             &metav1.LabelSelector{MatchLabels: selectorLabels(c)},
 			Template:             podTemplate(c, kdbConfig, aclConfig, snapCfg),
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{pvc},
+			// Pods are moved onto a changed template by reconcileRollout,
+			// not by the StatefulSet controller; see there for why.
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
-				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+				Type: appsv1.OnDeleteStatefulSetStrategyType,
 			},
 		},
 	}

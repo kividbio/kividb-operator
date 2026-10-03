@@ -28,16 +28,17 @@ minikube start --cpus=4 --memory=6144 --driver=docker
 | `quay.io/kividbio/kividb-operator:${OPERATOR_TAG}` | Manager |
 | `quay.io/kividbio/kividb-operator-agent:${OPERATOR_TAG}` | Sidecar + backup-trigger |
 | `quay.io/kividbio/kividb-operator-gui:${OPERATOR_TAG}` | Optional GUI |
-| `quay.io/kividbio/kividb:v1.0.3` (+ `-tls`, `-lua`, `-full`) | Engine variants |
-| `quay.io/minio/minio`, `quay.io/minio/mc` | In-cluster S3 for snapshots |
+| `quay.io/kividbio/kividb:v1.0.5` (+ `-tls`, `-lua`, `-full`) | Engine variants |
+| `bitnamilegacy/minio`, `bitnamilegacy/minio-client` | In-cluster S3 for snapshots (override with `MINIO_IMAGE` / `MINIO_MC_IMAGE`) |
 | `prometheus-community/kube-prometheus-stack` | Optional monitoring |
 
 Build operator images locally, then load them into minikube:
 
 ```bash
-make docker-build VERSION=0.3.0-local
-# or: docker build -t quay.io/kividbio/kividb-operator:0.3.0-local -f Dockerfile .
-LOAD_IMAGES=1 OPERATOR_TAG=0.3.0-local make e2e
+make docker-build VERSION=0.4.0-local
+# or: docker build -t quay.io/kividbio/kividb-operator:0.4.0-local -f Dockerfile .
+LOAD_IMAGES=1 OPERATOR_TAG=0.4.0-local make e2e
+# Pre-GA engine: KIVIDB_VERSION=v1.0.5-rc1 LOAD_IMAGES=1 OPERATOR_TAG=0.4.0-local make e2e
 ```
 
 ## Quick start
@@ -53,6 +54,7 @@ make e2e-prereqs
 make e2e-deploy
 ./hack/e2e/03-minio.sh
 ./hack/e2e/04-compat-variants.sh
+./hack/e2e/08-resp-acl-select.sh
 ```
 
 Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
@@ -61,9 +63,9 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `OPERATOR_TAG` | `0.3.0-local` | Manager / agent / GUI image tag |
+| `OPERATOR_TAG` | `0.4.0-local` | Manager / agent / GUI image tag |
 | `OPERATOR_REGISTRY` | `quay.io/kividbio` | Image registry prefix |
-| `KIVIDB_VERSION` | `v1.0.3` | Engine tag prefix (`v1.0.3`, `v1.0.3-tls`, …) |
+| `KIVIDB_VERSION` | `v1.0.5` | Engine tag prefix (`v1.0.5`, or e.g. `v1.0.5-rc1` pre-GA) |
 | `LOAD_IMAGES` | `0` | `1` → `minikube image load` for operator (+ engine in compat) |
 | `STRICT_TLS` | `0` | `1` → fail if TLS port is not LISTEN (else warn; ROADMAP) |
 | `STORAGE_CLASS` | `standard` | PVC StorageClass (minikube default) |
@@ -85,12 +87,13 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 | `SKIP_FAILOVER=1` | `05-failover-load.sh` |
 | `SKIP_SNAPSHOT=1` | `06-snapshot-chaos.sh` |
 | `SKIP_MONITOR=1` | `07-monitor-memory.sh` |
+| `SKIP_RESP_ACL=1` | `08-resp-acl-select.sh` |
 
 Example: re-run failover only against an already-deployed operator:
 
 ```bash
 SKIP_DEPLOY=1 SKIP_PROMETHEUS=1 SKIP_MINIO=1 SKIP_COMPAT=1 \
-  SKIP_SNAPSHOT=1 SKIP_MONITOR=1 ./hack/e2e/run-all.sh
+  SKIP_SNAPSHOT=1 SKIP_MONITOR=1 SKIP_RESP_ACL=1 ./hack/e2e/run-all.sh
 ```
 
 ## Suite map
@@ -104,6 +107,9 @@ SKIP_DEPLOY=1 SKIP_PROMETHEUS=1 SKIP_MINIO=1 SKIP_COMPAT=1 \
 | `04-compat-variants.sh` | `standard`/`tls`/`lua`/`full` PING + TLS `/proc/net/tcp` + VariantGuidance |
 | `05-failover-load.sh` | Load + force-delete master + role election |
 | `06-snapshot-chaos.sh` | Minute CronJob, kill source / Job pod, MinIO object check |
+| `07-monitor-memory.sh` | Agent `/metrics` under load |
+| `08-resp-acl-select.sh` | RESP3 HELLO, ACL deny smoke, SELECT on replica, single-master failover |
+
 | `07-monitor-memory.sh` | Agent `/metrics`, memory/commands under load, optional Prom targets |
 
 ## Notes

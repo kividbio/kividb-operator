@@ -101,6 +101,30 @@ itself, not the backup Job.
 See [BACKUP_RESTORE.md](BACKUP_RESTORE.md) for how to trigger a manual
 backup while debugging.
 
+## Failover does not happen (`FailoverBlocked`)
+
+The master is down, the replicas are Ready, and the cluster stays in
+`Error` with a `FailoverBlocked` event. The operator found that no ready
+replica holds any keys although the master was last seen holding data
+(compare `status.pods[].keys`). On kividb before v1.0.5 a replica could be
+emptied by a master that keeps restarting, all of them at once (see
+[KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md), issue 10).
+
+The data is then only on the master's volume, so the operator waits for
+that pod instead of promoting an empty replica, which would make the
+master resync from it and lose the data for good when it returned. Fix
+whatever is keeping the master down (`kubectl describe pod`, most often
+an OOM kill: raise `spec.resources.limits.memory`); once it is Ready the
+replicas resync from it.
+
+If the master's data is truly gone and an empty cluster is acceptable:
+
+```bash
+kubectl annotate kividbcluster my-cluster kividb.io/allow-empty-failover=true
+```
+
+Remove the annotation again afterwards.
+
 ## ACL / authentication errors (`NOAUTH`, `WRONGPASS`)
 
 The operator renders the referenced `KividbAclConfig` into the
@@ -110,18 +134,27 @@ a password:
 1. Update the Secret your `passwordSecretRef` points at.
 2. The operator will notice on its next reconcile (it re-resolves every
    referenced Secret's value every pass) and rewrite `<cluster>-auth`.
-3. **The mounted Secret volume on already-running pods updates
-   automatically** (kubelet syncs Secret volumes, typically within ~60s),
-   but kividb only re-reads the ACL file when told to — the operator does
-   *not* currently call `ACL LOAD` automatically after a password
-   rotation. Trigger it yourself per pod:
+3. The mounted Secret volume on already-running pods updates on its own
+   (kubelet syncs Secret volumes, typically within a minute or two). Once
+   a pod has the new file, the operator has its agent run `ACL LOAD` and
+   records that on the pod as the `kividb.io/acl-generation` annotation.
+   Until then the **old** passwords are still the ones kividb accepts.
+4. If the password that changed is the **`default` user's**, the operator
+   rolls the pods instead (one at a time, like an image change): the agent
+   and exporter sidecars authenticate with that password and only read it
+   at startup.
 
-   ```bash
-   kubectl exec my-cluster-0 -c agent -- wget -qO- --post-data='' http://localhost:8081/acl/reload
-   ```
+To see whether a pod has caught up, compare its annotation with the one
+on the `<cluster>-auth` Secret:
 
-   or simply roll the pods (`kubectl rollout restart statefulset
-   my-cluster`) if a brief one-at-a-time restart is acceptable.
+```bash
+kubectl get secret my-cluster-auth -o jsonpath='{.metadata.annotations.kividb\.io/acl-generation}'
+kubectl get pods -l kividb.io/cluster=my-cluster \
+  -o custom-columns=POD:.metadata.name,ACL:.metadata.annotations.kividb\\.io/acl-generation
+```
+
+A pod that stays behind has an `AclReloadFailed` event on the
+`KividbCluster` saying why.
 
 If the **agent itself** can't authenticate to kividb (visible as
 `/readyz`/`/status` calls failing with an auth error in agent logs), check

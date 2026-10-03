@@ -48,20 +48,24 @@ const (
 	// (a different, distroless-assigned UID) -- see statefulset.go.
 	DataVolumeFSGroup = 1000
 
+	// AgentImageUID is the user the agent image runs as (the distroless
+	// "nonroot" user, see Dockerfile.agent).
+	AgentImageUID = 65532
+
 	// DefaultAgentImage is used when KividbClusterSpec.AgentImage is unset.
 	// Bumped by hand alongside VERSION/Chart.yaml on every release (see the
 	// pre-release checklist in docs/RELEASING.md) -- there is currently no
 	// build-time (-ldflags) mechanism that does this automatically, despite
 	// what an earlier version of this comment claimed.
-	DefaultAgentImage = "quay.io/kividbio/kividb-operator-agent:0.3.0"
+	DefaultAgentImage = "quay.io/kividbio/kividb-operator-agent:0.4.0"
 
 	// DefaultKividbImage is used when KividbClusterSpec.Image is unset.
 	// Pinned to the kividb engine line this operator release was validated
 	// against (see CHANGELOG / hack/e2e). Override with spec.image for a
-	// different tag or variant (e.g. ...:v1.0.3-tls). Deliberately not
+	// different tag or variant (e.g. ...:v1.0.5-tls). Deliberately not
 	// derived from spec.variant: the operator never guesses an image tag
 	// from spec.variant.
-	DefaultKividbImage = "quay.io/kividbio/kividb:v1.0.3"
+	DefaultKividbImage = "quay.io/kividbio/kividb:v1.0.5"
 
 	// ExporterPort is the redis_exporter sidecar's standard listen port
 	// (its own documented default -- not something this project invented).
@@ -75,6 +79,36 @@ const (
 	// exporter for Redis-protocol stores -- kividb speaks enough of the
 	// INFO/CONFIG surface for its core metric set to work unmodified.
 	DefaultExporterImage = "oliver006/redis_exporter:v1.66.0"
+
+	// ConfigHashAnnotation, on the pod template, is a hash of the rendered
+	// kividb.conf. kividb only reads its config file at startup, so a
+	// change has to roll the pods; changing this annotation is what makes
+	// the StatefulSet do that.
+	ConfigHashAnnotation = "kividb.io/config-hash"
+
+	// AuthGenerationAnnotation, on the pod template, is a counter that
+	// goes up whenever the default user's password changes. The agent and
+	// exporter sidecars get that password as an environment variable,
+	// which a running container never sees change, so this too has to
+	// roll the pods. It is a counter kept on the operator's own Secret
+	// (next to AuthHashAnnotation) rather than a hash of the password,
+	// because pod metadata is readable far more widely than Secrets are.
+	AuthGenerationAnnotation = "kividb.io/auth-generation"
+	AuthHashAnnotation       = "kividb.io/auth-hash"
+
+	// AclGenerationAnnotation counts changes to the rendered ACL file the
+	// same way: kept on the operator's Secret next to AclHashAnnotation,
+	// and stamped on each pod once its kividb has loaded that version (see
+	// reconcileAclReload).
+	AclGenerationAnnotation = "kividb.io/acl-generation"
+	AclHashAnnotation       = "kividb.io/acl-hash"
+
+	// StepDownAnnotation, set to "true" on the master's Pod, asks the
+	// cluster controller to hand the master role to a replica that is in
+	// sync (see reconcileStepDown). The KividbDbOps controller sets it
+	// before restarting the master; the cluster controller removes it once
+	// the role has moved.
+	StepDownAnnotation = "kividb.io/step-down"
 
 	// managedByValue is the standard app.kubernetes.io/managed-by value.
 	managedByValue = "kividb-operator"
@@ -117,6 +151,18 @@ func commonLabels(c *kividbv1alpha1.KividbCluster) map[string]string {
 func backupLabels(c *kividbv1alpha1.KividbCluster) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "kividb-backup",
+		"app.kubernetes.io/instance":   c.Name,
+		"app.kubernetes.io/managed-by": managedByValue,
+		kividbv1alpha1.ClusterLabel:    c.Name,
+	}
+}
+
+// bootstrapLabels labels the snapshot-restore Job and its pod. Like
+// backupLabels, and for the same reason, it must not match selectorLabels:
+// the restore pod is not a cluster member and must not be listed as one.
+func bootstrapLabels(c *kividbv1alpha1.KividbCluster) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       "kividb-bootstrap",
 		"app.kubernetes.io/instance":   c.Name,
 		"app.kubernetes.io/managed-by": managedByValue,
 		kividbv1alpha1.ClusterLabel:    c.Name,

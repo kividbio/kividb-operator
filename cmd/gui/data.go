@@ -16,7 +16,7 @@ import (
 // defaultKividbImage mirrors internal/controller/names.go's
 // DefaultKividbImage -- kept in sync manually rather than imported, same
 // rationale as the naming helpers below.
-const defaultKividbImage = "quay.io/kividbio/kividb:v1.0.3"
+const defaultKividbImage = "quay.io/kividbio/kividb:v1.0.5"
 
 // Object naming conventions below mirror the frozen convention documented
 // in docs/_internal-spec.md and implemented in internal/controller/names.go
@@ -27,8 +27,21 @@ func masterServiceName(clusterName string) string  { return clusterName + "-mast
 func replicaServiceName(clusterName string) string { return clusterName + "-replicas" }
 func backupCronJobName(clusterName string) string  { return clusterName + "-backup" }
 
+// clusterLabelSelector selects a cluster's kividb pods. The cluster label
+// alone is not enough: the operator also puts it on the pods of backup and
+// snapshot-restore Jobs, which are not cluster members and run no agent.
 func clusterLabelSelector(clusterName string) string {
-	return fmt.Sprintf("%s=%s", kividbv1alpha1.ClusterLabel, clusterName)
+	return fmt.Sprintf("%s=%s,%s=%s", kividbv1alpha1.ClusterLabel, clusterName, appNameLabel, appNameValue)
+}
+
+const (
+	appNameLabel = "app.kubernetes.io/name"
+	appNameValue = "kividb"
+)
+
+// isClusterPod is clusterLabelSelector for a pod already in hand.
+func isClusterPod(pod *corev1.Pod, clusterName string) bool {
+	return pod.Labels[kividbv1alpha1.ClusterLabel] == clusterName && pod.Labels[appNameLabel] == appNameValue
 }
 
 func portOrDefault(p int32) int32 {
@@ -135,6 +148,7 @@ func getClusterDetail(ctx context.Context, ctrlClient client.Client, clientset k
 		Image:              image,
 		AgentImage:         c.Spec.AgentImage,
 		Port:               portOrDefault(c.Spec.Port),
+		Replicas:           c.Spec.Replicas,
 		StorageSize:        c.Spec.Storage.Size,
 		MasterServiceType:  string(c.Spec.Services.Master.Type),
 		ReplicaServiceType: string(c.Spec.Services.Replicas.Type),

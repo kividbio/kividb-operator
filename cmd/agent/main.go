@@ -31,8 +31,10 @@ func main() {
 		err = runServe(args)
 	case "backup-trigger":
 		err = runBackupTrigger(args)
+	case "restore-from-s3":
+		err = runRestoreFromS3(args)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected \"serve\" or \"backup-trigger\")\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected \"serve\", \"backup-trigger\", or \"restore-from-s3\")\n", cmd)
 		os.Exit(2)
 	}
 	if err != nil {

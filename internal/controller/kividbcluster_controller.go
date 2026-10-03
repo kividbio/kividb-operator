@@ -16,6 +16,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -54,7 +55,7 @@ func (r *KividbClusterReconciler) scheme() *runtime.Scheme { return r.Scheme }
 //+kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=services;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
+//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile implements the main control loop for a single KividbCluster.
@@ -67,6 +68,10 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	if err := validateSpec(&c); err != nil {
+		return ctrl.Result{}, r.rejectSpec(ctx, &c, err)
 	}
 
 	kdbConfig, err := r.resolveKividbConfig(ctx, &c)
@@ -94,7 +99,12 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("rendering ACL file: %w", err)
 	}
 
-	if err := r.reconcileSecret(ctx, &c, aclContent); err != nil {
+	var defaultPassword string
+	if ref := defaultUserPasswordRef(aclConfig); ref != nil {
+		defaultPassword = secretValues[secretValueKey(ref)]
+	}
+	generations, err := r.reconcileSecret(ctx, &c, aclContent, defaultPassword)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling secret: %w", err)
 	}
 	if err := r.reconcileConfigMap(ctx, &c, kdbConfig); err != nil {
@@ -103,7 +113,25 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.reconcileServices(ctx, &c); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling services: %w", err)
 	}
-	if err := r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg); err != nil {
+
+	blockSTS, bootErr := r.reconcileBootstrap(ctx, &c)
+	if bootErr != nil {
+		log.Error(bootErr, "bootstrap reconciliation failed")
+	}
+	if c.Spec.BootstrapFromSnapshot != nil {
+		if statusErr := r.Status().Update(ctx, &c); statusErr != nil {
+			return ctrl.Result{}, fmt.Errorf("updating bootstrap status: %w", statusErr)
+		}
+		if err := r.Get(ctx, req.NamespacedName, &c); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	rollout := map[string]string{
+		ConfigHashAnnotation:     configHash(renderKividbConf(&c, kdbConfig))[:16],
+		AuthGenerationAnnotation: generations.auth,
+	}
+	if err := r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg, rollout); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
 	}
 	if err := r.reconcileBackupCronJob(ctx, &c, snapCfg); err != nil {
@@ -113,6 +141,10 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.reconcileSnapshots(ctx, &c, snapCfg.Name); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconciling snapshots: %w", err)
 		}
+	}
+
+	if blockSTS || bootErr != nil {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// Captured before reconcileRoles/updateStatus mutate c.Status, so it
@@ -134,6 +166,10 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// error so it is visible via `kubectl get kividbcluster`, but keep
 		// requeuing quickly to retry.
 	}
+
+	r.reconcileAclReload(ctx, &c, podList.Items, aclContent, generations)
+	r.reconcileStepDown(ctx, &c, podList.Items, statuses, masterPod)
+	r.reconcileRollout(ctx, &c, podList.Items, statuses, masterPod)
 
 	if statusErr := r.updateStatus(ctx, &c, statuses, masterPod, previousMasterPod, failoverHappened, err); statusErr != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", statusErr)
@@ -233,16 +269,18 @@ func (r *KividbClusterReconciler) resolveSecretValues(ctx context.Context, c *ki
 	return values, nil
 }
 
-func (r *KividbClusterReconciler) reconcileSecret(ctx context.Context, c *kividbv1alpha1.KividbCluster, aclContent string) error {
+func (r *KividbClusterReconciler) reconcileSecret(ctx context.Context, c *kividbv1alpha1.KividbCluster, aclContent, defaultPassword string) (authGenerations, error) {
+	var generations authGenerations
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName(c), Namespace: c.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
 		desired := desiredAuthSecret(c, aclContent)
 		secret.Labels = desired.Labels
 		secret.Type = desired.Type
 		secret.StringData = desired.StringData
+		generations = bumpAuthGenerations(c, secret, aclContent, defaultPassword)
 		return controllerutil.SetControllerReference(c, secret, r.scheme())
 	})
-	return err
+	return generations, err
 }
 
 func (r *KividbClusterReconciler) reconcileConfigMap(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) error {
@@ -284,7 +322,10 @@ func (r *KividbClusterReconciler) reconcileServices(ctx context.Context, c *kivi
 	return nil
 }
 
-func (r *KividbClusterReconciler) reconcileStatefulSet(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) error {
+// rollout holds pod-template annotations whose only job is to change when
+// something the pods read once at startup changes (see ConfigHashAnnotation
+// and AuthGenerationAnnotation), so the StatefulSet rolls them.
+func (r *KividbClusterReconciler) reconcileStatefulSet(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig, rollout map[string]string) error {
 	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: statefulSetName(c), Namespace: c.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
 		desired := desiredStatefulSet(c, kdbConfig, aclConfig, snapCfg)
@@ -292,6 +333,15 @@ func (r *KividbClusterReconciler) reconcileStatefulSet(ctx context.Context, c *k
 		sts.Labels = desired.Labels
 		sts.Spec.Replicas = desired.Spec.Replicas
 		sts.Spec.Template = desired.Spec.Template
+		// A fresh map: the one on desired is c.Spec.PodAnnotations itself.
+		annotations := make(map[string]string, len(desired.Spec.Template.Annotations)+len(rollout))
+		for k, v := range desired.Spec.Template.Annotations {
+			annotations[k] = v
+		}
+		for k, v := range rollout {
+			annotations[k] = v
+		}
+		sts.Spec.Template.Annotations = annotations
 		sts.Spec.UpdateStrategy = desired.Spec.UpdateStrategy
 		if creating {
 			// Selector, ServiceName and VolumeClaimTemplates are immutable
@@ -354,6 +404,39 @@ func (r *KividbClusterReconciler) updateStatus(ctx context.Context, c *kividbv1a
 	}
 	setCondition(&c.Status.Conditions, readyCondition)
 
+	return r.Status().Update(ctx, c)
+}
+
+// validateSpec catches spec values the API server accepted but that the
+// rest of the reconcile cannot work with. CRD schema validation covers the
+// same ground for new objects, but Helm never upgrades CRDs, so a cluster
+// can well be running this operator against an older, laxer schema.
+func validateSpec(c *kividbv1alpha1.KividbCluster) error {
+	if _, err := resource.ParseQuantity(c.Spec.Storage.Size); err != nil {
+		return fmt.Errorf("spec.storage.size %q is not a valid quantity (e.g. \"10Gi\"): %w", c.Spec.Storage.Size, err)
+	}
+	if c.Spec.Replicas < 0 {
+		return fmt.Errorf("spec.replicas must not be negative, got %d", c.Spec.Replicas)
+	}
+	return nil
+}
+
+// rejectSpec surfaces an invalid spec on the object itself and stops:
+// nothing is requeued, since only an edit to the KividbCluster (which
+// triggers a reconcile on its own) can fix it.
+func (r *KividbClusterReconciler) rejectSpec(ctx context.Context, c *kividbv1alpha1.KividbCluster, specErr error) error {
+	logf.FromContext(ctx).Error(specErr, "invalid KividbCluster spec")
+	r.event(c, corev1.EventTypeWarning, "InvalidSpec", "%v", specErr)
+
+	c.Status.ObservedGeneration = c.Generation
+	c.Status.Phase = kividbv1alpha1.PhaseError
+	setCondition(&c.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             "InvalidSpec",
+		Message:            specErr.Error(),
+		ObservedGeneration: c.Generation,
+	})
 	return r.Status().Update(ctx, c)
 }
 

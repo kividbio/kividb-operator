@@ -35,6 +35,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        fsGroup: 65532
       containers:
         - name: gui
           image: "{{ .Values.gui.image.repository }}:{{ .Values.gui.image.tag | default .Chart.AppVersion }}"
@@ -45,6 +46,22 @@ spec:
             {{- if .Values.watchNamespace }}
             - name: WATCH_NAMESPACE
               value: {{ .Values.watchNamespace | quote }}
+            {{- end }}
+            {{- if .Values.gui.auth.existingSecret }}
+            - name: GUI_AUTH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gui.auth.existingSecret | quote }}
+                  key: {{ .Values.gui.auth.usernameKey | default "username" | quote }}
+            - name: GUI_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gui.auth.existingSecret | quote }}
+                  key: {{ .Values.gui.auth.passwordKey | default "password" | quote }}
+            {{- end }}
+            {{- if .Values.gui.metrics.persistence.enabled }}
+            - name: GUI_METRICS_DIR
+              value: /var/lib/kividb-gui
             {{- end }}
           ports:
             - name: http
@@ -69,6 +86,21 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.gui.metrics.persistence.enabled }}
+            - name: metrics
+              mountPath: /var/lib/kividb-gui
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.gui.metrics.persistence.enabled }}
+        - name: metrics
+          persistentVolumeClaim:
+            claimName: {{ include "kividb-operator.gui.fullname" . }}-metrics
+        {{- end }}
       {{- with .Values.gui.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

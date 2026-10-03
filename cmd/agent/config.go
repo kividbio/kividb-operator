@@ -18,6 +18,7 @@ type agentConfig struct {
 	ClusterName  string // CLUSTER_NAME
 	PodName      string // POD_NAME
 	PodIP        string // POD_IP
+	AclFile      string // ACL_FILE
 
 	S3Endpoint       string
 	S3Bucket         string
@@ -40,6 +41,7 @@ func loadConfig() agentConfig {
 		ClusterName:  os.Getenv("CLUSTER_NAME"),
 		PodName:      os.Getenv("POD_NAME"),
 		PodIP:        os.Getenv("POD_IP"),
+		AclFile:      os.Getenv("ACL_FILE"),
 
 		S3Endpoint:       os.Getenv("S3_ENDPOINT"),
 		S3Bucket:         os.Getenv("S3_BUCKET"),

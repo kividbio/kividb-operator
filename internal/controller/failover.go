@@ -75,25 +75,15 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		views[p.Name] = v
 	}
 
-	// Find the pod currently carrying the master label, if any.
-	var currentMasterName string
-	for _, p := range pods {
-		if p.Labels[kividbv1alpha1.RoleLabel] == string(kividbv1alpha1.RoleMaster) {
-			currentMasterName = p.Name
-			break
-		}
-	}
+	currentMasterName := resolveCurrentMaster(pods, views, c.Status.MasterPod)
 
-	// If no live pod carries the master label -- e.g. it was force-deleted,
-	// its node died, or the StatefulSet recreated it from scratch -- fall
-	// back to the last-persisted status.masterPod. Without this, a fully
-	// vanished master pod looks identical to "fresh cluster, never had a
-	// master" (both have zero labeled pods), which would misclassify a
-	// real failover as a routine bootstrap: no failoverHappened signal, no
-	// status.lastFailoverTime, no PhaseFailingOver observability, even
-	// though a replica still gets promoted correctly either way.
-	if currentMasterName == "" {
-		currentMasterName = c.Status.MasterPod
+	previouslySynced := make(map[string]bool, len(c.Status.Pods))
+	var masterKeysLastSeen int64
+	for _, ps := range c.Status.Pods {
+		previouslySynced[ps.Name] = ps.Synced
+		if ps.Name == currentMasterName {
+			masterKeysLastSeen = ps.Keys
+		}
 	}
 
 	threshold := defaultUnhealthyThreshold
@@ -104,11 +94,40 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 
 	needsElection := currentMasterName == ""
 	needsFailover := false
+	failoverHappened := false
+	newMasterName := currentMasterName
+
 	if currentMasterName != "" {
 		mv, exists := views[currentMasterName]
-		if !exists {
+		switch {
+		case !exists:
 			needsFailover = failoverEnabled // labeled master pod is gone entirely
-		} else if !mv.ready || mv.status == nil || mv.status.Role != agentapi.RoleMaster {
+		case mv.ready && mv.status != nil && mv.status.Role == agentapi.RoleReplica:
+			// The pod the operator considers master is healthy but kividb
+			// itself says it is a replica: something demoted it behind the
+			// operator's back (a manual REPLICAOF, the GUI's promote
+			// action). Left alone this is a silent outage -- the master
+			// Service keeps selecting a read-only pod, or worse, the loop
+			// below REPLICAOFs the real master at it and builds a
+			// replication cycle with no master at all.
+			if actual := actualMasterOf(views, currentMasterName); actual != "" {
+				// It is cleanly replicating from another pod of this
+				// cluster that really is a master: that pod has the data,
+				// so follow the topology instead of fighting it.
+				log.Info("adopting pod as master: labeled master is replicating from it", "pod", actual, "previousMaster", currentMasterName)
+				r.event(c, corev1.EventTypeNormal, "MasterAdopted",
+					"%s is now a replica of %s; treating %s as the master", currentMasterName, actual, actual)
+				newMasterName = actual
+			} else {
+				log.Info("re-promoting master: it reports role replica but no other pod is its master", "pod", currentMasterName)
+				r.event(c, corev1.EventTypeWarning, "MasterRepromoted",
+					"%s was labeled master but reported role replica with no valid master; promoted it again", currentMasterName)
+				if err := r.Agent.Promote(ctx, mv.pod.Status.PodIP); err != nil {
+					return nil, currentMasterName, false, fmt.Errorf("re-promoting %s: %w", currentMasterName, err)
+				}
+				mv.status = &agentapi.StatusResponse{Role: agentapi.RoleMaster, ReplicationOffset: mv.status.ReplicationOffset}
+			}
+		case !mv.ready || mv.status == nil || mv.status.Role != agentapi.RoleMaster:
 			if since, unready := readyFalseSince(mv.pod); unready {
 				needsFailover = failoverEnabled && time.Since(since) >= threshold
 			} else if !mv.ready {
@@ -117,20 +136,72 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 	}
 
-	failoverHappened := false
-	newMasterName := currentMasterName
-
 	if needsElection || needsFailover {
-		candidate := electReplica(views, currentMasterName)
+		// A replica can be Ready, connected and "in sync" by every other
+		// measure and still hold nothing: kividb drops a replica's dataset
+		// when a full resync fails part-way, which is what happens to
+		// every replica at once when the master is crash-looping (it dies
+		// again mid-transfer). Promoting one of those turns a master
+		// outage into total data loss -- the old master still has the
+		// data on disk, and would be made to resync from the empty one
+		// the moment it came back. So when the master was last seen
+		// holding data, only replicas that still hold some are eligible,
+		// and if none does the failover waits for the master.
+		eligible := views
+		if needsFailover && masterKeysLastSeen > 0 && c.Annotations[kividbv1alpha1.AllowEmptyFailoverAnnotation] != "true" {
+			eligible = withoutEmptied(views)
+			if electReplica(eligible, currentMasterName) == "" && electReplica(views, currentMasterName) != "" {
+				r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
+					"master %s is unavailable, but no ready replica holds any data (the master last reported %d keys); waiting for it to return rather than promoting an empty replica. Set the %s annotation to \"true\" to fail over anyway.",
+					currentMasterName, masterKeysLastSeen, kividbv1alpha1.AllowEmptyFailoverAnnotation)
+				return nil, currentMasterName, false, fmt.Errorf("failover blocked: no ready replica holds any data, master %s last reported %d keys", currentMasterName, masterKeysLastSeen)
+			}
+		}
+
+		// Prefer a replica that was in sync the last time that could be
+		// established. Offsets alone do not rule out a replica that had
+		// only just started resyncing when the master went away.
+		candidate := electReplica(onlySynced(eligible, previouslySynced), currentMasterName)
+		if candidate == "" {
+			candidate = electReplica(eligible, currentMasterName)
+		}
+		if seeded := bootstrapSeededPod(c); needsElection && seeded != "" {
+			// The very first election of a cluster bootstrapped from a
+			// snapshot. Only one pod holds the restored data, and it is
+			// the slowest to become Ready because it has to load it; the
+			// others start empty and are Ready at once. Electing any of
+			// those would make the seeded pod its replica and wipe the
+			// snapshot it was just given.
+			if v, ok := views[seeded]; !ok || !v.ready {
+				return nil, currentMasterName, false, fmt.Errorf("waiting for %s, which holds the restored snapshot, to become ready before electing a master", seeded)
+			}
+			candidate = seeded
+		}
 		if candidate == "" {
 			return nil, currentMasterName, false, fmt.Errorf("no ready pod available to elect as master")
 		}
 		log.Info("promoting pod to master", "pod", candidate, "reason", map[bool]string{true: "failover", false: "bootstrap"}[needsFailover])
+
+		// Take the master label off the pod being failed away from *before*
+		// promoting its replacement. That pod is usually still there (hung,
+		// partitioned, crash-looping) and will come back believing it is a
+		// master; if it still carried the label it would rejoin the master
+		// Service next to the new master, and the next reconcile could pick
+		// it as "the" master again and REPLICAOF the real one at it,
+		// discarding every write taken since the failover.
+		if old, ok := views[currentMasterName]; ok {
+			if err := r.setRoleLabel(ctx, old.pod, kividbv1alpha1.RoleReplica); err != nil {
+				return nil, currentMasterName, false, fmt.Errorf("demoting %s: %w", currentMasterName, err)
+			}
+		}
 		if err := r.Agent.Promote(ctx, views[candidate].pod.Status.PodIP); err != nil {
 			return nil, currentMasterName, false, fmt.Errorf("promoting %s: %w", candidate, err)
 		}
 		if err := r.setRoleLabel(ctx, views[candidate].pod, kividbv1alpha1.RoleMaster); err != nil {
 			return nil, currentMasterName, false, err
+		}
+		if needsFailover {
+			r.event(c, corev1.EventTypeWarning, "Failover", "master %s is unavailable; promoted %s", currentMasterName, candidate)
 		}
 		newMasterName = candidate
 		failoverHappened = needsFailover
@@ -144,11 +215,20 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		masterIP = v.pod.Status.PodIP
 	}
 
+	var masterStatus *agentapi.StatusResponse
+	if v, ok := views[newMasterName]; ok && v.ready {
+		masterStatus = v.status
+	}
+
 	statuses := make([]kividbv1alpha1.KividbPodStatus, 0, len(pods))
 	for _, p := range pods {
 		v := views[p.Name]
 		role := kividbv1alpha1.RoleUnknown
-		var offset int64
+		var offset, keys int64
+		synced := false
+		if v.status != nil {
+			keys = v.status.KeyCount
+		}
 
 		switch {
 		case p.Name == newMasterName:
@@ -159,10 +239,12 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			if v.status != nil {
 				offset = v.status.ReplicationOffset
 			}
+			synced = v.ready && v.status != nil
 		case v.ready && v.status != nil:
 			role = kividbv1alpha1.RoleReplica
 			offset = v.status.ReplicationOffset
-			if masterIP != "" && (v.status.MasterHost != masterIP || v.status.MasterPort != port) {
+			synced = replicaSynced(masterStatus, v.status, masterIP, port, previouslySynced[p.Name])
+			if masterIP != "" && !followsMaster(v.status, masterIP, port) {
 				if err := r.Agent.ReplicaOf(ctx, p.Status.PodIP, masterIP, port); err != nil {
 					log.Error(err, "failed to point replica at master", "pod", p.Name, "master", masterIP)
 				}
@@ -171,8 +253,14 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				return nil, newMasterName, failoverHappened, err
 			}
 		default:
-			// Not ready / agent unreachable: leave whatever label it has
-			// (usually "replica") and report unknown role until it recovers.
+			// Not ready / agent unreachable: report unknown role until it
+			// recovers. Its label is left alone unless it says "master" --
+			// exactly one pod may carry that, see resolveCurrentMaster.
+			if p.Labels[kividbv1alpha1.RoleLabel] == string(kividbv1alpha1.RoleMaster) {
+				if err := r.setRoleLabel(ctx, v.pod, kividbv1alpha1.RoleReplica); err != nil {
+					return nil, newMasterName, failoverHappened, err
+				}
+			}
 		}
 
 		statuses = append(statuses, kividbv1alpha1.KividbPodStatus{
@@ -180,10 +268,118 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			Role:              role,
 			Ready:             v.ready,
 			ReplicationOffset: offset,
+			Synced:            synced,
+			Keys:              keys,
 		})
 	}
 
 	return statuses, newMasterName, failoverHappened, nil
+}
+
+// resolveCurrentMaster decides which pod the operator currently considers
+// the master, before any health evaluation.
+//
+// The role label is the source of truth, and normally exactly one pod
+// carries role=master. If none does -- the pod was force-deleted, its node
+// died, or the StatefulSet recreated it from scratch -- fall back to the
+// last-persisted status.masterPod. Without this, a fully vanished master
+// pod looks identical to "fresh cluster, never had a master" (both have
+// zero labeled pods), which would misclassify a real failover as a routine
+// bootstrap: no failoverHappened signal, no status.lastFailoverTime, no
+// PhaseFailingOver observability, even though a replica still gets
+// promoted correctly either way.
+//
+// More than one labeled pod is not a state this version creates (a
+// failover relabels the old master before promoting), but clusters that
+// failed over under an older operator can be sitting in it. Then prefer
+// the one status.masterPod names, i.e. the most recent decision that was
+// actually persisted, then one that is Ready and really a master, and only
+// then fall back to name order. Whichever pods lose are relabeled by
+// reconcileRoles.
+func resolveCurrentMaster(pods []corev1.Pod, views map[string]*podView, statusMaster string) string {
+	var labeled []string
+	for _, p := range pods {
+		if p.Labels[kividbv1alpha1.RoleLabel] == string(kividbv1alpha1.RoleMaster) {
+			labeled = append(labeled, p.Name)
+		}
+	}
+	switch len(labeled) {
+	case 0:
+		return statusMaster
+	case 1:
+		return labeled[0]
+	}
+	for _, name := range labeled {
+		if name == statusMaster {
+			return name
+		}
+	}
+	for _, name := range labeled {
+		if v := views[name]; v.ready && v.status != nil && v.status.Role == agentapi.RoleMaster {
+			return name
+		}
+	}
+	return labeled[0]
+}
+
+// followsMaster reports whether a replica is already configured to
+// replicate from the master at masterIP:port. Agents before 0.4.0 always
+// report master port 0 (they misread ROLE's integer port), so 0 means
+// "unknown" here, not a mismatch.
+func followsMaster(replica *agentapi.StatusResponse, masterIP string, port int32) bool {
+	return replica.MasterHost == masterIP && (replica.MasterPort == 0 || replica.MasterPort == port)
+}
+
+// withoutEmptied returns views minus the pods whose agent positively
+// reports holding no keys. A pod whose agent is unreachable or too old to
+// report a key count stays in: nothing is known against it.
+func withoutEmptied(views map[string]*podView) map[string]*podView {
+	out := make(map[string]*podView, len(views))
+	for name, v := range views {
+		if v.status != nil && v.status.KeyCountKnown && v.status.KeyCount == 0 {
+			continue
+		}
+		out[name] = v
+	}
+	return out
+}
+
+// onlySynced returns the views of the pods marked in synced.
+func onlySynced(views map[string]*podView, synced map[string]bool) map[string]*podView {
+	out := make(map[string]*podView, len(views))
+	for name, v := range views {
+		if synced[name] {
+			out[name] = v
+		}
+	}
+	return out
+}
+
+// actualMasterOf returns the pod that demoted (a Ready pod reporting role
+// replica) is replicating from, provided that pod belongs to this cluster,
+// is Ready, and itself reports role master. Returns "" otherwise -- e.g.
+// when demoted points at an address outside the cluster, or at a pod that
+// is itself a replica (a cycle).
+func actualMasterOf(views map[string]*podView, demoted string) string {
+	host := views[demoted].status.MasterHost
+	if host == "" {
+		return ""
+	}
+	for name, v := range views {
+		if name == demoted || v.pod.Status.PodIP != host {
+			continue
+		}
+		if v.ready && v.status != nil && v.status.Role == agentapi.RoleMaster {
+			return name
+		}
+	}
+	return ""
+}
+
+func (r *KividbClusterReconciler) event(c *kividbv1alpha1.KividbCluster, eventType, reason, messageFmt string, args ...any) {
+	if r.Recorder != nil {
+		r.Recorder.Eventf(c, eventType, reason, messageFmt, args...)
+	}
 }
 
 // electReplica picks the ready, non-excluded pod with the highest reported

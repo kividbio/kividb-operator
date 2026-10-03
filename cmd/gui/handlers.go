@@ -14,9 +14,11 @@ import (
 // server holds everything the HTTP handlers need. It is deliberately tiny:
 // two Kubernetes clients and the optional namespace restriction.
 type server struct {
-	ctrlClient     client.Client        // KividbCluster only
+	ctrlClient     client.Client        // KividbCluster + KividbDbOps
 	clientset      kubernetes.Interface // Pods, Services, StatefulSets, CronJobs, Events -- never Secrets
 	watchNamespace string               // "" means all namespaces
+	auth           authConfig
+	metrics        *metricsStore // nil only if construction failed (should not happen)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -93,7 +95,7 @@ func (s *server) handleAPIClusterDetail(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, detail)
 }
 
-func (s *server) routes() *http.ServeMux {
+func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /", s.handleIndex)
@@ -101,7 +103,18 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /api/clusters", s.handleAPIClusters)
 	mux.HandleFunc("GET /api/clusters/{namespace}/{name}", s.handleAPIClusterDetail)
+	mux.HandleFunc("GET /api/clusters/{namespace}/{name}/live", s.handleAPILiveStatus)
+	mux.HandleFunc("GET /api/clusters/{namespace}/{name}/dbops", s.handleAPIListDbOps)
+	mux.HandleFunc("POST /api/clusters/{namespace}/{name}/restart", s.handleAPICreateRestart)
+	mux.HandleFunc("POST /api/clusters/{namespace}/{name}/scale", s.handleAPIScale)
+	mux.HandleFunc("DELETE /api/clusters/{namespace}/{name}", s.handleAPIDeleteCluster)
+	mux.HandleFunc("POST /api/clusters/{namespace}/{name}/promote", s.handleAPIPromote)
+	mux.HandleFunc("POST /api/clusters/{namespace}/{name}/snapshot", s.handleAPISnapshot)
+	mux.HandleFunc("POST /api/clusters/{namespace}/{name}/exec", s.handleAPIExec)
+	mux.HandleFunc("GET /api/clusters/{namespace}/{name}/pods/{pod}/logs", s.handleAPIPodLogs)
+	mux.HandleFunc("DELETE /api/clusters/{namespace}/{name}/pods/{pod}", s.handleAPIRestartPod)
+	mux.HandleFunc("GET /api/clusters/{namespace}/{name}/metrics", s.handleAPIMetrics)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(staticSub)))
 
-	return mux
+	return s.auth.middleware(mux)
 }

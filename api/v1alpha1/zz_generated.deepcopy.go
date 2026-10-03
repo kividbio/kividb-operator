@@ -171,6 +171,10 @@ func (in *KividbClusterSpec) DeepCopyInto(out *KividbClusterSpec) {
 		out.SnapshotConfigRef = new(corev1.LocalObjectReference)
 		*out.SnapshotConfigRef = *in.SnapshotConfigRef
 	}
+	if in.BootstrapFromSnapshot != nil {
+		out.BootstrapFromSnapshot = new(BootstrapFromSnapshotSpec)
+		*out.BootstrapFromSnapshot = *in.BootstrapFromSnapshot
+	}
 	in.Storage.DeepCopyInto(&out.Storage)
 	in.Resources.DeepCopyInto(&out.Resources)
 	in.AgentResources.DeepCopyInto(&out.AgentResources)
@@ -241,6 +245,9 @@ func (in *KividbClusterStatus) DeepCopyInto(out *KividbClusterStatus) {
 	}
 	if in.LastFailoverTime != nil {
 		out.LastFailoverTime = in.LastFailoverTime.DeepCopy()
+	}
+	if in.Bootstrap != nil {
+		out.Bootstrap = in.Bootstrap.DeepCopy()
 	}
 	if in.Conditions != nil {
 		out.Conditions = make([]metav1.Condition, len(in.Conditions))
@@ -671,6 +678,169 @@ func (in *KividbSnapshotList) DeepCopy() *KividbSnapshotList {
 }
 
 func (in *KividbSnapshotList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// ── bootstrap / dbops (0.4.0) ───────────────────────────────────────────
+
+func (in *BootstrapFromSnapshotSpec) DeepCopyInto(out *BootstrapFromSnapshotSpec) {
+	*out = *in
+	out.SnapshotRef = in.SnapshotRef
+}
+
+func (in *BootstrapFromSnapshotSpec) DeepCopy() *BootstrapFromSnapshotSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(BootstrapFromSnapshotSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *BootstrapStatus) DeepCopyInto(out *BootstrapStatus) {
+	*out = *in
+	if in.CompletionTime != nil {
+		out.CompletionTime = in.CompletionTime.DeepCopy()
+	}
+}
+
+func (in *BootstrapStatus) DeepCopy() *BootstrapStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(BootstrapStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *DbOpsRestartSpec) DeepCopyInto(out *DbOpsRestartSpec) {
+	*out = *in
+}
+
+func (in *DbOpsRestartSpec) DeepCopy() *DbOpsRestartSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(DbOpsRestartSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *DbOpsRestartStatus) DeepCopyInto(out *DbOpsRestartStatus) {
+	*out = *in
+	if in.CompletedPods != nil {
+		out.CompletedPods = make([]string, len(in.CompletedPods))
+		copy(out.CompletedPods, in.CompletedPods)
+	}
+	if in.PendingPods != nil {
+		out.PendingPods = make([]string, len(in.PendingPods))
+		copy(out.PendingPods, in.PendingPods)
+	}
+}
+
+func (in *DbOpsRestartStatus) DeepCopy() *DbOpsRestartStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(DbOpsRestartStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbDbOpsSpec) DeepCopyInto(out *KividbDbOpsSpec) {
+	*out = *in
+	out.ClusterRef = in.ClusterRef
+	if in.Restart != nil {
+		out.Restart = in.Restart.DeepCopy()
+	}
+}
+
+func (in *KividbDbOpsSpec) DeepCopy() *KividbDbOpsSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbDbOpsSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbDbOpsStatus) DeepCopyInto(out *KividbDbOpsStatus) {
+	*out = *in
+	if in.StartTime != nil {
+		out.StartTime = in.StartTime.DeepCopy()
+	}
+	if in.CompletionTime != nil {
+		out.CompletionTime = in.CompletionTime.DeepCopy()
+	}
+	if in.Restart != nil {
+		out.Restart = in.Restart.DeepCopy()
+	}
+	if in.Conditions != nil {
+		out.Conditions = make([]metav1.Condition, len(in.Conditions))
+		for i := range in.Conditions {
+			in.Conditions[i].DeepCopyInto(&out.Conditions[i])
+		}
+	}
+}
+
+func (in *KividbDbOpsStatus) DeepCopy() *KividbDbOpsStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbDbOpsStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbDbOps) DeepCopyInto(out *KividbDbOps) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+func (in *KividbDbOps) DeepCopy() *KividbDbOps {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbDbOps)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbDbOps) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *KividbDbOpsList) DeepCopyInto(out *KividbDbOpsList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		out.Items = make([]KividbDbOps, len(in.Items))
+		for i := range in.Items {
+			in.Items[i].DeepCopyInto(&out.Items[i])
+		}
+	}
+}
+
+func (in *KividbDbOpsList) DeepCopy() *KividbDbOpsList {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbDbOpsList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *KividbDbOpsList) DeepCopyObject() runtime.Object {
 	if c := in.DeepCopy(); c != nil {
 		return c
 	}

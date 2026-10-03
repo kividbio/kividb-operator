@@ -4,171 +4,131 @@
   <img src="../assets/gui.png" alt="kividb-operator GUI dashboard listing two KividbClusters">
 </p>
 
-A small, read-only web dashboard for `KividbCluster` objects. It is a
-single static Go binary (`cmd/gui`) with the HTML/CSS/JS embedded into it
-at build time via `embed.FS` -- there is no Node/npm build step, no CDN
-dependency, and the container image ships nothing but the binary itself.
+A management web dashboard for `KividbCluster` objects. It is a single
+static Go binary (`cmd/gui`) with HTML/CSS/JS embedded via `embed.FS` —
+no Node/npm build step.
 
-The GUI never reads Secrets. It cannot see ACL passwords, `requirepass`
-values, or S3 credentials, and its RBAC (below) is written so that it
-literally cannot be granted access to them by accident.
+The GUI never lists Secrets to the browser. ACL passwords and S3
+credentials stay out of the UI. Auth credentials for the GUI itself come
+from env (`GUI_AUTH_USERNAME` / `GUI_AUTH_PASSWORD`), typically via a
+Kubernetes Secret keyRef in the chart — not by the GUI reading Secrets
+through the API.
 
 ## What it shows
 
 ### Dashboard (`/`)
 
-Lists every `KividbCluster` the GUI is allowed to see (all namespaces, or
-one namespace if `WATCH_NAMESPACE` is set -- see below), with:
-
-- Name and namespace, linking to that cluster's detail page
-- Phase, color-coded: green = `Running`, yellow = `Provisioning` /
-  `Degraded` / `FailingOver`, red = `Error`, grey = `Pending`/unknown
-- Current master pod name
-- Ready/total pod count against the desired count (`spec.replicas + 1`)
-- Backup last-success time, derived from the cluster's own
-  `KividbSnapshot` history (or "disabled" if `spec.snapshotConfigRef` is
-  unset)
-- Age
-
-The page fetches `GET /api/clusters` on load and again every 10 seconds
-(plain `fetch()` + `setInterval()`, no framework) so it stays current
-without a manual refresh.
+Lists every `KividbCluster` in scope (all namespaces, or
+`WATCH_NAMESPACE`), with phase, master, ready/total pods, backup last
+success, and age. Polls `GET /api/clusters` every 10s.
 
 ### Cluster detail (`/clusters/{namespace}/{name}`)
 
-- Spec summary: `spec.image` (or the release default
-  `quay.io/kividbio/kividb:v1.0.3` if unset,
-  labeled accordingly) and `spec.variant`, agent image, port, desired pod count,
-  storage size/class, the master/replica Service types, and the names of
-  any referenced `KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig`.
-- **Status**: phase, master pod, ready/total pods, observed generation,
-  last failover time, age, and (when reachable) the StatefulSet's own
-  ready/current/updated replica counts as a cross-check.
-- **Backup**: the referenced `KividbSnapshotConfig`'s schedule/retention,
-  the backup CronJob's own `suspended`/last-schedule bookkeeping, and the
-  cluster's `KividbSnapshot` history (phase, source pod/role, object key,
-  size, duration) -- last success/error are derived from that list, not
-  from a field on `KividbCluster.status` (there isn't one anymore).
-- **Services**: the master and replica Service objects' actual type,
-  ClusterIP, external IP/hostname (for `LoadBalancer`), and ports.
-- **Pods**: the full `status.pods[]` list (name, role, ready,
-  replication offset) enriched with live Pod phase, IP, node name, and
-  restart count where that Pod object can still be found.
-- **Conditions**: the cluster's `status.conditions[]` (the standard
-  `Ready` condition and any others the controller sets).
-- **Recent events**: Kubernetes Events whose `involvedObject` is the
-  `KividbCluster` itself (fetched via the Events API's
-  `involvedObject.kind`/`involvedObject.name` field selector), newest
-  first, capped at 50.
+- Spec / status / backup / services / pods / conditions / events (as in
+  earlier releases).
+- **Live status** — agent `/status` + memory gauge per pod.
+- **Metrics (24h)** — local scraper (every 15s) of agent `/metrics`;
+  sparkline charts for memory, clients, repl offset, command rate.
+  Kept in memory by default; persisted under `GUI_METRICS_DIR` when set
+  (chart: `gui.metrics.persistence.enabled=true`, plus
+  `gui.metrics.persistence.storageClass` on clusters without a default
+  StorageClass).
+- **Operations** — create `KividbDbOps` InPlace restart; list recent
+  DbOps.
+- **Pod logs** — `GET …/pods/{pod}/logs` (container `kividb` or `agent`).
+- **RESP explorer** — `POST …/exec` → agent `POST /exec`. Requires GUI
+  Basic auth; refused with 403 when auth is unset.
+- **Promote** — switches the master to the chosen pod: the GUI promotes
+  it and makes the current master its replica, and the operator then
+  moves the `kividb.io/role` label (and so the master Service) and
+  re-points the other replicas. Writes that reach the old master in the
+  moment between those two steps are not carried over.
 
-This page also fetches `GET /api/clusters/{namespace}/{name}` on load and
-every 10 seconds.
+Default engine image shown when `spec.image` is empty:
+`quay.io/kividbio/kividb:v1.0.5`.
 
 ### JSON API
 
-- `GET /api/clusters` -- the same rows the dashboard renders.
-- `GET /api/clusters/{namespace}/{name}` -- the same data the detail page
-  renders. Returns `404` if the cluster doesn't exist, `403` if
-  `WATCH_NAMESPACE` is set and the request is for a different namespace.
-- `GET /healthz` -- always `200 OK`; used for the container's liveness
-  and readiness probes.
+| Method | Path | Notes |
+|--------|------|--------|
+| GET | `/api/clusters` | Dashboard rows |
+| GET | `/api/clusters/{ns}/{name}` | Detail payload |
+| GET | `/api/clusters/{ns}/{name}/live` | Per-pod agent status |
+| GET | `/api/clusters/{ns}/{name}/metrics?from=&to=` | 24h series (unix ms) |
+| GET | `/api/clusters/{ns}/{name}/dbops` | DbOps list |
+| POST | `/api/clusters/{ns}/{name}/restart` | Create InPlace restart DbOps |
+| POST | `/api/clusters/{ns}/{name}/exec` | RESP command (auth required) |
+| GET | `/api/clusters/{ns}/{name}/pods/{pod}/logs` | Pod logs |
+| GET | `/healthz` | Liveness (no auth) |
 
-## Running it locally
+## Auth
+
+Set both `GUI_AUTH_USERNAME` and `GUI_AUTH_PASSWORD` to enable HTTP Basic
+auth on all routes except `/healthz`. Chart:
+
+```yaml
+gui:
+  auth:
+    existingSecret: my-gui-auth   # keys: username, password
+```
+
+Without auth the GUI is a read-only dashboard: it still serves the read
+APIs, and **every write returns 403** — the RESP explorer as well as
+restart, scale, promote, snapshot and delete.
+
+Writes are also refused when the request's `Origin` is a different site,
+so a page open in the same browser cannot use your saved credentials
+against the GUI.
+
+## Running locally
 
 ```sh
+export GUI_AUTH_USERNAME=admin GUI_AUTH_PASSWORD=dev
+# optional: export GUI_METRICS_DIR=/tmp/kividb-gui-metrics
 go run ./cmd/gui
 ```
 
-This talks to whatever context is current in your kubeconfig (standard
-`clientcmd` loading rules: `KUBECONFIG` env var if set, otherwise
-`~/.kube/config`). It falls back to that path automatically whenever
-`rest.InClusterConfig()` fails, which it always will outside a real pod.
-Then open <http://localhost:8090/>.
+Open <http://localhost:8090/>.
 
-Useful environment variables:
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `GUI_PORT` | `8090` | Listen port |
+| `WATCH_NAMESPACE` | (unset) | Restrict to one namespace |
+| `GUI_AUTH_USERNAME` / `GUI_AUTH_PASSWORD` | unset | Basic auth |
+| `GUI_METRICS_DIR` | unset | Persist 24h metrics JSON here |
 
-| Variable         | Default | Meaning                                                        |
-|-------------------|---------|-----------------------------------------------------------------|
-| `GUI_PORT`        | `8090`  | HTTP listen port.                                               |
-| `WATCH_NAMESPACE` | (unset) | Restrict the dashboard and detail API to one namespace. Unset means all namespaces the RBAC below allows. |
+## Deploying
 
-Your local user/context needs at least read access to `kividbclusters`,
-`pods`, `services`, `events`, `statefulsets`, and `cronjobs` for the pages
-to populate fully -- if you're cluster-admin locally (the common case for
-`go run` during development) this just works.
-
-## Deploying it
-
-### Option A: the Helm chart (if present)
-
-If `charts/kividb-operator/templates/gui-*.yaml` exists in your checkout,
-the chart already wires up a Deployment, ClusterIP Service, and the
-GUI's own ServiceAccount/ClusterRole/ClusterRoleBinding as part of
-installing `kividb-operator`. Check the chart's `values.yaml` for a
-`gui.enabled` (or similarly named) toggle and any image/namespace
-overrides, then simply `helm upgrade --install` as usual. No separate
-step is needed in that case -- skip Option B.
-
-### Option B: plain YAML (`config/gui/`)
-
-If the Helm chart doesn't (yet) ship GUI templates, apply these three
-files directly:
+Helm (`gui.enabled`, default true) creates Deployment, Service, narrow
+ClusterRole, optional metrics PVC, and wires auth from
+`gui.auth.existingSecret`.
 
 ```sh
-kubectl create namespace kividb-operator-system --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -f config/gui/rbac.yaml
-kubectl apply -f config/gui/deployment.yaml
-kubectl apply -f config/gui/service.yaml
+kubectl create secret generic kividb-gui-auth \
+  --from-literal=username=admin --from-literal=password='…' \
+  -n kividb-operator-system
+
+helm upgrade --install kividb-operator charts/kividb-operator \
+  -n kividb-operator-system --create-namespace \
+  --set gui.auth.existingSecret=kividb-gui-auth
 ```
 
-They assume the `kividb-operator-system` namespace; edit the `namespace:`
-field in all three files first if you want to deploy elsewhere (the
-`ClusterRoleBinding`'s subject namespace must match the `ServiceAccount`'s
-namespace exactly, since that's not inferred from `kubectl apply -n`).
+Plain YAML: `config/gui/` (update RBAC from `config/gui/rbac.yaml`).
 
-The Deployment references `quay.io/kividbio/kividb-operator-gui:latest`
-(built from `Dockerfile.gui` at the repo root) -- override `image:` to
-pin a specific tag once release tagging exists.
-
-Once running, reach it with:
+Port-forward:
 
 ```sh
 kubectl -n kividb-operator-system port-forward svc/kividb-operator-gui 8090:8090
 ```
 
-then open <http://localhost:8090/>.
+### RBAC
 
-### RBAC this actually needs
-
-`config/gui/rbac.yaml` grants a dedicated `kividb-operator-gui`
-ServiceAccount a `ClusterRole` with `get`/`list`/`watch` on:
-
-- `kividbclusters.kividb.io`, `kividbsnapshotconfigs.kividb.io`,
-  `kividbsnapshots.kividb.io`
-- `pods`, `services`, `events` (core)
-- `statefulsets` (`apps`)
-- `cronjobs` (`batch`)
-
-and **nothing else** -- in particular, never `secrets` in any API group,
-in any of the two clients the Go code builds (see
-`cmd/gui/kubeclient.go`). The GUI's code only ever performs `Get`/`List`
-calls (it polls every 10s from the browser rather than keeping a
-long-lived watch open), so `watch` is granted only as a harmless superset
-for future-proofing, not because the current code uses it. Do not bind
-this ServiceAccount to the operator manager's own ClusterRole
-(`config/rbac/role.yaml`) -- that one also manages `secrets`, which the
-GUI must never be able to touch.
+`get`/`list`/`watch` on clusters, snapshot configs/snapshots, DbOps, pods,
+services, events, statefulsets, cronjobs; **`create` on `kividbdbops`**;
+**`get` on `pods/log`**. Never `secrets` via the API clients.
 
 ## Building the image
 
 ```sh
-docker build -f Dockerfile.gui -t quay.io/kividbio/kividb-operator-gui:latest .
+docker build -f Dockerfile.gui -t quay.io/kividbio/kividb-operator-gui:0.4.0 .
 ```
-
-Multi-stage: `golang:1.23-bookworm` builds a fully static
-(`CGO_ENABLED=0`) binary, then `gcr.io/distroless/static-debian12:nonroot`
-runs it as the distroless image's built-in unprivileged, shell-less user.
-The runtime stage needs no CA certificate bundle: in-cluster requests are
-authenticated and verified using the CA certificate Kubernetes itself
-mounts into the pod (`rest.InClusterConfig()` reads it directly from the
-ServiceAccount token projection), not the OS trust store.

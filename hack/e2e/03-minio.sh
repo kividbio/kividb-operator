@@ -53,8 +53,9 @@ spec:
     spec:
       containers:
         - name: minio
-          image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+          image: ${MINIO_IMAGE}
           imagePullPolicy: IfNotPresent
+          command: ["minio"]
           args: ["server", "/data", "--console-address", ":9001"]
           env:
             - name: MINIO_ROOT_USER
@@ -127,9 +128,11 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          image: quay.io/minio/mc:latest
+          image: ${MINIO_MC_IMAGE}
           imagePullPolicy: IfNotPresent
           env:
+            - name: MC_CONFIG_DIR
+              value: /tmp/.mc
             - name: MINIO_ROOT_USER
               valueFrom:
                 secretKeyRef:

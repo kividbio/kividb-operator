@@ -25,13 +25,13 @@ E2E_NS="${E2E_NS:-e2e-ns}"
 E2E_KIVIDB_NS="${E2E_KIVIDB_NS:-e2e-kividb}"
 MONITORING_NS="${MONITORING_NS:-monitoring}"
 
-OPERATOR_TAG="${OPERATOR_TAG:-0.3.0-local}"
+OPERATOR_TAG="${OPERATOR_TAG:-0.4.0-local}"
 OPERATOR_REGISTRY="${OPERATOR_REGISTRY:-quay.io/kividbio}"
 MANAGER_IMG="${MANAGER_IMG:-${OPERATOR_REGISTRY}/kividb-operator:${OPERATOR_TAG}}"
 AGENT_IMG="${AGENT_IMG:-${OPERATOR_REGISTRY}/kividb-operator-agent:${OPERATOR_TAG}}"
 GUI_IMG="${GUI_IMG:-${OPERATOR_REGISTRY}/kividb-operator-gui:${OPERATOR_TAG}}"
 
-KIVIDB_VERSION="${KIVIDB_VERSION:-v1.0.3}"
+KIVIDB_VERSION="${KIVIDB_VERSION:-v1.0.5}"
 KIVIDB_IMAGE_BASE="${KIVIDB_IMAGE_BASE:-quay.io/kividbio/kividb}"
 KIVIDB_PORT="${KIVIDB_PORT:-6380}"
 TLS_PORT="${TLS_PORT:-6443}"
@@ -45,6 +45,12 @@ MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 MINIO_BUCKET="${MINIO_BUCKET:-kividb-e2e-backups}"
 MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://minio.${E2E_NS}.svc.cluster.local:9000}"
+# quay.io/minio/minio and quay.io/minio/mc can no longer be pulled (MinIO
+# stopped publishing container images), so the suite defaults to the frozen
+# Bitnami builds. Any image with a `minio` binary / an `mc` binary plus
+# /bin/sh works.
+MINIO_IMAGE="${MINIO_IMAGE:-bitnamilegacy/minio:latest}"
+MINIO_MC_IMAGE="${MINIO_MC_IMAGE:-bitnamilegacy/minio-client:latest}"
 
 STRICT_TLS="${STRICT_TLS:-0}"
 LOAD_IMAGES="${LOAD_IMAGES:-0}"
@@ -180,7 +186,10 @@ redis_cli_master() {
   pf_pid=$!
   ready=0
   for i in $(seq 1 30); do
-    if redis-cli -h 127.0.0.1 -p "${local_port}" PING 2>/dev/null | grep -qi pong; then
+    # Any RESP reply means the port-forward is up. kividb v1.0.5+ answers an
+    # unauthenticated PING with NOAUTH on a cluster with a default-user
+    # password, which is correct and must not count as "not ready".
+    if redis-cli -h 127.0.0.1 -p "${local_port}" PING 2>/dev/null | grep -Eqi 'pong|noauth'; then
       ready=1
       break
     fi
@@ -213,7 +222,10 @@ generate_load() {
   pf_pid=$!
   ready=0
   for i in $(seq 1 30); do
-    if redis-cli -h 127.0.0.1 -p "${local_port}" PING 2>/dev/null | grep -qi pong; then
+    # Any RESP reply means the port-forward is up. kividb v1.0.5+ answers an
+    # unauthenticated PING with NOAUTH on a cluster with a default-user
+    # password, which is correct and must not count as "not ready".
+    if redis-cli -h 127.0.0.1 -p "${local_port}" PING 2>/dev/null | grep -Eqi 'pong|noauth'; then
       ready=1
       break
     fi
@@ -325,11 +337,17 @@ ensure_tls_secret() {
     return 0
   fi
   require openssl
-  local tmp
+  local tmp subj="/CN=kividb-e2e"
+  # Git Bash / MSYS rewrites an argument that looks like an absolute path
+  # into a Windows path; a doubled leading slash turns that off.
+  case "$(uname -s)" in
+    MINGW*|MSYS*) subj="//CN=kividb-e2e" ;;
+  esac
   tmp="$(mktemp -d)"
   openssl req -x509 -nodes -newkey rsa:2048 \
     -keyout "${tmp}/tls.key" -out "${tmp}/tls.crt" \
-    -days 1 -subj "/CN=kividb-e2e" >/dev/null 2>&1
+    -days 1 -subj "${subj}" >/dev/null 2>&1 \
+    || die "openssl could not generate the self-signed TLS certificate"
   kubectl create secret tls "${name}" -n "${ns}" \
     --cert="${tmp}/tls.crt" --key="${tmp}/tls.key"
   rm -rf "${tmp}"

@@ -7,16 +7,16 @@ kividb-operator {{ .Chart.AppVersion }} has been installed into namespace "{{ .R
 
 {{- if .Values.crds.install }}
 
-2. The KividbCluster CRD (kividbclusters.kividb.io) was installed with this
-   release. Confirm it's present:
+2. The KividbCluster / KividbDbOps CRDs were installed with this release.
+   Confirm they are present:
 
-   kubectl get crd kividbclusters.kividb.io
+   kubectl get crd kividbclusters.kividb.io kividbdbops.kividb.io
 {{- else }}
 
-2. crds.install was set to false -- install the CRD yourself before
+2. crds.install was set to false -- install the CRDs yourself before
    creating any KividbCluster objects:
 
-   kubectl apply -f charts/kividb-operator/crds/kividb.io_kividbclusters.yaml
+   kubectl apply -f charts/kividb-operator/crds/
 {{- end }}
 
 3. Apply a sample KividbCluster (see config/samples/ in the repository for
@@ -29,7 +29,7 @@ kividb-operator {{ .Chart.AppVersion }} has been installed into namespace "{{ .R
      name: my-kividb
      namespace: default
    spec:
-     image: quay.io/kividbio/kividb:v1.0.3
+     image: quay.io/kividbio/kividb:v1.0.5
      storage:
        size: 5Gi
    EOF
@@ -39,22 +39,23 @@ kividb-operator {{ .Chart.AppVersion }} has been installed into namespace "{{ .R
 
 {{- if .Values.gui.enabled }}
 
-4. Reach the read-only web GUI via port-forward:
+4. Reach the management GUI via port-forward:
 
    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kividb-operator.gui.fullname" . }} 8090:{{ .Values.gui.service.port }}
 
-   Then open http://localhost:8090 in a browser. The GUI's ServiceAccount
-   ({{ include "kividb-operator.gui.serviceAccountName" . }}) only has
-   get/list/watch on kividbclusters/pods/statefulsets/cronjobs/services --
-   it cannot read Secrets or make changes.
+   Then open http://localhost:8090 in a browser.
+   {{- if .Values.gui.auth.existingSecret }}
+   Basic auth is enabled from Secret "{{ .Values.gui.auth.existingSecret }}".
+   {{- else }}
+   Tip: set gui.auth.existingSecret (keys username/password) to enable Basic
+   auth — required for the RESP explorer.
+   {{- end }}
+   The GUI ServiceAccount never reads Secrets into the browser; it can create
+   KividbDbOps restarts and view pod logs.
 {{- else }}
 
-4. The GUI is disabled (gui.enabled=false). Re-run `helm upgrade` with
-   --set gui.enabled=true to install it.
+4. The web GUI was not installed (gui.enabled=false). Re-install with
+   --set gui.enabled=true to add it.
 {{- end }}
 
-5. Connect to a cluster's master with redis-cli (KiviDB speaks the RESP
-   protocol on the "kividb" port, default 6380):
-
-   kubectl -n default port-forward svc/my-kividb-master 6380:6380
-   redis-cli -p 6380 PING
+See https://github.com/kividbio/kividb-operator for docs.

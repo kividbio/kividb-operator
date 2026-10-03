@@ -81,7 +81,7 @@ func TestDefaultImageConstants(t *testing.T) {
 	if !strings.HasPrefix(DefaultKividbImage, "quay.io/") {
 		t.Fatalf("DefaultKividbImage unexpected: %q", DefaultKividbImage)
 	}
-	if !strings.HasSuffix(DefaultKividbImage, ":v1.0.3") {
-		t.Fatalf("DefaultKividbImage must pin v1.0.3, got %q", DefaultKividbImage)
+	if !strings.HasSuffix(DefaultKividbImage, ":v1.0.5") {
+		t.Fatalf("DefaultKividbImage must pin v1.0.5, got %q", DefaultKividbImage)
 	}
 }

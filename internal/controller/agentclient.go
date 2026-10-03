@@ -50,33 +50,41 @@ func (a *AgentClient) Status(ctx context.Context, podIP string) (*agentapi.Statu
 }
 
 func (a *AgentClient) postAction(ctx context.Context, podIP, path string, payload any) error {
+	_, err := a.post(ctx, podIP, path, payload)
+	return err
+}
+
+// post returns the HTTP status alongside the error so a caller can tell a
+// specific non-200 answer apart from a transport failure; status is 0 if
+// no response was received.
+func (a *AgentClient) post(ctx context.Context, podIP, path string, payload any) (status int, err error) {
 	var body io.Reader
 	if payload != nil {
 		b, err := json.Marshal(payload)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		body = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url(podIP, path), body)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		var errResp agentapi.ErrorResponse
 		if jsonErr := json.Unmarshal(respBody, &errResp); jsonErr == nil && errResp.Error != "" {
-			return fmt.Errorf("agent %s %s: %s", podIP, path, errResp.Error)
+			return resp.StatusCode, fmt.Errorf("agent %s %s: %s", podIP, path, errResp.Error)
 		}
-		return fmt.Errorf("agent %s %s: status %d: %s", podIP, path, resp.StatusCode, string(respBody))
+		return resp.StatusCode, fmt.Errorf("agent %s %s: status %d: %s", podIP, path, resp.StatusCode, string(respBody))
 	}
-	return nil
+	return resp.StatusCode, nil
 }
 
 func (a *AgentClient) Promote(ctx context.Context, podIP string) error {
@@ -87,6 +95,14 @@ func (a *AgentClient) ReplicaOf(ctx context.Context, podIP, masterHost string, m
 	return a.postAction(ctx, podIP, "/replicaof", agentapi.ReplicaOfRequest{Host: masterHost, Port: masterPort})
 }
 
-func (a *AgentClient) AclReload(ctx context.Context, podIP string) error {
-	return a.postAction(ctx, podIP, "/acl/reload", nil)
+// AclReload asks the pod's kividb to re-read its ACL file, but only if the
+// file mounted in that pod already hashes to fileHash. It returns
+// reloaded=false with no error when it does not yet (the agent's 409), so
+// the caller can simply try again later.
+func (a *AgentClient) AclReload(ctx context.Context, podIP, fileHash string) (reloaded bool, err error) {
+	status, err := a.post(ctx, podIP, "/acl/reload", agentapi.AclReloadRequest{IfFileHash: fileHash})
+	if status == http.StatusConflict {
+		return false, nil
+	}
+	return err == nil, err
 }
