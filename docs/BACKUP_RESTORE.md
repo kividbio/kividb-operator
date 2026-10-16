@@ -99,7 +99,7 @@ yourself at any time, from inside the cluster:
 
 ```bash
 kubectl run backup-now --rm -i --restart=Never \
-  --image=quay.io/kividbio/kividb-operator-agent:latest -- \
+  --image=docker.io/kividb/kividb-operator-agent:latest -- \
   backup-trigger --url http://my-cluster-master.default.svc:8081/backup --timeout 900s
 ```
 
@@ -154,7 +154,7 @@ kind: KividbCluster
 metadata:
   name: my-cluster-restored
 spec:
-  image: quay.io/kividbio/kividb:v1.0.5
+  image: docker.io/kividb/kividb:v1.1.0
   replicas: 1
   storage:
     size: 5Gi

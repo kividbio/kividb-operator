@@ -13,7 +13,7 @@ SHELL := /usr/bin/env bash
 
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.1.0)
 
-REGISTRY   ?= quay.io/kividbio
+REGISTRY   ?= docker.io/kividb
 IMG        ?= $(REGISTRY)/kividb-operator:$(VERSION)
 AGENT_IMG  ?= $(REGISTRY)/kividb-operator-agent:$(VERSION)
 GUI_IMG    ?= $(REGISTRY)/kividb-operator-gui:$(VERSION)

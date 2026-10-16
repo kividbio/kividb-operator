@@ -219,9 +219,9 @@ install worked and the upgrade did not.
 
 ```bash
 make docker-build VERSION=0.3.0-local
-minikube image load quay.io/kividbio/kividb-operator:0.3.0-local
-minikube image load quay.io/kividbio/kividb-operator-agent:0.3.0-local
-minikube image load quay.io/kividbio/kividb-operator-gui:0.3.0-local
+minikube image load docker.io/kividb/kividb-operator:0.3.0-local
+minikube image load docker.io/kividb/kividb-operator-agent:0.3.0-local
+minikube image load docker.io/kividb/kividb-operator-gui:0.3.0-local
 helm upgrade --install kividb-operator charts/kividb-operator \
   -n kividb-operator-system \
   --set manager.image.tag=0.3.0-local \

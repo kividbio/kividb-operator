@@ -42,6 +42,7 @@ spec:
             - --health-probe-bind-address={{ .Values.manager.healthProbeBindAddress }}
             - --metrics-bind-address={{ .Values.manager.metricsBindAddress }}
             - --agent-timeout={{ .Values.manager.agentTimeout }}
+            - --default-agent-image={{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag }}
             {{- if .Values.leaderElection.enabled }}
             - --leader-elect
             {{- end }}

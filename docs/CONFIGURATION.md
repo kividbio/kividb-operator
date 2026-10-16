@@ -30,7 +30,7 @@ All fields below are under `spec:` unless stated otherwise.
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `replicas` | int32 | `2` | Replica pods **in addition to** the single master. Total pods = `replicas + 1`. |
-| `image` | string | `quay.io/kividbio/kividb:v1.0.5` | Explicit kividb container image, e.g. `quay.io/kividbio/kividb:v1.0.3` or `quay.io/kividbio/kividb:v1.0.3-tls`. Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
+| `image` | string | `docker.io/kividb/kividb:v1.1.0` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.1.0` or `docker.io/kividb/kividb:v1.1.0-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
 | `variant` | string | `standard` | One of `standard`, `tls`, `lua`, `full`. See [Image and variant](#image-and-variant) — informational only, does not affect which image gets pulled. |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
 | `imagePullSecrets` | `[]LocalObjectReference` | — | Standard Kubernetes image pull secrets. |
@@ -44,12 +44,12 @@ All fields below are under `spec:` unless stated otherwise.
 `image` is the **only** field that determines which container actually
 runs — the operator uses it verbatim and never constructs, guesses, or
 modifies it. Leave it unset to use the release default
-(`quay.io/kividbio/kividb:v1.0.5` for operator 0.4.0); set it explicitly
+(`docker.io/kividb/kividb:v1.1.0` for operator 0.5.0); set it explicitly
 to pin a different tag or variant:
 
 ```yaml
 spec:
-  image: quay.io/kividbio/kividb:v1.0.5-tls
+  image: docker.io/kividb/kividb:v1.1.0-tls
 ```
 
 To move to a later version, just change this value — same as any other
@@ -80,7 +80,7 @@ a referenced [`KividbConfig`](#kividbconfig)'s `spec.tls`). It does
 **not** change which image tag gets pulled — there is no "tls variant
 tag" the operator appends or looks for. If you want a TLS-capable build,
 you set `image` to one yourself (e.g.
-`quay.io/kividbio/kividb:v1.0.5-tls`) *and* set `variant: tls` to match;
+`docker.io/kividb/kividb:v1.1.0-tls`) *and* set `variant: tls` to match;
 the two aren't cross-validated by the API server, since only you know
 what a given `image` value actually contains.
 
@@ -213,6 +213,9 @@ Service (`<cluster>-replicas`) load-balances reads across all replicas.
 There's also always a headless Service (`<cluster>-headless`, not
 configurable) backing the StatefulSet's stable pod DNS names.
 
+All three carry the kividb port and the agent port (8081), and, when the
+cluster's `KividbConfig` enables TLS, the TLS port as well (named `tls`).
+
 ### `monitoring`
 
 ```yaml
@@ -326,11 +329,28 @@ spec:
   `port` and `aclfile` are pinned so the operator's own probes/mounts stay
   correct).
 
+  **`bind`**: unless you set `bind` or `protected-mode` yourself, the
+  operator sets `bind 0.0.0.0`, the address kividb has always listened on.
+  kividb v1.1.0 and later enforce protected mode as Redis does: while the
+  `default` user has no password and no `bind` was configured, they refuse
+  every client that is not on the pod's own loopback, other pods' replication
+  included. An explicit `bind` turns that off, so a cluster without a
+  password stays reachable inside Kubernetes, as it was on earlier engines.
+  Protect such a cluster with a password (`aclConfigRef`) and a
+  `NetworkPolicy`.
+
 - `tls`: requires the referencing `KividbCluster`'s `spec.variant` to be
   `tls` or `full` — see [Variants](#variants). `certSecretRef` names a
   Secret matching the standard `kubernetes.io/tls` Secret's default key
   layout, so a cert-manager-issued `Certificate`'s Secret can usually be
   referenced directly without relabeling keys.
+
+  With a CA (`caKey`), kividb v1.1.0 and later **require a client
+  certificate** signed by that CA, as Redis does; earlier engines accepted
+  TLS clients without one. To accept clients without a certificate, add the
+  directive `tls-auth-clients: optional` (verify a certificate when one is
+  sent) or `"no"` (never ask). The Services carry the TLS port too (named
+  `tls`; see [`services`](#services--master-and-replica-exposure)).
 
 A `KividbConfig` is standalone: create it once, reference it from as many
 `KividbCluster`s as share the same tuning/TLS needs via `spec.configRef`.
@@ -343,7 +363,7 @@ usage-tracking to catch this earlier).
 > **On kividb before v1.0.5 the `default` user's password does not keep
 > unauthenticated clients out.** A client that never sends `AUTH` is
 > treated as `default` (see [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md),
-> issue 1). v1.0.5, the default image of this release, enforces it. If you
+> issue 1). v1.0.5 and later enforce it, including v1.1.0, the default image of this release. If you
 > pin an older engine with `spec.image`, limit who can reach the cluster's
 > Services with a NetworkPolicy.
 

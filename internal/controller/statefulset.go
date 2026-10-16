@@ -35,11 +35,25 @@ func resolveImage(c *kividbv1alpha1.KividbCluster) string {
 	return DefaultKividbImage
 }
 
+// defaultAgentImage is the agent image of a KividbCluster that names none:
+// DefaultAgentImage, unless the manager was started with
+// --default-agent-image (the chart passes its agent.image there).
+var defaultAgentImage = DefaultAgentImage
+
+// SetDefaultAgentImage makes image the agent image of every KividbCluster
+// that does not set spec.agentImage. Empty keeps DefaultAgentImage.
+func SetDefaultAgentImage(image string) {
+	if image == "" {
+		image = DefaultAgentImage
+	}
+	defaultAgentImage = image
+}
+
 func agentImage(c *kividbv1alpha1.KividbCluster) string {
 	if c.Spec.AgentImage != "" {
 		return c.Spec.AgentImage
 	}
-	return DefaultAgentImage
+	return defaultAgentImage
 }
 
 func exporterImage(c *kividbv1alpha1.KividbCluster) string {

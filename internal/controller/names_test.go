@@ -75,13 +75,40 @@ func TestDefaultImageConstants(t *testing.T) {
 	if DefaultKividbImage == "" {
 		t.Fatal("DefaultKividbImage must be non-empty")
 	}
-	if !strings.HasPrefix(DefaultAgentImage, "quay.io/") {
+	if !strings.HasPrefix(DefaultAgentImage, "docker.io/kividb/") {
 		t.Fatalf("DefaultAgentImage unexpected: %q", DefaultAgentImage)
 	}
-	if !strings.HasPrefix(DefaultKividbImage, "quay.io/") {
+	if !strings.HasPrefix(DefaultKividbImage, "docker.io/kividb/") {
 		t.Fatalf("DefaultKividbImage unexpected: %q", DefaultKividbImage)
 	}
-	if !strings.HasSuffix(DefaultKividbImage, ":v1.0.5") {
-		t.Fatalf("DefaultKividbImage must pin v1.0.5, got %q", DefaultKividbImage)
+	if !strings.HasSuffix(DefaultKividbImage, ":v1.1.0") {
+		t.Fatalf("DefaultKividbImage must pin v1.1.0, got %q", DefaultKividbImage)
+	}
+}
+
+// The chart passes agent.image to the manager as --default-agent-image; a
+// cluster without spec.agentImage must get that, not the built-in default.
+func TestDefaultAgentImageCanBeOverridden(t *testing.T) {
+	defer SetDefaultAgentImage("")
+
+	c := &kividbv1alpha1.KividbCluster{}
+	if got := agentImage(c); got != DefaultAgentImage {
+		t.Fatalf("without an override: got %q, want %q", got, DefaultAgentImage)
+	}
+
+	SetDefaultAgentImage("registry.example/mirror/kividb-operator-agent:0.5.0")
+	if got := agentImage(c); got != "registry.example/mirror/kividb-operator-agent:0.5.0" {
+		t.Fatalf("with an override: got %q", got)
+	}
+
+	c.Spec.AgentImage = "registry.example/own/agent:1"
+	if got := agentImage(c); got != "registry.example/own/agent:1" {
+		t.Fatalf("spec.agentImage must still win: got %q", got)
+	}
+
+	SetDefaultAgentImage("")
+	c.Spec.AgentImage = ""
+	if got := agentImage(c); got != DefaultAgentImage {
+		t.Fatalf("an empty override restores the default: got %q", got)
 	}
 }

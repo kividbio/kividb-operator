@@ -33,7 +33,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gui
-          image: quay.io/kividbio/kividb-operator-gui:latest
+          image: docker.io/kividb/kividb-operator-gui:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

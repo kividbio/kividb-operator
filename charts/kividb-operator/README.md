@@ -28,14 +28,16 @@ Full design writeup: [docs/ARCHITECTURE.md](https://github.com/kividbio/kividb-o
 ## Installing
 
 ```bash
-helm install kividb-operator oci://quay.io/kividbio/kividb-operator-chart \
-  --version 0.3.0 \
+helm install kividb-operator oci://registry-1.docker.io/kividb/kividb-operator-chart \
+  --version 0.5.0 \
   -n kividb-operator-system --create-namespace
 ```
 
+The same chart is at `oci://ghcr.io/kividbio/kividb-operator-chart`.
+
 (Pass whichever version you're installing to `--version`; omit it to get
 the latest chart. This chart release is validated against kividb
-**v1.0.5**, which is also the operator default when a `KividbCluster`
+**v1.1.0**, which is also the operator default when a `KividbCluster`
 leaves `spec.image` unset. See
 [docs/INSTALL.md](https://github.com/kividbio/kividb-operator/blob/main/docs/INSTALL.md)
 for the full install/upgrade/uninstall walkthrough, including the

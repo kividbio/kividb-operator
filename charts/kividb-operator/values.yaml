@@ -53,8 +53,8 @@ manager:
   replicaCount: 1
 
   image:
-    repository: quay.io/kividbio/kividb-operator
-    tag: "0.4.0"
+    repository: docker.io/kividb/kividb-operator
+    tag: "0.5.0"
     pullPolicy: IfNotPresent
 
   resources:
@@ -92,19 +92,16 @@ manager:
   affinity: {}
 
 # -----------------------------------------------------------------------
-# Agent sidecar image (built by every KividbCluster's StatefulSet, not run
-# by this chart directly -- listed here purely so its repository/tag can
-# be overridden cluster-wide as the default `spec.agentImage` value; the
-# chart does not currently template this into the CRD, since agentImage is
-# a per-KividbCluster spec field, not an operator deployment concern. It is
-# provided for documentation/consistency and for future use by
-# `--set agent.image.tag=...`-style automation that pre-populates sample
-# manifests.)
+# Agent sidecar image: the sidecar in every KividbCluster pod, and the
+# image of its backup and bootstrap Jobs, for every KividbCluster that does
+# not set spec.agentImage. Passed to the manager as --default-agent-image;
+# point it at a mirror to run from a private registry. (Before 0.5.0 this
+# value was not used, and clusters always pulled the built-in default.)
 # -----------------------------------------------------------------------
 agent:
   image:
-    repository: quay.io/kividbio/kividb-operator-agent
-    tag: "0.4.0"
+    repository: docker.io/kividb/kividb-operator-agent
+    tag: "0.5.0"
     pullPolicy: IfNotPresent
   resources:
     requests:
@@ -144,8 +141,8 @@ gui:
   replicaCount: 1
 
   image:
-    repository: quay.io/kividbio/kividb-operator-gui
-    tag: "0.4.0"
+    repository: docker.io/kividb/kividb-operator-gui
+    tag: "0.5.0"
     pullPolicy: IfNotPresent
 
   service:

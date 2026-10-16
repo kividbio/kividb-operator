@@ -1,16 +1,21 @@
 name: Release
 
-# Triggered by pushing a tag matching v<semver>, e.g. v0.1.0. Release
+# Triggered by pushing a tag matching v<semver>, e.g. v0.5.0. Release
 # checklist (see docs/RELEASING.md):
 #   1. Bump VERSION and charts/kividb-operator/Chart.yaml (version AND
 #      appVersion) to the same new version.
 #   2. Update CHANGELOG.md with a new "## [x.y.z] - YYYY-MM-DD" section.
 #   3. Commit, merge to master.
 #   4. `git tag vx.y.z && git push origin vx.y.z` -- this workflow does
-#      the rest: builds+pushes all three images tagged both `vx.y.z` and
-#      `latest`, packages+pushes the Helm chart as an OCI artifact, and
-#      creates a GitHub Release with notes pulled from CHANGELOG.md and the
-#      packaged chart .tgz attached.
+#      the rest: builds all three images, publishes each to GHCR and Docker
+#      Hub tagged both `x.y.z` and `latest`, pushes the Helm chart as an OCI
+#      artifact to both, and creates a GitHub Release with notes from
+#      CHANGELOG.md and the packaged chart .tgz attached.
+#
+# Registries, as for kividb itself:
+#   ghcr.io/kividbio/<image>   pushed by the per-arch builds (GITHUB_TOKEN)
+#   docker.io/kividb/<image>   the same multi-arch tags, copied from GHCR
+#                              (vars.DOCKERHUB_USERNAME, secrets.DOCKERHUB_TOKEN)
 on:
   push:
     tags:
@@ -18,10 +23,11 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 env:
-  REGISTRY: quay.io
-  IMAGE_NAMESPACE: kividbio
+  GHCR: ghcr.io/kividbio
+  DOCKERHUB: docker.io/kividb
 
 jobs:
   version-check:
@@ -45,50 +51,64 @@ jobs:
           fi
           echo "version=$tag" >> "$GITHUB_OUTPUT"
 
+  # Fails the release before anything is built when Docker Hub cannot be
+  # reached, instead of publishing to GHCR only.
+  dockerhub-check:
+    name: Check Docker Hub credentials
+    runs-on: ubuntu-latest
+    steps:
+      - name: Credentials are set
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::Set the DOCKERHUB_USERNAME variable and the DOCKERHUB_TOKEN secret (a Docker Hub access token with Read & Write on the kividb/kividb-operator* repositories)."
+            exit 1
+          fi
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
   # Native multi-arch: each arch builds on a matching GitHub-hosted runner
   # (ubuntu-latest = amd64, ubuntu-24.04-arm = arm64). No QEMU. Each job
-  # pushes by digest only; images-manifest stitches the digests into the
-  # versioned + latest tags as a real multi-arch OCI index.
+  # pushes to GHCR by digest only; images-manifest stitches the digests into
+  # the versioned + latest tags as a real multi-arch OCI index.
   images:
     name: Build ${{ matrix.image }} (${{ matrix.platform }})
-    needs: version-check
+    needs: [version-check, dockerhub-check]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: manager
-            image: kividb-operator
+          - image: kividb-operator
             dockerfile: Dockerfile
             platform: linux/amd64
             arch: amd64
             runner: ubuntu-latest
-          - name: manager
-            image: kividb-operator
+          - image: kividb-operator
             dockerfile: Dockerfile
             platform: linux/arm64
             arch: arm64
             runner: ubuntu-24.04-arm
-          - name: agent
-            image: kividb-operator-agent
+          - image: kividb-operator-agent
             dockerfile: Dockerfile.agent
             platform: linux/amd64
             arch: amd64
             runner: ubuntu-latest
-          - name: agent
-            image: kividb-operator-agent
+          - image: kividb-operator-agent
             dockerfile: Dockerfile.agent
             platform: linux/arm64
             arch: arm64
             runner: ubuntu-24.04-arm
-          - name: gui
-            image: kividb-operator-gui
+          - image: kividb-operator-gui
             dockerfile: Dockerfile.gui
             platform: linux/amd64
             arch: amd64
             runner: ubuntu-latest
-          - name: gui
-            image: kividb-operator-gui
+          - image: kividb-operator-gui
             dockerfile: Dockerfile.gui
             platform: linux/arm64
             arch: arm64
@@ -96,30 +116,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check Dockerfile exists
-        id: check
-        run: |
-          if [ -f "${{ matrix.dockerfile }}" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::${{ matrix.dockerfile }} not found, skipping ${{ matrix.image }}"
-          fi
-
       - uses: docker/setup-buildx-action@v3
-        if: steps.check.outputs.present == 'true'
 
-      - name: Log in to Quay.io
-        if: steps.check.outputs.present == 'true'
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest
         id: build
-        if: steps.check.outputs.present == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -127,17 +134,17 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           provenance: false
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          outputs: type=image,name=${{ env.GHCR }}/${{ matrix.image }},push-by-digest=true,name-canonical=true
 
       - name: Export digest
-        if: steps.check.outputs.present == 'true'
         run: |
           mkdir -p "${{ runner.temp }}/digests"
           digest="${{ steps.build.outputs.digest }}"
           echo "${digest#sha256:}" > "${{ runner.temp }}/digests/${digest#sha256:}"
 
       - name: Upload digest
-        if: steps.check.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
           # "--" before the arch: image names share prefixes
@@ -161,12 +168,18 @@ jobs:
           - image: kividb-operator-agent
           - image: kividb-operator-gui
     steps:
-      - name: Log in to Quay.io
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - uses: docker/setup-buildx-action@v3
 
@@ -177,31 +190,35 @@ jobs:
           pattern: digests-${{ matrix.image }}--*
           merge-multiple: true
 
-      - name: Create and push manifest list
+      # The same multi-arch tags in both registries, made from the per-arch
+      # images on GHCR (imagetools copies them across registries).
+      - name: Create and push manifest lists
         env:
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          SRC: ${{ env.GHCR }}/${{ matrix.image }}
           VERSION: ${{ needs.version-check.outputs.version }}
         working-directory: ${{ runner.temp }}/digests
         run: |
           set -euo pipefail
           digests=( *)
-          if [ "${#digests[@]}" -lt 1 ] || [ ! -e "${digests[0]}" ]; then
-            echo "::error::No digests found for ${IMAGE}"
+          if [ "${#digests[@]}" -lt 2 ] || [ ! -e "${digests[0]}" ]; then
+            echo "::error::Expected an amd64 and an arm64 digest for ${SRC}, found ${#digests[@]}"
             exit 1
           fi
           refs=()
           for d in "${digests[@]}"; do
-            refs+=("${IMAGE}@sha256:${d}")
+            refs+=("${SRC}@sha256:${d}")
           done
-          docker buildx imagetools create \
-            -t "${IMAGE}:${VERSION}" \
-            -t "${IMAGE}:latest" \
-            "${refs[@]}"
-          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+          for target in "${{ env.GHCR }}/${{ matrix.image }}" "${{ env.DOCKERHUB }}/${{ matrix.image }}"; do
+            docker buildx imagetools create \
+              -t "${target}:${VERSION}" \
+              -t "${target}:latest" \
+              "${refs[@]}"
+            docker buildx imagetools inspect "${target}:${VERSION}"
+          done
 
   chart:
     name: Package and push Helm chart
-    needs: version-check
+    needs: [version-check, dockerhub-check]
     runs-on: ubuntu-latest
     outputs:
       chart_path: ${{ steps.package.outputs.chart_path }}
@@ -215,9 +232,6 @@ jobs:
       - name: helm lint
         run: helm lint charts/kividb-operator
 
-      - name: Log in to Quay.io (OCI registry)
-        run: echo "${{ secrets.QUAY_PASSWORD }}" | helm registry login ${{ env.REGISTRY }} -u ${{ secrets.QUAY_USERNAME }} --password-stdin
-
       - name: Package chart
         id: package
         run: |
@@ -226,21 +240,23 @@ jobs:
           chart_path="$(ls dist/kividb-operator-chart-*.tgz)"
           echo "chart_path=$chart_path" >> "$GITHUB_OUTPUT"
 
-      # Pushes to quay.io/kividbio/kividb-operator-chart -- a flat, 2-segment
-      # path distinct from the quay.io/kividbio/kividb-operator *image* repo
-      # above, so the chart OCI artifact and the manager image never collide
-      # tag-for-tag in the same repository. Chart.yaml's "name" field is
-      # "kividb-operator-chart" specifically so helm push (which always
-      # appends Chart.yaml's name as the final path segment, with no way to
-      # override it) lands here; this does not affect any deployed object's
-      # name (see charts/kividb-operator/templates/_helpers.tpl). An earlier
-      # nested-path attempt (.../charts/kividb-operator) failed live with a
-      # 401 on the first real release -- likely just needed the kivipusher
-      # robot account granted write on the newly-created repo (the same
-      # manual step the three image repos needed the first time they were
-      # pushed), but flattening the path sidesteps the question entirely.
-      - name: Push chart as OCI artifact
-        run: helm push "${{ steps.package.outputs.chart_path }}" oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}
+      # helm push appends Chart.yaml's name ("kividb-operator-chart") to the
+      # path, so the chart lands at .../kividb-operator-chart, apart from the
+      # kividb-operator image. Docker Hub's OCI endpoint for Helm is
+      # registry-1.docker.io.
+      - name: Push chart to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push "${{ steps.package.outputs.chart_path }}" oci://${{ env.GHCR }}
+
+      - name: Push chart to Docker Hub
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          echo "$DOCKERHUB_TOKEN" | helm registry login registry-1.docker.io -u "${{ vars.DOCKERHUB_USERNAME }}" --password-stdin
+          helm push "${{ steps.package.outputs.chart_path }}" oci://registry-1.docker.io/kividb
 
       - name: Upload packaged chart artifact
         uses: actions/upload-artifact@v4
@@ -294,4 +310,8 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: kividb-operator ${{ github.ref_name }}
           body: ${{ steps.changelog.outputs.notes }}
-          files: dist/*.tgz
+          # The CRDs too: Helm never upgrades them, and docs/RELEASING.md
+          # tells users to apply them from here.
+          files: |
+            dist/*.tgz
+            config/crd/bases/*.yaml

@@ -10,10 +10,13 @@ import (
 // desiredHeadlessService backs the StatefulSet's stable network identity
 // (pod-name.<headless>.<ns>.svc.cluster.local). It selects every pod in the
 // cluster regardless of role.
-func desiredHeadlessService(c *kividbv1alpha1.KividbCluster) *corev1.Service {
+func desiredHeadlessService(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) *corev1.Service {
 	ports := []corev1.ServicePort{
 		{Name: KividbPortName, Port: getPort(c), TargetPort: intstr.FromInt32(getPort(c))},
 		{Name: AgentPortName, Port: AgentPort, TargetPort: intstr.FromInt32(AgentPort)},
+	}
+	if tls := tlsServicePort(kdbConfig); tls != nil {
+		ports = append(ports, *tls)
 	}
 	if c.Spec.Monitoring.Enabled {
 		ports = append(ports, corev1.ServicePort{Name: ExporterPortName, Port: ExporterPort, TargetPort: intstr.FromInt32(ExporterPort)})
@@ -38,7 +41,7 @@ func desiredHeadlessService(c *kividbv1alpha1.KividbCluster) *corev1.Service {
 // select purely on kividbv1alpha1.RoleLabel, which the controller moves
 // between pods on failover -- the Service objects themselves never change
 // during a failover.
-func desiredRoleService(c *kividbv1alpha1.KividbCluster, role kividbv1alpha1.NodeRole, name string, spec kividbv1alpha1.ServiceSpec) *corev1.Service {
+func desiredRoleService(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, role kividbv1alpha1.NodeRole, name string, spec kividbv1alpha1.ServiceSpec) *corev1.Service {
 	selector := selectorLabels(c)
 	selector[kividbv1alpha1.RoleLabel] = string(role)
 
@@ -69,6 +72,10 @@ func desiredRoleService(c *kividbv1alpha1.KividbCluster, role kividbv1alpha1.Nod
 		},
 	}
 
+	if tls := tlsServicePort(kdbConfig); tls != nil {
+		svc.Spec.Ports = append(svc.Spec.Ports, *tls)
+	}
+
 	if svcType == corev1.ServiceTypeLoadBalancer {
 		svc.Spec.LoadBalancerIP = spec.LoadBalancerIP //nolint:staticcheck // still the simplest cross-provider way to request a static IP
 		svc.Spec.LoadBalancerSourceRanges = spec.LoadBalancerSourceRanges
@@ -77,10 +84,25 @@ func desiredRoleService(c *kividbv1alpha1.KividbCluster, role kividbv1alpha1.Nod
 	return svc
 }
 
-func desiredMasterService(c *kividbv1alpha1.KividbCluster) *corev1.Service {
-	return desiredRoleService(c, kividbv1alpha1.RoleMaster, masterServiceName(c), c.Spec.Services.Master)
+func desiredMasterService(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) *corev1.Service {
+	return desiredRoleService(c, kdbConfig, kividbv1alpha1.RoleMaster, masterServiceName(c), c.Spec.Services.Master)
 }
 
-func desiredReplicaService(c *kividbv1alpha1.KividbCluster) *corev1.Service {
-	return desiredRoleService(c, kividbv1alpha1.RoleReplica, replicaServiceName(c), c.Spec.Services.Replicas)
+func desiredReplicaService(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) *corev1.Service {
+	return desiredRoleService(c, kdbConfig, kividbv1alpha1.RoleReplica, replicaServiceName(c), c.Spec.Services.Replicas)
+}
+
+// tlsServicePort is the TLS listener's port on the Services, when the
+// cluster's KividbConfig enables TLS. The pods always listened on it, but no
+// Service carried it, so a TLS client could reach kividb only by pod IP.
+func tlsServicePort(kdbConfig *kividbv1alpha1.KividbConfig) *corev1.ServicePort {
+	tls := kividbTLSSpec(kdbConfig)
+	if tls == nil || !tls.Enabled {
+		return nil
+	}
+	port := tls.Port
+	if port == 0 {
+		port = 6443
+	}
+	return &corev1.ServicePort{Name: "tls", Port: port, TargetPort: intstr.FromInt32(port)}
 }
