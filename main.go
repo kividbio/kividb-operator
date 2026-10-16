@@ -36,10 +36,14 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.")
 	flag.DurationVar(&agentTimeout, "agent-timeout", 5*time.Second, "Per-call timeout when the controller talks to a pod's agent sidecar.")
+	var defaultAgentImage string
+	flag.StringVar(&defaultAgentImage, "default-agent-image", "",
+		"Agent sidecar image for KividbClusters that do not set spec.agentImage (default: "+controller.DefaultAgentImage+").")
 
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	controller.SetDefaultAgentImage(defaultAgentImage)
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 

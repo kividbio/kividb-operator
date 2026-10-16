@@ -6,6 +6,59 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-17
+
+Validated on Azure Kubernetes Service (three nodes) against kividb v1.1.0:
+a cluster without a password, a password-protected cluster with ACL users
+upgraded in place from v1.0.5 to v1.1.0 under write load, a master killed
+under write load, and the TLS build with a client CA. No acknowledged write
+was lost in any of them.
+
+### Changed
+
+- **Default engine `docker.io/kividb/kividb:v1.1.0`.** Images now come
+  from Docker Hub (`docker.io/kividb/...`) and GHCR (`ghcr.io/kividbio/...`),
+  with the same tags in both; nothing is published to Quay any more. The
+  operator, agent and GUI images, the chart, the CRD defaults, the samples
+  and the docs point at Docker Hub. The Helm chart is at
+  `oci://registry-1.docker.io/kividb/kividb-operator-chart` and
+  `oci://ghcr.io/kividbio/kividb-operator-chart`.
+- Default agent image **`docker.io/kividb/kividb-operator-agent:0.5.0`**.
+- The release attaches the CRDs (`config/crd/bases/*.yaml`) as well as the
+  packaged chart, as `docs/RELEASING.md` already told users to apply them
+  from there.
+
+### Fixed
+
+- **A cluster without a password served nobody on kividb v1.1.0.**
+  kividb 1.1.0 enforces protected mode: with no password on the `default`
+  user and no `bind`, it refuses every client that is not on the pod's
+  loopback, the other pods' replication included. The agent, on loopback,
+  still reported the pods healthy, so such a cluster showed `Running` while
+  every client and replica got `DENIED`. The operator now sets
+  `bind 0.0.0.0`, the address kividb always listened on, unless you
+  configure `bind` or `protected-mode` yourself. Existing clusters are
+  rolled onto the new configuration by the operator upgrade.
+- **The chart's `agent.image` was not used.** Every cluster without
+  `spec.agentImage` pulled the image built into the operator, so mirroring
+  the images to a private registry through the chart values left the
+  sidecars unpullable. The chart now passes `agent.image` to the manager's
+  new `--default-agent-image` flag.
+- **The TLS port was on no Service.** The pods listened on it, but the
+  master, replica and headless Services carried only the kividb and agent
+  ports, so TLS clients could reach kividb only by pod IP. With TLS on, all
+  three now carry it, named `tls`.
+
+### Upgrade notes
+
+- **kividb v1.1.0 with a TLS CA requires client certificates.** With
+  `tls.certSecretRef.caKey` set, a TLS client without a certificate signed
+  by that CA is refused; earlier engines let it in. Add the directive
+  `tls-auth-clients: optional` (or `"no"`) to keep accepting it.
+- Upgrade the operator first (its chart and CRDs), then change
+  `spec.image`: the operator rolls the pods replicas first, then fails the
+  master over, as for any engine upgrade.
+
 ## [0.4.0] - 2026-10-03
 
 ### Added

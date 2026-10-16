@@ -16,7 +16,7 @@ func TestDesiredBackupCronJob(t *testing.T) {
 	cluster := &kividbv1alpha1.KividbCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "prod"},
 		Spec: kividbv1alpha1.KividbClusterSpec{
-			AgentImage: "quay.io/kividbio/kividb-operator-agent:test",
+			AgentImage: "docker.io/kividb/kividb-operator-agent:test",
 		},
 	}
 

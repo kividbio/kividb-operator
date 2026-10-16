@@ -110,7 +110,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.reconcileConfigMap(ctx, &c, kdbConfig); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling configmap: %w", err)
 	}
-	if err := r.reconcileServices(ctx, &c); err != nil {
+	if err := r.reconcileServices(ctx, &c, kdbConfig); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling services: %w", err)
 	}
 
@@ -294,12 +294,12 @@ func (r *KividbClusterReconciler) reconcileConfigMap(ctx context.Context, c *kiv
 	return err
 }
 
-func (r *KividbClusterReconciler) reconcileServices(ctx context.Context, c *kividbv1alpha1.KividbCluster) error {
-	builders := []func(*kividbv1alpha1.KividbCluster) *corev1.Service{
+func (r *KividbClusterReconciler) reconcileServices(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) error {
+	builders := []func(*kividbv1alpha1.KividbCluster, *kividbv1alpha1.KividbConfig) *corev1.Service{
 		desiredHeadlessService, desiredMasterService, desiredReplicaService,
 	}
 	for _, build := range builders {
-		desired := build(c)
+		desired := build(c, kdbConfig)
 		svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: c.Namespace}}
 		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
 			svc.Labels = desired.Labels

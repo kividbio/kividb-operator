@@ -32,6 +32,31 @@ func TestRenderKividbConf(t *testing.T) {
 		}
 	})
 
+	t.Run("binds explicitly, so protected mode does not shut other pods out", func(t *testing.T) {
+		t.Parallel()
+		got := renderKividbConf(testCluster("demo"), nil)
+		if !strings.Contains(got, "bind 0.0.0.0\n") {
+			t.Fatalf("expected bind 0.0.0.0, got:\n%s", got)
+		}
+	})
+
+	t.Run("leaves bind and protected-mode to a user who sets either", func(t *testing.T) {
+		t.Parallel()
+		for _, directive := range []map[string]string{
+			{"bind": "10.1.2.3"},
+			{"BIND": "10.1.2.3"},
+			{"protected-mode": "yes"},
+		} {
+			cfg := &kividbv1alpha1.KividbConfig{
+				Spec: kividbv1alpha1.KividbConfigSpec{Directives: directive},
+			}
+			got := renderKividbConf(testCluster("demo"), cfg)
+			if strings.Contains(got, "bind 0.0.0.0") {
+				t.Fatalf("with %v the operator must not add its own bind, got:\n%s", directive, got)
+			}
+		}
+	})
+
 	t.Run("strips user-supplied replicaof/port/aclfile", func(t *testing.T) {
 		t.Parallel()
 		c := testCluster("demo")

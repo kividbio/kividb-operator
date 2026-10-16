@@ -40,6 +40,19 @@ func renderKividbConf(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1
 	directives["port"] = strconv.Itoa(int(port))
 	directives["aclfile"] = AclDir + "/" + AclFileName
 
+	// kividb 1.1.0 enforces protected mode, as Redis does: while the
+	// `default` user has no password and no `bind` was configured, it turns
+	// away every client that is not on the pod's loopback -- the other pods'
+	// replication included, while the agent (on loopback) reports the pod
+	// healthy. A cluster without auth would look Running and serve nobody.
+	// An explicit bind is what Redis and kividb take as "listen here on
+	// purpose", so the operator sets the address kividb has always listened
+	// on, unless the user configured bind or protected-mode themselves.
+	// Every engine version accepts the directive.
+	if !hasDirective(directives, "bind") && !hasDirective(directives, "protected-mode") {
+		directives["bind"] = "0.0.0.0"
+	}
+
 	if tls := kividbTLSSpec(kdbConfig); tls != nil && tls.Enabled {
 		tlsPort := tls.Port
 		if tlsPort == 0 {
@@ -69,6 +82,16 @@ func renderKividbConf(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// hasDirective reports whether name was configured, in any letter case.
+func hasDirective(directives map[string]string, name string) bool {
+	for k := range directives {
+		if strings.EqualFold(k, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // kividbTLSSpec safely extracts the TLS spec from a possibly-nil

@@ -2,7 +2,7 @@
 Base chart name. Deliberately a literal, not .Chart.Name: the OCI push
 path for this chart (see .github/workflows/release.yaml) needs its own
 Chart.yaml "name" distinct from "kividb-operator" (to avoid colliding
-with the quay.io/kividbio/kividb-operator *image* repo at the same path),
+with the docker.io/kividb/kividb-operator *image* repo at the same path),
 and that must never ripple into the actual deployed object names/labels
 below, which have always been "kividb-operator" and should stay that way
 regardless of what the chart's own package name is.
