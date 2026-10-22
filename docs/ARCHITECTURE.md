@@ -212,7 +212,7 @@ decision-maker at a time.
 ## Backups
 
 Scheduling itself is delegated entirely to a native Kubernetes `CronJob`
-(`<snapshotconfig>-backup`) — the operator does not implement its own cron
+(`<cluster>-backup`) — the operator does not implement its own cron
 scheduler. The CronJob's pod runs the **same agent binary** in a different
 mode: `agent backup-trigger --url http://<source-service>.<ns>.svc:8081/backup`,
 where `<source-service>` is the master Service or the replica Service,

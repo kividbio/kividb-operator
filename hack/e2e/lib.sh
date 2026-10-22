@@ -280,19 +280,56 @@ kividb_image_for_variant() {
   esac
 }
 
-port_to_hex() {
-  printf '%04X' "$1"
+# local_port — a free local TCP port for a port-forward.
+local_port() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()' 2>/dev/null \
+    || echo $((16000 + RANDOM % 2000))
 }
 
 # check_tls_listen NS POD PORT
-# Returns 0 if /proc/net/tcp shows LISTEN (st=0A) on PORT in the kividb container.
+# Returns 0 if a TLS handshake completes on PORT of POD, through a
+# port-forward. The kividb image is distroless from v1.1.1 (no shell, no
+# redis-cli), so nothing is run inside the container; and a handshake proves
+# more than a LISTEN line in /proc/net/tcp did.
 check_tls_listen() {
   local ns="$1" pod="$2" port="$3"
-  local hex
-  hex="$(port_to_hex "${port}")"
-  kubectl exec -n "${ns}" "${pod}" -c kividb -- \
-    sh -c "grep -i ':${hex}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -qi ' 0A '" \
-    >/dev/null 2>&1
+  require openssl
+  local lport pf_pid rc=1 i
+  lport="$(local_port)"
+  kubectl port-forward -n "${ns}" "pod/${pod}" "${lport}:${port}" >/dev/null 2>&1 &
+  pf_pid=$!
+  for i in $(seq 1 20); do
+    if openssl s_client -connect "127.0.0.1:${lport}" </dev/null 2>/dev/null | grep -q "Cipher is"; then
+      rc=0
+      break
+    fi
+    sleep 0.5
+  done
+  kill "${pf_pid}" 2>/dev/null || true
+  wait "${pf_pid}" 2>/dev/null || true
+  return "${rc}"
+}
+
+# redis_cli_pod NS POD args... — redis-cli against one pod (a replica, say)
+# through a port-forward. Not `kubectl exec`: the image has no redis-cli.
+redis_cli_pod() {
+  local ns="$1" pod="$2"
+  shift 2
+  require redis-cli
+  local lport pf_pid i rc=0
+  lport="$(local_port)"
+  kubectl port-forward -n "${ns}" "pod/${pod}" "${lport}:${KIVIDB_PORT}" >/dev/null 2>&1 &
+  pf_pid=$!
+  for i in $(seq 1 30); do
+    if redis-cli -h 127.0.0.1 -p "${lport}" PING 2>/dev/null | grep -Eqi 'pong|noauth'; then
+      break
+    fi
+    sleep 0.5
+  done
+  redis-cli -h 127.0.0.1 -p "${lport}" "$@" || rc=$?
+  kill "${pf_pid}" 2>/dev/null || true
+  wait "${pf_pid}" 2>/dev/null || true
+  return "${rc}"
 }
 
 has_event_reason() {

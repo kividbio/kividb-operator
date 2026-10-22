@@ -5,7 +5,7 @@
 See [ARCHITECTURE.md](ARCHITECTURE.md#backups) for the full design. In
 short: a `KividbCluster` with `spec.snapshotConfigRef` set to a
 [`KividbSnapshotConfig`](CONFIGURATION.md#kividbsnapshotconfig) gets a
-Kubernetes `CronJob` named `<snapshotconfig-name>-backup`, running on that
+Kubernetes `CronJob` named `<cluster-name>-backup`, running on that
 `KividbSnapshotConfig`'s `spec.schedule`. Its pod runs one command:
 
 ```
@@ -106,7 +106,7 @@ kubectl run backup-now --rm -i --restart=Never \
 Or trigger the existing CronJob's Job directly:
 
 ```bash
-kubectl create job my-cluster-backups-manual --from=cronjob/my-cluster-backups-backup
+kubectl create job my-cluster-backups-manual --from=cronjob/my-cluster-backup
 kubectl get kdbs -l kividb.io/cluster=my-cluster --sort-by=.status.startTime
 ```
 
