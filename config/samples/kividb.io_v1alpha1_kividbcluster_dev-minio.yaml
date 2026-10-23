@@ -63,7 +63,7 @@ metadata:
   namespace: default
 spec:
   replicas: 1 # 1 master + 1 replica = 2 pods total
-  image: docker.io/kividb/kividb:v1.1.0
+  image: docker.io/kividb/kividb:v1.1.2
   imagePullPolicy: IfNotPresent
   port: 6380
 

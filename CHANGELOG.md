@@ -6,6 +6,42 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-24
+
+The default engine is kividb **1.1.2**, a patch release of kividb 1.1.0
+that fixes a `RESTORE` that could crash the server and expired keys piling
+up under a steady load of writes with a TTL (kividb 1.1.1 was withdrawn for
+the second). Validated on Azure Kubernetes Service (three nodes) with this
+operator's code against kividb 1.1.2's: compat variants (standard, TLS,
+Lua, full), a master killed under write load, snapshot chaos, monitoring,
+RESP/ACL/SELECT, function libraries through a replica restart, a failover
+and a restore, backup to S3 and restore, a sustained load of
+`SET ... EX 5` on a master and two replicas, and in-place upgrades from
+kividb 1.1.0 and 1.1.1 to 1.1.2 under write load (no password, ACL users,
+TLS). No acknowledged write was lost in any of them.
+
+### Changed
+
+- **Default engine `docker.io/kividb/kividb:v1.1.2`** (it was `v1.1.0`):
+  in the controller, the CRD, the chart, the GUI, the samples and the docs.
+  **A `KividbCluster` that leaves `spec.image` unset is upgraded to 1.1.2
+  when the operator is upgraded**: the operator resolves the default on
+  every reconcile, so the pods roll one by one as for any image change. Set
+  `spec.image` to stay on a version. kividb's image is distroless since
+  1.1.2 (no shell, no `redis-cli` in the container); the operator only
+  talks to kividb over RESP, through its agent, so nothing changes for it.
+- Default agent image **`docker.io/kividb/kividb-operator-agent:0.5.1`**.
+  A cluster that leaves `spec.agentImage` unset rolls to it too.
+- The e2e suite tests kividb 1.1.2 by default.
+
+### Fixed
+
+- The e2e suite ran `kubectl exec ... redis-cli` and read `/proc` inside the
+  kividb container, which the distroless image can't do. It now checks the
+  TLS listener and runs `redis-cli` through a port-forward (#5).
+- The docs named the backup CronJob `<cluster>-snapshot`; it is
+  `<cluster>-backup` (#5).
+
 ## [0.5.0] - 2026-10-17
 
 Validated on Azure Kubernetes Service (three nodes) against kividb v1.1.0:
