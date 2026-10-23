@@ -54,22 +54,31 @@ The defaults in the chart, the CRD and the samples point at Docker Hub.
 
 ## Publishing to ArtifactHub
 
-ArtifactHub doesn't host charts — it's a catalog that indexes a chart
-already published elsewhere. Once the chart has been pushed to
-`oci://registry-1.docker.io/kividb/kividb-operator-chart` at least once (i.e. after
-the first tag/release):
+ArtifactHub doesn't host charts: it indexes the chart on GHCR,
+`oci://ghcr.io/kividbio/kividb-operator-chart`, and scans it for new
+versions by itself. The repository is registered once, under the `kividbio`
+organization, with that URL and **no tag** (`...-chart:0.5.2` makes every
+scan fail).
 
-1. Sign in at [artifacthub.io](https://artifacthub.io) with the account
-   that should own the listing.
-2. "Add repository" → kind **Helm charts (OCI)** → repository URL
-   `oci://registry-1.docker.io/kividb/kividb-operator-chart` → name it
-   `kividb-operator`.
-3. ArtifactHub will periodically re-scan that OCI path for new chart
-   versions — no webhook or CI step is needed for *updates* once the
-   repository is registered, only for this one-time registration.
-4. Optional polish: `charts/kividb-operator/Chart.yaml` already carries
-   an `artifacthub.io/...` annotations block (icon, links, maintainers) —
-   keep it in sync with reality as those change.
+Its badges:
+
+- **Verified Publisher:** `artifacthub-repo.yml` at the root of this repo
+  holds the Artifact Hub repository ID. The `artifacthub` workflow pushes it
+  into the chart's repository as the `artifacthub.io` tag whenever it
+  changes on master (or by hand, from the Actions tab), and Artifact Hub
+  verifies the repository at its next scan.
+- **Signed:** the release workflow signs each chart version it pushes to
+  GHCR with cosign, keyless, as this repository's release workflow. Check a
+  signature with
+  `cosign verify ghcr.io/kividbio/kividb-operator-chart:<version> --certificate-identity-regexp '^https://github.com/kividbio/kividb-operator/' --certificate-oidc-issuer https://token.actions.githubusercontent.com`.
+- **Official:** asked for once the repository is verified, with an issue on
+  [artifacthub/hub](https://github.com/artifacthub/hub/issues).
+- Security rating: from Artifact Hub's own scan of the images the chart
+  uses.
+
+Keep the `artifacthub.io/...` annotations in
+`charts/kividb-operator/Chart.yaml` (links, CRDs, examples) in step with
+reality.
 
 ## What CI checks on every push/PR (`.github/workflows/ci.yaml`)
 

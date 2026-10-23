@@ -1,0 +1,6 @@
+# Artifact Hub repository metadata for the Helm chart at
+# oci://ghcr.io/kividbio/kividb-operator-chart. The artifacthub workflow
+# pushes this file into that repository as the `artifacthub.io` tag; Artifact
+# Hub reads it there, and the matching repositoryID makes the repository a
+# Verified Publisher. https://artifacthub.io/docs/topics/repositories/helm-charts/
+repositoryID: 541c1644-8693-4f7c-9bdf-7811a7dd81e1
