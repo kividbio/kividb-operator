@@ -44,7 +44,7 @@ All fields below are under `spec:` unless stated otherwise.
 `image` is the **only** field that determines which container actually
 runs — the operator uses it verbatim and never constructs, guesses, or
 modifies it. Leave it unset to use the release default
-(`docker.io/kividb/kividb:v1.1.2` for operator 0.5.1); set it explicitly
+(`docker.io/kividb/kividb:v1.1.2` for operator 0.5.2); set it explicitly
 to pin a different tag or variant:
 
 ```yaml

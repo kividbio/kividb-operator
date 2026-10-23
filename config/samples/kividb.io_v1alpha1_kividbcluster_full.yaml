@@ -17,7 +17,7 @@ spec:
   imagePullPolicy: IfNotPresent
   # imagePullSecrets:
   #   - name: registry-pull-secret
-  agentImage: docker.io/kividb/kividb-operator-agent:0.5.1
+  agentImage: docker.io/kividb/kividb-operator-agent:0.5.2
   port: 6380
 
   # Configuration, ACL users, and the backup schedule/destination are all

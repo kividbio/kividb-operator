@@ -6,6 +6,31 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-24
+
+A security release. The default engine stays kividb **1.1.2**.
+
+### Security
+
+- `github.com/klauspost/compress` v1.17.9 -> **v1.18.7**
+  (CVE-2026-63209, GHSA-259r-337f-4rfw: an integer overflow in
+  `s2.NewDict`). It reaches the agent through `minio-go`, which the agent
+  uses for S3 backups. govulncheck finds no call to the vulnerable code.
+- `golang.org/x/net` v0.56.0 -> **v0.60.0** and `golang.org/x/crypto`
+  v0.53.0 -> **v0.57.0**, which fix the advisories govulncheck reports for
+  them (none of the vulnerable code is called either), with `x/sys`,
+  `x/term` and `x/text` moved along.
+
+### Changed
+
+- **Go 1.26.** `x/net` v0.60.0 and `x/crypto` v0.57.0 need it, so `go.mod`
+  now says `go 1.26.0` and CI builds with 1.26, the same version as the
+  release images (`golang:1.26-bookworm`). Building the operator from
+  source needs Go 1.26.
+- Default agent image **`docker.io/kividb/kividb-operator-agent:0.5.2`**.
+  A `KividbCluster` that leaves `spec.agentImage` unset rolls its pods to
+  it, one by one, when the operator is upgraded.
+
 ## [0.5.1] - 2026-10-24
 
 The default engine is kividb **1.1.2**, a patch release of kividb 1.1.0
