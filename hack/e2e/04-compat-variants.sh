@@ -133,18 +133,17 @@ EOF
     local pod
     pod="$(master_pod "${E2E_KIVIDB_NS}" "${name}")"
     if check_tls_listen "${E2E_KIVIDB_NS}" "${pod}" "${TLS_PORT}"; then
-      log "TLS port ${TLS_PORT} is LISTEN on ${pod} — TLS appears functional on ${KIVIDB_VERSION}"
+      log "TLS handshake on port ${TLS_PORT} of ${pod} OK on ${KIVIDB_VERSION}"
     else
       local msg
-      msg="TLS port ${TLS_PORT} NOT in LISTEN on ${pod} (variant=${variant}, image=${image}). ROADMAP documented this as broken on v1.0.2; re-checked on ${KIVIDB_VERSION} and still absent."
+      msg="no TLS handshake on port ${TLS_PORT} of ${pod} (variant=${variant}, image=${image}) on ${KIVIDB_VERSION}"
       if [[ "${STRICT_TLS}" == "1" ]]; then
         die "${msg} (STRICT_TLS=1)"
       else
         warn "${msg} (STRICT_TLS=0 — treating as known upstream limitation)"
-        # Dump /proc/net/tcp for the report.
-        kubectl exec -n "${E2E_KIVIDB_NS}" "${pod}" -c kividb -- \
-          sh -c 'echo "--- /proc/net/tcp ---"; cat /proc/net/tcp; echo "--- /proc/net/tcp6 ---"; cat /proc/net/tcp6 2>/dev/null || true' \
-          || true
+        # The server's own account of its listeners, for the report (the
+        # image has no shell to read /proc/net/tcp with).
+        kubectl logs -n "${E2E_KIVIDB_NS}" "${pod}" -c kividb --tail=40 || true
       fi
     fi
   fi
