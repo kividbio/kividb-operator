@@ -29,7 +29,7 @@ Full design writeup: [docs/ARCHITECTURE.md](https://github.com/kividbio/kividb-o
 
 ```bash
 helm install kividb-operator oci://registry-1.docker.io/kividb/kividb-operator-chart \
-  --version 0.5.1 \
+  --version 0.5.2 \
   -n kividb-operator-system --create-namespace
 ```
 

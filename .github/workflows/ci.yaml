@@ -12,7 +12,7 @@ permissions:
 env:
   # Keep in sync with go.mod's `go` directive (and the golang:*-bookworm
   # builder image in the Dockerfiles).
-  GO_VERSION: "1.25"
+  GO_VERSION: "1.26"
 
 jobs:
   go:

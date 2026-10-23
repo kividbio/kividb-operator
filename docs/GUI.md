@@ -130,5 +130,5 @@ services, events, statefulsets, cronjobs; **`create` on `kividbdbops`**;
 ## Building the image
 
 ```sh
-docker build -f Dockerfile.gui -t docker.io/kividb/kividb-operator-gui:0.5.1 .
+docker build -f Dockerfile.gui -t docker.io/kividb/kividb-operator-gui:0.5.2 .
 ```
