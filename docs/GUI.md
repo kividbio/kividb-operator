@@ -45,7 +45,7 @@ success, and age. Polls `GET /api/clusters` every 10s.
   moment between those two steps are not carried over.
 
 Default engine image shown when `spec.image` is empty:
-`docker.io/kividb/kividb:v1.1.0`.
+`docker.io/kividb/kividb:v1.1.2`.
 
 ### JSON API
 
@@ -130,5 +130,5 @@ services, events, statefulsets, cronjobs; **`create` on `kividbdbops`**;
 ## Building the image
 
 ```sh
-docker build -f Dockerfile.gui -t docker.io/kividb/kividb-operator-gui:0.5.0 .
+docker build -f Dockerfile.gui -t docker.io/kividb/kividb-operator-gui:0.5.1 .
 ```

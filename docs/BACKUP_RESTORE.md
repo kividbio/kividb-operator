@@ -154,7 +154,7 @@ kind: KividbCluster
 metadata:
   name: my-cluster-restored
 spec:
-  image: docker.io/kividb/kividb:v1.1.0
+  image: docker.io/kividb/kividb:v1.1.2
   replicas: 1
   storage:
     size: 5Gi
