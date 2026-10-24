@@ -100,7 +100,16 @@ a:hover { text-decoration: underline; }
   gap: 1rem;
 }
 .topbar-brand { display: flex; align-items: center; gap: 0.65rem; min-width: 0; }
-.brand-logo { height: 1.9rem; width: 1.9rem; object-fit: contain; flex-shrink: 0; }
+.brand-logo {
+  height: 2.1rem;
+  width: 2.1rem;
+  object-fit: contain;
+  flex-shrink: 0;
+  background: #fff;
+  border-radius: 50%;
+  padding: 0.28rem;
+  box-shadow: 0 0 0 1px var(--border);
+}
 .topbar h1 {
   font-size: 1.02rem;
   margin: 0;
