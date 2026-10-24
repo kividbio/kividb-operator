@@ -167,7 +167,7 @@
   }
 
   function rebalanceBanner(rb) {
-    var head = el("div", null, el("b", { text: "Changing from " + rb.from + " to " + rb.to + " shards" }), document.createTextNode(" · " + (rb.phase === "MovingSlots" ? "moving slots" : "waiting for the new shards' pods")));
+    var head = el("div", null, el("b", { text: "Changing from " + rb.from + " to " + rb.to + " shards" }), document.createTextNode(" · " + (rb.phase === "MovingSlots" ? "moving slots" : "waiting for every pod to be up and in the cluster")));
     var box = el("div", { className: "rebalance" }, head);
     var pending = rb.pending || [];
     if (rb.current) {
