@@ -132,7 +132,8 @@ func summarizeCluster(c *kividbv1alpha1.KividbCluster) ClusterSummary {
 func desiredPods(c *kividbv1alpha1.KividbCluster) int32 {
 	per := c.Spec.Replicas + 1
 	if c.Spec.Shards != nil {
-		return *c.Spec.Shards * per
+		// While shards are removed, theirs too: they run until drained.
+		return shardStatefulSetCount(c) * per
 	}
 	return per
 }

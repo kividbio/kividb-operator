@@ -78,7 +78,7 @@ func TestShardedClusterDetail(t *testing.T) {
 		sts("cache-0", 2), sts("cache-1", 1), sts("cache-2", 2),
 	)
 	sum := summarizeCluster(c)
-	if sum.Shards != 2 || sum.DesiredPods != 4 || sum.SlotsAssigned != 16384 || sum.ClusterState != "ok" || !sum.Rebalancing {
+	if sum.Shards != 2 || sum.DesiredPods != 6 || sum.SlotsAssigned != 16384 || sum.ClusterState != "ok" || !sum.Rebalancing {
 		t.Fatalf("summary %+v", sum)
 	}
 	det, err := getClusterDetail(context.Background(), s.ctrlClient, s.clientset, "prod", "cache")
