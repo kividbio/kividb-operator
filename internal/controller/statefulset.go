@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
+	"github.com/kividbio/kividb-operator/internal/agentapi"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -91,6 +92,20 @@ func defaultAntiAffinity(c *kividbv1alpha1.KividbCluster) *corev1.Affinity {
 	}
 }
 
+// agentTokenEnv is AGENT_TOKEN from the cluster's auth Secret, for the
+// agent (which requires it) and the backup Job (which sends it).
+func agentTokenEnv(c *kividbv1alpha1.KividbCluster) corev1.EnvVar {
+	return corev1.EnvVar{
+		Name: agentapi.TokenEnv,
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: secretName(c)},
+				Key:                  agentapi.TokenSecretKey,
+			},
+		},
+	}
+}
+
 func agentEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "KIVIDB_ADDR", Value: fmt.Sprintf("127.0.0.1:%d", getPort(c))},
@@ -110,6 +125,7 @@ func agentEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbA
 				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
 			},
 		},
+		agentTokenEnv(c),
 	}
 
 	if ref := defaultUserPasswordRef(aclConfig); ref != nil {

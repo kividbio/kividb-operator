@@ -70,3 +70,16 @@ spec:
             limits:
               cpu: 250m
               memory: 128Mi
+          # The agent token, which every agent call needs. A file, not an
+          # API read: the GUI's RBAC has no access to Secrets.
+          volumeMounts:
+            - name: agent-token
+              mountPath: /etc/kividb-agent-token
+              readOnly: true
+      volumes:
+        - name: agent-token
+          secret:
+            # Created by the operator at its first start (it must run in
+            # this namespace); the kubelet fills the mount in when it appears.
+            secretName: kividb-operator-agent-token
+            optional: true

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
+	"github.com/kividbio/kividb-operator/internal/agentapi"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -38,29 +39,24 @@ func TestNamingHelpers(t *testing.T) {
 	}
 }
 
-func TestSnapshotSourceServiceName(t *testing.T) {
+func TestSnapshotSourceRole(t *testing.T) {
 	t.Parallel()
-
-	c := &kividbv1alpha1.KividbCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
-	}
 
 	tests := []struct {
 		name   string
 		source kividbv1alpha1.SnapshotSource
-		want   string
+		want   agentapi.Role
 	}{
-		{"master source", kividbv1alpha1.SnapshotSourceMaster, "demo-master"},
-		{"replica source", kividbv1alpha1.SnapshotSourceReplica, "demo-replicas"},
-		{"empty defaults to master", "", "demo-master"},
-		{"unrecognized defaults to master", kividbv1alpha1.SnapshotSource("other"), "demo-master"},
+		{"master source", kividbv1alpha1.SnapshotSourceMaster, agentapi.RoleMaster},
+		{"replica source", kividbv1alpha1.SnapshotSourceReplica, agentapi.RoleReplica},
+		{"empty defaults to master", "", agentapi.RoleMaster},
+		{"unrecognized defaults to master", kividbv1alpha1.SnapshotSource("other"), agentapi.RoleMaster},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := snapshotSourceServiceName(c, tt.source)
-			if got != tt.want {
-				t.Fatalf("snapshotSourceServiceName(%q) = %q, want %q", tt.source, got, tt.want)
+			if got := snapshotSourceRole(tt.source); got != tt.want {
+				t.Fatalf("snapshotSourceRole(%q) = %q, want %q", tt.source, got, tt.want)
 			}
 		})
 	}

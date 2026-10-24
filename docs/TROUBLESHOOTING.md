@@ -49,8 +49,11 @@ Check whether the operator can actually reach pod agents over the network
 
 ```bash
 kubectl exec -n kividb-operator-system deploy/kividb-operator-manager -- \
-  wget -qO- http://<pod-ip>:8081/status
+  wget -qO- http://<pod-ip>:8081/readyz
 ```
+
+(`/readyz` needs no token. `/status` and the other endpoints answer 401
+without the agent token: that is expected, not a network problem.)
 
 If that hangs/fails from the operator's pod but works from elsewhere, a
 `NetworkPolicy` is likely blocking traffic from the operator's namespace

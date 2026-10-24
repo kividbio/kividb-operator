@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -45,6 +46,13 @@ type KividbClusterReconciler struct {
 
 func (r *KividbClusterReconciler) scheme() *runtime.Scheme { return r.Scheme }
 
+func (r *KividbClusterReconciler) agentToken() string {
+	if r.Agent == nil {
+		return ""
+	}
+	return r.Agent.Token
+}
+
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbclusters,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbclusters/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbclusters/finalizers,verbs=update
@@ -77,6 +85,9 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	kdbConfig, err := r.resolveKividbConfig(ctx, &c)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolving configRef: %w", err)
+	}
+	if err := validateKividbConfig(kdbConfig); err != nil {
+		return ctrl.Result{}, r.rejectSpec(ctx, &c, err)
 	}
 	aclConfig, err := r.resolveAclConfig(ctx, &c)
 	if err != nil {
@@ -273,11 +284,11 @@ func (r *KividbClusterReconciler) reconcileSecret(ctx context.Context, c *kividb
 	var generations authGenerations
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName(c), Namespace: c.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
-		desired := desiredAuthSecret(c, aclContent)
+		desired := desiredAuthSecret(c, aclContent, r.agentToken())
 		secret.Labels = desired.Labels
 		secret.Type = desired.Type
 		secret.StringData = desired.StringData
-		generations = bumpAuthGenerations(c, secret, aclContent, defaultPassword)
+		generations = bumpAuthGenerations(c, secret, aclContent, defaultPassword, r.agentToken())
 		return controllerutil.SetControllerReference(c, secret, r.scheme())
 	})
 	return generations, err
@@ -417,6 +428,23 @@ func validateSpec(c *kividbv1alpha1.KividbCluster) error {
 	}
 	if c.Spec.Replicas < 0 {
 		return fmt.Errorf("spec.replicas must not be negative, got %d", c.Spec.Replicas)
+	}
+	return nil
+}
+
+// validateKividbConfig refuses directives the operator cannot run with.
+// cluster-enabled turns on kividb's cluster mode, whose failover the
+// operator's own (REPLICAOF-driven) failover would fight: the replicas
+// would be refused, roles mislabelled and rollouts stuck. Sharded clusters
+// are spec.shards, not a directive.
+func validateKividbConfig(kdbConfig *kividbv1alpha1.KividbConfig) error {
+	if kdbConfig == nil {
+		return nil
+	}
+	for k, v := range kdbConfig.Spec.Directives {
+		if strings.EqualFold(k, "cluster-enabled") && !strings.EqualFold(strings.TrimSpace(v), "no") {
+			return fmt.Errorf("KividbConfig %s sets cluster-enabled %q: cluster mode is not supported through a directive", kdbConfig.Name, v)
+		}
 	}
 	return nil
 }

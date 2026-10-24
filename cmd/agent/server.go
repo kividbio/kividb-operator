@@ -28,20 +28,46 @@ func runServe(args []string) error {
 	cfg := loadConfig()
 	s := &server{cfg: cfg}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.HandleFunc("GET /status", s.handleStatus)
-	mux.HandleFunc("POST /promote", s.handlePromote)
-	mux.HandleFunc("POST /replicaof", s.handleReplicaOf)
-	mux.HandleFunc("POST /acl/reload", s.handleAclReload)
-	mux.HandleFunc("POST /backup", s.handleBackup)
-	mux.HandleFunc("POST /exec", s.handleExec)
-	mux.HandleFunc("GET /metrics", s.handleMetrics)
-
 	addr := fmt.Sprintf(":%d", cfg.AgentPort)
 	log.Printf("kividb-operator agent listening on %s (kividb at %s)", addr, cfg.KividbAddr)
-	return http.ListenAndServe(addr, mux)
+	if cfg.AgentToken == "" {
+		log.Printf("no %s set: every endpoint but the probes and /metrics will answer 503", agentapi.TokenEnv)
+	}
+	return http.ListenAndServe(addr, s.routes())
+}
+
+func (s *server) routes() http.Handler {
+	mux := http.NewServeMux()
+	// Open: the kubelet's probes, and Prometheus. /metrics carries counters
+	// from INFO, nothing that changes or reveals the data.
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	// Token required: these change the server, or (/exec) run any command.
+	mux.HandleFunc("GET /status", s.withToken(s.handleStatus))
+	mux.HandleFunc("POST /promote", s.withToken(s.handlePromote))
+	mux.HandleFunc("POST /replicaof", s.withToken(s.handleReplicaOf))
+	mux.HandleFunc("POST /acl/reload", s.withToken(s.handleAclReload))
+	mux.HandleFunc("POST /backup", s.withToken(s.handleBackup))
+	mux.HandleFunc("POST /exec", s.withToken(s.handleExec))
+	return mux
+}
+
+// withToken lets a request through only with the agent token. Anyone who
+// can reach the pod could otherwise promote it, repoint its replication or
+// run any command through /exec.
+func (s *server) withToken(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.AgentToken == "" {
+			writeError(w, http.StatusServiceUnavailable, fmt.Errorf("this agent has no %s: it refuses everything but the probes and /metrics", agentapi.TokenEnv))
+			return
+		}
+		if !agentapi.TokenMatches(r, s.cfg.AgentToken) {
+			writeError(w, http.StatusUnauthorized, fmt.Errorf("missing or wrong agent token"))
+			return
+		}
+		h(w, r)
+	}
 }
 
 func (s *server) dial() (*respclient.Client, error) {

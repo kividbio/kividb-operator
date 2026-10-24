@@ -24,17 +24,17 @@ func TestBumpAuthGenerations(t *testing.T) {
 	secret := &corev1.Secret{}
 
 	c := &kividbv1alpha1.KividbCluster{}
-	first := bumpAuthGenerations(c, secret, "acl v1", "pw1")
+	first := bumpAuthGenerations(c, secret, "acl v1", "pw1", "tok")
 	if first.auth != "1" || first.acl != "1" {
 		t.Fatalf("first call: %+v, want both generations at 1", first)
 	}
-	if again := bumpAuthGenerations(c, secret, "acl v1", "pw1"); again != first {
+	if again := bumpAuthGenerations(c, secret, "acl v1", "pw1", "tok"); again != first {
 		t.Fatalf("unchanged input moved the generations: %+v", again)
 	}
-	if got := bumpAuthGenerations(c, secret, "acl v2", "pw1"); got.auth != "1" || got.acl != "2" {
+	if got := bumpAuthGenerations(c, secret, "acl v2", "pw1", "tok"); got.auth != "1" || got.acl != "2" {
 		t.Fatalf("ACL-only change: %+v, want auth=1 acl=2", got)
 	}
-	if got := bumpAuthGenerations(c, secret, "acl v3", "pw2"); got.auth != "2" || got.acl != "3" {
+	if got := bumpAuthGenerations(c, secret, "acl v3", "pw2", "tok"); got.auth != "2" || got.acl != "3" {
 		t.Fatalf("default password change: %+v, want auth=2 acl=3", got)
 	}
 }

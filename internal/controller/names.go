@@ -16,6 +16,10 @@ const (
 	// AgentPortName is the container port name for AgentPort.
 	AgentPortName = "agent"
 
+	// ServiceKindLabel tells the operator's Services apart; the chart's
+	// ServiceMonitor selects ServiceKindLabel=headless.
+	ServiceKindLabel = "kividb.io/service"
+
 	// KividbPortName is the container port name for the RESP port.
 	KividbPortName = "kividb"
 

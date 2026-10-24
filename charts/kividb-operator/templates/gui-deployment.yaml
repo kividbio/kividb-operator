@@ -89,6 +89,11 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            # The agent token, which every agent call needs. A file, not an
+            # API read: the GUI's RBAC has no access to Secrets.
+            - name: agent-token
+              mountPath: /etc/kividb-agent-token
+              readOnly: true
             {{- if .Values.gui.metrics.persistence.enabled }}
             - name: metrics
               mountPath: /var/lib/kividb-gui
@@ -96,6 +101,12 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: agent-token
+          secret:
+            secretName: {{ include "kividb-operator.fullname" . }}-agent-token
+            # The operator creates it at its first start, maybe after this
+            # pod's; the kubelet fills the mount in when it appears.
+            optional: true
         {{- if .Values.gui.metrics.persistence.enabled }}
         - name: metrics
           persistentVolumeClaim:

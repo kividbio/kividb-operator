@@ -17,11 +17,15 @@ import (
 // (http.Client is).
 type AgentClient struct {
 	http *http.Client
+	// Token is the agent token: sent with every call, and copied into each
+	// cluster's auth Secret for its agents to require.
+	Token string
 }
 
-// NewAgentClient builds an AgentClient with the given per-call timeout.
-func NewAgentClient(timeout time.Duration) *AgentClient {
-	return &AgentClient{http: &http.Client{Timeout: timeout}}
+// NewAgentClient builds an AgentClient with the given per-call timeout and
+// agent token.
+func NewAgentClient(timeout time.Duration, token string) *AgentClient {
+	return &AgentClient{http: &http.Client{Timeout: timeout}, Token: token}
 }
 
 func (a *AgentClient) url(podIP, path string) string {
@@ -33,6 +37,7 @@ func (a *AgentClient) Status(ctx context.Context, podIP string) (*agentapi.Statu
 	if err != nil {
 		return nil, err
 	}
+	agentapi.SetToken(req, a.Token)
 	resp, err := a.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -71,6 +76,7 @@ func (a *AgentClient) post(ctx context.Context, podIP, path string, payload any)
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	agentapi.SetToken(req, a.Token)
 	resp, err := a.http.Do(req)
 	if err != nil {
 		return 0, err

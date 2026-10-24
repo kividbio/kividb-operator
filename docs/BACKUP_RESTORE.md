@@ -9,11 +9,12 @@ Kubernetes `CronJob` named `<cluster-name>-backup`, running on that
 `KividbSnapshotConfig`'s `spec.schedule`. Its pod runs one command:
 
 ```
-agent backup-trigger --url http://<source-service>.<namespace>.svc:8081/backup --timeout <spec.timeoutSeconds>s
+agent backup-trigger --targets <pod>.<cluster>-headless.<namespace>.svc:8081,... --role master --timeout <spec.timeoutSeconds>s
 ```
 
-`<source-service>` is `<cluster>-master` or `<cluster>-replicas`,
-depending on the `KividbSnapshotConfig`'s `spec.source` (`master` by
+It asks every pod's agent for its role and backs up from the first holding
+`--role`: `master` or `replica`, depending on the `KividbSnapshotConfig`'s
+`spec.source` (`master` by
 default and recommended — see
 [CONFIGURATION.md](CONFIGURATION.md#source-master-or-replica) for the
 trade-off). Whichever pod that Service resolves to does the actual work
@@ -98,10 +99,12 @@ The CronJob is just a thin trigger — you can do the same HTTP call
 yourself at any time, from inside the cluster:
 
 ```bash
-kubectl run backup-now --rm -i --restart=Never \
-  --image=docker.io/kividb/kividb-operator-agent:latest -- \
-  backup-trigger --url http://my-cluster-master.default.svc:8081/backup --timeout 900s
+kubectl create job backup-now --from=cronjob/my-cluster-backup
 ```
+
+(The agents need the agent token, which the CronJob's pod takes from the
+cluster's auth Secret; a pod started by hand would have to be given it
+too.)
 
 Or trigger the existing CronJob's Job directly:
 

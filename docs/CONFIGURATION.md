@@ -213,8 +213,11 @@ Service (`<cluster>-replicas`) load-balances reads across all replicas.
 There's also always a headless Service (`<cluster>-headless`, not
 configurable) backing the StatefulSet's stable pod DNS names.
 
-All three carry the kividb port and the agent port (8081), and, when the
-cluster's `KividbConfig` enables TLS, the TLS port as well (named `tls`).
+The master and replica Services carry the kividb port and, when the
+cluster's `KividbConfig` enables TLS, the TLS port (named `tls`). Only the
+headless Service also carries the agent port (8081): the agent's API,
+which needs the agent token, is never on a Service that clients or the
+outside reach.
 
 ### `monitoring`
 
@@ -304,7 +307,6 @@ spec:
     threads: "4"
     aof: "yes"
     loglevel: "notice"
-    cluster-enabled: "no"
     notify-keyspace-events: "Ex"
     slowlog-log-slower-than: "10000"
   tls:

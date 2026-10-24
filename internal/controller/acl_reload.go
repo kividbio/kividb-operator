@@ -44,7 +44,11 @@ type authGenerations struct {
 // bumpAuthGenerations records the hashes of the ACL file and the default
 // user's password on secret, advancing the matching counter whenever one
 // differs from what was recorded last time, and returns the counters.
-func bumpAuthGenerations(c *kividbv1alpha1.KividbCluster, secret *corev1.Secret, aclContent, defaultPassword string) authGenerations {
+//
+// The agent token counts as part of the auth: the agents read it from their
+// environment at startup, so a new token needs the pods restarted, as a new
+// password does.
+func bumpAuthGenerations(c *kividbv1alpha1.KividbCluster, secret *corev1.Secret, aclContent, defaultPassword, agentToken string) authGenerations {
 	if secret.Annotations == nil {
 		secret.Annotations = map[string]string{}
 	}
@@ -59,7 +63,7 @@ func bumpAuthGenerations(c *kividbv1alpha1.KividbCluster, secret *corev1.Secret,
 		return generation
 	}
 	return authGenerations{
-		auth: bump(AuthHashAnnotation, AuthGenerationAnnotation, passwordFingerprint(c, defaultPassword)),
+		auth: bump(AuthHashAnnotation, AuthGenerationAnnotation, passwordFingerprint(c, defaultPassword+"\x00agent-token\x00"+agentToken)),
 		acl:  bump(AclHashAnnotation, AclGenerationAnnotation, aclFileFingerprint(aclContent)),
 	}
 }

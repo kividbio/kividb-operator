@@ -220,6 +220,7 @@ func postAgentJSON(ctx context.Context, podIP, path string, payload any) ([]byte
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	agentapi.SetToken(req, agentToken())
 	client := &http.Client{Timeout: agentHTTPTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -238,6 +239,7 @@ func getAgentStatus(ctx context.Context, podIP string) (*agentapi.StatusResponse
 	if err != nil {
 		return nil, err
 	}
+	agentapi.SetToken(req, agentToken())
 	client := &http.Client{Timeout: agentHTTPTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -491,6 +493,7 @@ func postAgentJSONTimeout(ctx context.Context, podIP, path string, payload any, 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	agentapi.SetToken(req, agentToken())
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {

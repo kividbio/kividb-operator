@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
+	"github.com/kividbio/kividb-operator/internal/agentapi"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -171,7 +172,7 @@ func defaultUserPasswordRef(aclConfig *kividbv1alpha1.KividbAclConfig) *kividbv1
 	return aclRequirePassRef(aclConfig)
 }
 
-func desiredAuthSecret(c *kividbv1alpha1.KividbCluster, aclContent string) *corev1.Secret {
+func desiredAuthSecret(c *kividbv1alpha1.KividbCluster, aclContent, agentToken string) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName(c),
@@ -181,6 +182,8 @@ func desiredAuthSecret(c *kividbv1alpha1.KividbCluster, aclContent string) *core
 		Type: corev1.SecretTypeOpaque,
 		StringData: map[string]string{
 			AclFileName: aclContent,
+			// The agents require it (AGENT_TOKEN), and the backup Job sends it.
+			agentapi.TokenSecretKey: agentToken,
 		},
 	}
 }

@@ -6,6 +6,44 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+**Read before upgrading:** the agent's port (8081) is no longer on the
+`<cluster>-master` and `<cluster>-replicas` Services, and the agent's API
+needs a token. Anything that called an agent through those Services, other
+than the operator's own backup Jobs, has to change. The pods roll once.
+
+### Security
+
+- **The agent's API needs a token.** In 0.6.0 any client that could reach
+  port 8081 of a kividb pod could promote it, repoint its replication, or
+  run any command through `/exec`; and the port was on the master and
+  replica Services, which can be LoadBalancers. Now every endpoint but
+  `/healthz`, `/readyz` and `/metrics` requires `Authorization: Bearer
+  <token>`, and an agent without a token refuses them. The operator keeps
+  the token in a Secret in its namespace (created with a random value at
+  its first start; `--agent-token-secret`, the chart's
+  `<release>-agent-token`) and copies it into each cluster's auth Secret.
+  The operator, the backup Jobs and the GUI send it; the GUI reads it from
+  the Secret mounted as a file. A new token rolls the pods, as a new
+  password does.
+- **The agent port is on the headless Service only**, not on the master
+  and replica Services.
+
+### Changed
+
+- The backup Job finds the pod to back up by asking every pod's agent for
+  its role, through the headless Service's per-pod names, instead of going
+  through the master or replica Service.
+- A `KividbConfig` that sets `cluster-enabled` to anything but `no` is
+  refused (the cluster's `Ready` condition says why). Cluster mode would
+  fight the operator's own failover; sharded clusters come as
+  `spec.shards`.
+
+### Fixed
+
+- The chart's ServiceMonitor scraped each pod twice, through the headless
+  Service and through its master or replica Service. It selects the
+  headless Service only (`kividb.io/service: headless`).
+
 ## [0.6.0] - 2026-10-24
 
 A new management GUI. The default engine stays kividb **1.1.2**.

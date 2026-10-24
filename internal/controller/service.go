@@ -22,11 +22,15 @@ func desiredHeadlessService(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1
 		ports = append(ports, corev1.ServicePort{Name: ExporterPortName, Port: ExporterPort, TargetPort: intstr.FromInt32(ExporterPort)})
 	}
 
+	labels := commonLabels(c)
+	// The ServiceMonitor scrapes Services with this label: the headless one
+	// has every pod, once.
+	labels[ServiceKindLabel] = "headless"
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      headlessServiceName(c),
 			Namespace: c.Namespace,
-			Labels:    commonLabels(c),
+			Labels:    labels,
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP:                corev1.ClusterIPNone,
@@ -60,14 +64,11 @@ func desiredRoleService(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alph
 		Spec: corev1.ServiceSpec{
 			Type:     svcType,
 			Selector: selector,
+			// The client port only. The agent's port is on the headless
+			// Service alone: these Services are the ones clients (and, as a
+			// LoadBalancer or NodePort, the outside) reach.
 			Ports: []corev1.ServicePort{
 				{Name: KividbPortName, Port: getPort(c), TargetPort: intstr.FromInt32(getPort(c))},
-				// Agent port must be reachable here too: the backup CronJob's
-				// backup-trigger client POSTs to
-				// http://<cluster>-master.<ns>.svc:<AgentPort>/backup (see
-				// backup.go), and this Service is how it always finds
-				// whichever pod currently holds the master role.
-				{Name: AgentPortName, Port: AgentPort, TargetPort: intstr.FromInt32(AgentPort)},
 			},
 		},
 	}
