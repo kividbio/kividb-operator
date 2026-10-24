@@ -132,10 +132,11 @@ on every route except `/healthz`, the sign-in page and the static assets.
 In a browser you sign in on the GUI's own page (`/login`), which sets a
 session cookie for 12 hours: HttpOnly, SameSite=Lax, and Secure when the GUI
 is reached over HTTPS (directly, or through a proxy that sets
-`X-Forwarded-Proto`). The cookie is signed with a key derived from the
-credentials, so sessions survive a GUI restart and end when the password
-changes. Ten failed sign-ins from one address lock it out for five minutes.
-**Sign out** is in the top bar.
+`X-Forwarded-Proto`). The cookie is signed with a random key the GUI makes
+when it starts, and holds nothing derived from the password. A restart of
+the GUI, which changing its password needs, ends every session. Ten failed
+sign-ins from one address lock it out for five minutes. **Sign out** is in
+the top bar.
 
 Scripts can keep using HTTP Basic auth on the API:
 `curl -u admin:… https://gui.example/api/clusters`. Chart:

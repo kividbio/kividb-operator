@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -25,15 +26,25 @@ import (
 type authConfig struct {
 	Username string
 	Password string
-	limiter  *loginLimiter // nil: no limit (tests)
+	// key signs session cookies: random, made at startup. Nothing derived
+	// from the password goes into a cookie, so a stolen cookie gives no way
+	// to guess the password offline. Changing the password restarts the
+	// GUI, which makes a new key and so ends every session; so does any
+	// other restart.
+	key     []byte
+	limiter *loginLimiter // nil: no limit (tests)
+}
+
+func newAuthConfig(username, password string) authConfig {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		panic(fmt.Sprintf("session key: %v", err))
+	}
+	return authConfig{Username: username, Password: password, key: key, limiter: newLoginLimiter()}
 }
 
 func loadAuthConfig() authConfig {
-	return authConfig{
-		Username: os.Getenv("GUI_AUTH_USERNAME"),
-		Password: os.Getenv("GUI_AUTH_PASSWORD"),
-		limiter:  newLoginLimiter(),
-	}
+	return newAuthConfig(os.Getenv("GUI_AUTH_USERNAME"), os.Getenv("GUI_AUTH_PASSWORD"))
 }
 
 func (a authConfig) enabled() bool {
@@ -72,19 +83,8 @@ const (
 // now is the clock sessions are checked against; tests replace it.
 var now = time.Now
 
-// sessionKey signs session cookies. It comes from the credentials, so a
-// restarted GUI keeps its sessions, and changing the password ends them.
-func (a authConfig) sessionKey() []byte {
-	h := sha256.New()
-	h.Write([]byte("kividb-operator-gui session v1\x00"))
-	h.Write([]byte(a.Username))
-	h.Write([]byte{0})
-	h.Write([]byte(a.Password))
-	return h.Sum(nil)
-}
-
 func (a authConfig) sign(payload string) string {
-	m := hmac.New(sha256.New, a.sessionKey())
+	m := hmac.New(sha256.New, a.key)
 	m.Write([]byte(payload))
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
@@ -97,7 +97,7 @@ func (a authConfig) newSession(expires time.Time) string {
 
 func (a authConfig) validSession(r *http.Request) bool {
 	c, err := r.Cookie(sessionCookie)
-	if err != nil {
+	if err != nil || len(a.key) == 0 {
 		return false
 	}
 	i := strings.LastIndexByte(c.Value, '.')
@@ -224,8 +224,15 @@ func clientAddr(r *http.Request) string {
 // safeNext keeps the after-login redirect on this GUI: a path, never
 // another site ("//evil.example", "https://…", "/\\evil.example").
 func safeNext(next string) string {
-	if next == "" || next[0] != '/' || strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
+	if next == "" || next[0] != '/' || strings.HasPrefix(next, "//") || strings.ContainsRune(next, '\\') {
 		return "/"
+	}
+	// Browsers drop tabs and newlines from a URL: "/<tab>/evil.example"
+	// would become "//evil.example".
+	for _, c := range next {
+		if c < 0x20 || c == 0x7f {
+			return "/"
+		}
 	}
 	if strings.HasPrefix(next, "/login") {
 		return "/"
@@ -236,9 +243,11 @@ func safeNext(next string) string {
 // ---------- handlers ----------
 
 func (a authConfig) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	next := safeNext(r.URL.Query().Get("next"))
+	// Nothing to sign in to, or already signed in. (The page's form carries
+	// ?next= through to the sign-in itself; nothing sends a signed-in user
+	// here.)
 	if !a.enabled() || a.validSession(r) {
-		http.Redirect(w, r, next, http.StatusSeeOther)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

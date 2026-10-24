@@ -102,7 +102,7 @@ func withCookie(c *http.Cookie) *http.Request {
 }
 
 func TestLoginSessionCookie(t *testing.T) {
-	a := authConfig{Username: "admin", Password: "s3cret", limiter: newLoginLimiter()}
+	a := newAuthConfig("admin", "s3cret")
 
 	rec := postLogin(a, "admin", "s3cret", "/clusters/ns/c1", "10.0.0.1:5000")
 	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/clusters/ns/c1" {
@@ -133,8 +133,15 @@ func TestLoginSessionCookie(t *testing.T) {
 	if code := read(&tampered); code != http.StatusUnauthorized {
 		t.Errorf("tampered cookie: %d", code)
 	}
-	if (authConfig{Username: "admin", Password: "changed"}).validSession(withCookie(session)) {
+	// A new password means a restarted GUI, with a new key.
+	if newAuthConfig("admin", "changed").validSession(withCookie(session)) {
 		t.Error("a session outlived a password change")
+	}
+	if newAuthConfig("admin", "s3cret").validSession(withCookie(session)) {
+		t.Error("a session outlived a restart (the key is per process)")
+	}
+	if strings.Contains(session.Value, "s3cret") {
+		t.Error("the password is in the cookie")
 	}
 	expired := &http.Cookie{Name: sessionCookie, Value: a.newSession(time.Now().Add(-time.Minute))}
 	if code := read(expired); code != http.StatusUnauthorized {
@@ -143,7 +150,7 @@ func TestLoginSessionCookie(t *testing.T) {
 }
 
 func TestLoginRefusesWrongPasswordAndLimitsAttempts(t *testing.T) {
-	a := authConfig{Username: "admin", Password: "s3cret", limiter: newLoginLimiter()}
+	a := newAuthConfig("admin", "s3cret")
 
 	rec := postLogin(a, "admin", "wrong", "/", "10.0.0.2:1")
 	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "error=invalid") || len(rec.Result().Cookies()) != 0 {
@@ -174,6 +181,9 @@ func TestSafeNext(t *testing.T) {
 		"https://evil.example/":  "/",
 		"javascript:alert(1)":    "/",
 		"/login?next=/somewhere": "/",
+		"/\t/evil.example":       "/",
+		"/\n/evil.example":       "/",
+		"/clusters/a\\b":         "/",
 	}
 	for in, want := range cases {
 		if got := safeNext(in); got != want {

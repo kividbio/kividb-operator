@@ -17,9 +17,10 @@ box. Scripts that call the API with Basic auth (`curl -u`) keep working.
 ### Added
 
 - **A sign-in page** (`/login`). Signing in sets a session cookie
-  (HttpOnly, SameSite=Lax, Secure over HTTPS, 12 hours) signed with a key
-  derived from the GUI's credentials, so it survives a GUI restart and
-  ends when the password changes. Pages redirect to it when signed out,
+  (HttpOnly, SameSite=Lax, Secure over HTTPS, 12 hours), signed with a
+  random key made when the GUI starts: nothing in it is derived from the
+  password, and a restart (which changing the password needs) ends every
+  session. Pages redirect to it when signed out,
   and come back to where you were; the API answers 401 without the header
   that makes browsers show their own login box. Ten failed attempts from
   one address lock it out for five minutes. **Sign out** is in the top
