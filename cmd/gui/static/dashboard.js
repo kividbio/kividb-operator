@@ -42,13 +42,21 @@
     var chips = el("div", { className: "chips" });
     if (c.version) chips.appendChild(el("span", { className: "chip brand", text: c.version, title: c.image }));
     if (c.variant && c.variant !== "standard") chips.appendChild(el("span", { className: "chip", text: c.variant }));
-    chips.appendChild(el("span", { className: "chip", text: c.replicas + (c.replicas === 1 ? " replica" : " replicas") }));
+    if (c.shards) {
+      chips.appendChild(el("span", { className: "chip", text: c.shards + (c.shards === 1 ? " shard" : " shards") }));
+      chips.appendChild(el("span", { className: "chip", text: c.replicas + (c.replicas === 1 ? " replica" : " replicas") + " each" }));
+      if (c.rebalancing) chips.appendChild(el("span", { className: "chip brand", text: "rebalancing" }));
+    } else {
+      chips.appendChild(el("span", { className: "chip", text: c.replicas + (c.replicas === 1 ? " replica" : " replicas") }));
+    }
 
     var backup = c.backupEnabled ? (c.backupLastSuccess ? KV.fmtAgo(c.backupLastSuccess) : "enabled") : "off";
     var facts = el(
       "div",
       { className: "facts-mini" },
-      el("div", null, el("div", { className: "k", text: "Master" }), el("div", { className: "v", text: KV.dash(c.masterPod) })),
+      c.shards
+        ? el("div", null, el("div", { className: "k", text: "Slots" }), el("div", { className: "v", text: KV.fmtNum(c.slotsAssigned || 0) + (c.clusterState ? " · " + c.clusterState : "") }))
+        : el("div", null, el("div", { className: "k", text: "Master" }), el("div", { className: "v", text: KV.dash(c.masterPod) })),
       el("div", null, el("div", { className: "k", text: "Pods ready" }), el("div", { className: "v", text: c.readyPods + " / " + c.desiredPods }), podBar(c)),
       el("div", null, el("div", { className: "k", text: "Backups" }), el("div", { className: "v", text: backup })),
       el("div", null, el("div", { className: "k", text: "Age" }), el("div", { className: "v", text: KV.dash(c.age) }))

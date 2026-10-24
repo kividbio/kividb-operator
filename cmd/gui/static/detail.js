@@ -47,6 +47,209 @@
     for (var i = 0; i < live.length; i++) if (live[i].pod === pod) return live[i];
     return null;
   }
+
+  // ---------- sharded clusters ----------
+
+  var TOTAL_SLOTS = 16384;
+  function sharded() {
+    return !!(detail && detail.shards);
+  }
+  function shardOfPod(name) {
+    var pods = (detail && detail.pods) || [];
+    for (var i = 0; i < pods.length; i++) if (pods[i].name === name && pods[i].shard != null) return pods[i].shard;
+    return null;
+  }
+  // The pod a pod's offset is compared with: its shard's master in a
+  // sharded cluster, the master otherwise.
+  function masterNameFor(pod) {
+    if (!sharded()) {
+      var m = masterLive();
+      return (m && m.pod) || (detail && detail.masterPod);
+    }
+    var s = shardOfPod(pod);
+    var shards = detail.shardStatus || [];
+    for (var i = 0; i < shards.length; i++) if (shards[i].index === s) return shards[i].masterPod;
+    return null;
+  }
+  function shardMasters() {
+    return ((detail && detail.shardStatus) || [])
+      .map(function (s) {
+        return s.masterPod;
+      })
+      .filter(Boolean);
+  }
+  function parseRange(r) {
+    var p = String(r).split("-");
+    var lo = parseInt(p[0], 10),
+      hi = p.length > 1 ? parseInt(p[1], 10) : lo;
+    return isFinite(lo) && isFinite(hi) ? [lo, hi] : null;
+  }
+  function slotCount(ranges) {
+    var n = 0;
+    (ranges || []).forEach(function (r) {
+      var x = parseRange(r);
+      if (x) n += x[1] - x[0] + 1;
+    });
+    return n;
+  }
+  function shardColor(i) {
+    return KV.seriesColor(i);
+  }
+  function rebalance() {
+    return detail && detail.cluster && detail.cluster.rebalance;
+  }
+
+  // The 16,384 slots, coloured by the shard that owns them; the slots of
+  // the move under way stripe.
+  function slotMap() {
+    var segs = [];
+    (detail.shardStatus || []).forEach(function (s) {
+      (s.slots || []).forEach(function (r) {
+        var x = parseRange(r);
+        if (x) segs.push({ lo: x[0], hi: x[1], shard: s.index });
+      });
+    });
+    var rb = rebalance();
+    var moving = [];
+    if (rb && rb.current) {
+      (rb.current.slots || []).forEach(function (r) {
+        var x = parseRange(r);
+        if (x) moving.push(x);
+      });
+    }
+    segs.sort(function (a, b) {
+      return a.lo - b.lo;
+    });
+    var bar = el("div", { className: "slotmap-bar" });
+    var at = 0;
+    function gap(to) {
+      if (to > at) bar.appendChild(el("span", { style: "flex:" + (to - at) + " 0 0", title: "slots " + at + "-" + (to - 1) + ": no master" }));
+    }
+    // Cut each shard's ranges where the moving slots begin and end.
+    var cut = [];
+    segs.forEach(function (g) {
+      var points = [g.lo, g.hi + 1];
+      moving.forEach(function (m) {
+        if (m[0] > g.lo && m[0] <= g.hi) points.push(m[0]);
+        if (m[1] + 1 > g.lo && m[1] + 1 <= g.hi) points.push(m[1] + 1);
+      });
+      points.sort(function (a, b) {
+        return a - b;
+      });
+      for (var i = 0; i + 1 < points.length; i++) if (points[i + 1] > points[i]) cut.push({ lo: points[i], hi: points[i + 1] - 1, shard: g.shard });
+    });
+    cut.forEach(function (g) {
+      gap(g.lo);
+      var isMoving = moving.some(function (m) {
+        return m[0] <= g.hi && m[1] >= g.lo;
+      });
+      bar.appendChild(
+        el("span", {
+          className: isMoving ? "moving" : "",
+          style: "flex:" + (g.hi - g.lo + 1) + " 0 0;background:" + shardColor(g.shard),
+          title: "shard " + g.shard + ": slots " + g.lo + (g.hi > g.lo ? "-" + g.hi : "") + (isMoving ? " (moving)" : ""),
+        })
+      );
+      at = g.hi + 1;
+    });
+    gap(TOTAL_SLOTS);
+    var legend = el("div", { className: "slotmap-legend" });
+    (detail.shardStatus || []).forEach(function (s) {
+      legend.appendChild(el("span", null, el("i", { style: "background:" + shardColor(s.index) }), document.createTextNode("shard " + s.index + " · " + KV.fmtNum(slotCount(s.slots)))));
+    });
+    return el(
+      "div",
+      { className: "slotmap" },
+      bar,
+      el("div", { className: "slotmap-axis" }, el("span", { text: "0" }), el("span", { text: "slots" }), el("span", { text: "16383" })),
+      legend
+    );
+  }
+
+  function rebalanceBanner(rb) {
+    var head = el("div", null, el("b", { text: "Changing from " + rb.from + " to " + rb.to + " shards" }), document.createTextNode(" · " + (rb.phase === "MovingSlots" ? "moving slots" : "waiting for the new shards' pods")));
+    var box = el("div", { className: "rebalance" }, head);
+    var pending = rb.pending || [];
+    if (rb.current) {
+      box.appendChild(
+        el("div", {
+          text: "Now: " + KV.fmtNum(rb.current.slotCount) + " slots from shard " + rb.current.fromShard + " to shard " + rb.current.toShard + (rb.current.startTime ? ", started " + KV.fmtAgo(rb.current.startTime) : ""),
+        })
+      );
+    }
+    var done = rb.movesDone || 0;
+    var total = done + (rb.current ? 1 : 0) + pending.length;
+    box.appendChild(el("div", { className: "muted", text: done + " of " + total + (pending.length >= 16 ? "+" : "") + " moves done" }));
+    box.appendChild(el("div", { className: "progress" }, el("span", { style: "width:" + (total ? Math.round((100 * done) / total) : 0) + "%" })));
+    if (rb.lastError) box.appendChild(el("div", { className: "err", text: rb.lastError + (rb.lastErrorTime ? " (" + KV.fmtAgo(rb.lastErrorTime) + ")" : "") }));
+    return box;
+  }
+
+  function renderShardTopology(box) {
+    var rb = rebalance();
+    var formed = (detail.cluster && detail.cluster.shards) || 0;
+    if (rb) box.appendChild(rebalanceBanner(rb));
+    box.appendChild(slotMap());
+    var grid = el("div", { className: "shard-grid" });
+    var byShard = {};
+    (detail.pods || []).forEach(function (p) {
+      if (p.shard == null) return;
+      (byShard[p.shard] = byShard[p.shard] || []).push(p);
+    });
+    var shards = (detail.shardStatus || []).slice();
+    Object.keys(byShard).forEach(function (k) {
+      var i = Number(k);
+      if (
+        !shards.some(function (s) {
+          return s.index === i;
+        })
+      )
+        shards.push({ index: i });
+    });
+    shards.sort(function (a, b) {
+      return a.index - b.index;
+    });
+    shards.forEach(function (s) {
+      var pods = byShard[s.index] || [];
+      var master = null;
+      var replicas = [];
+      pods.forEach(function (p) {
+        if (p.name === s.masterPod) master = p;
+        else replicas.push(p);
+      });
+      var ml = master ? liveFor(master.name) : null;
+      var removing = rb && s.index >= rb.to;
+      var tag = removing ? "being removed" : rb && s.index >= formed ? "new" : "";
+      var ready = pods.filter(function (p) {
+        return p.ready;
+      }).length;
+      var head = el(
+        "div",
+        { className: "shard-head" },
+        el("span", null, el("span", { className: "dot", style: "background:" + shardColor(s.index) }), document.createTextNode("Shard " + s.index)),
+        el("span", { className: "badge " + (tag ? "phase-yellow" : ready === pods.length && pods.length ? "phase-green" : "phase-red"), text: tag || ready + " / " + pods.length + " ready" })
+      );
+      var n = slotCount(s.slots);
+      var card = el(
+        "div",
+        { className: "shard-card" + (removing ? " removing" : "") },
+        head,
+        el("div", { className: "shard-slots", title: (s.slots || []).join(" "), text: KV.fmtNum(n) + " slots" + (n ? " · " + (s.slots || []).join(" ") : "") })
+      );
+      card.appendChild(master ? topoNode(master, ml, true) : el("p", { className: "muted", text: "No master owning slots." }));
+      if (replicas.length) {
+        var reps = el("div", { className: "shard-replicas" });
+        replicas.forEach(function (p) {
+          var l = liveFor(p.name);
+          var lag = ml && l && !l.error ? lagInfo(Math.max(0, ml.replicationOffset - l.replicationOffset)) : lagInfo(null);
+          reps.appendChild(topoNode(p, l, false, lag));
+        });
+        card.appendChild(reps);
+      }
+      grid.appendChild(card);
+    });
+    box.appendChild(grid);
+  }
   function masterLive() {
     for (var i = 0; i < live.length; i++) if (live[i].role === "master") return live[i];
     return detail ? liveFor(detail.masterPod) : null;
@@ -71,20 +274,41 @@
     var_.textContent = d.variant;
     var_.classList.toggle("hidden", !d.variant || d.variant === "standard");
 
-    KV.qs("w-master").textContent = KV.dash(d.masterPod);
-    KV.qs("w-failover").textContent = d.lastFailoverTime ? "last failover " + KV.fmtAgo(d.lastFailoverTime) : "no failover yet";
+    var isSharded = !!d.shards;
+    var replicasText = "1 master + " + d.replicas + (d.replicas === 1 ? " replica" : " replicas");
+    KV.qs("w-master-label").textContent = isSharded ? "Shards" : "Master";
     KV.qs("w-pods").textContent = d.readyPods + " / " + d.desiredPods;
-    KV.qs("w-replicas").textContent = "1 master + " + d.replicas + (d.replicas === 1 ? " replica" : " replicas");
+    if (isSharded) {
+      var cl = d.cluster || {};
+      KV.qs("w-master").textContent = d.shards + (cl.rebalance ? " (from " + cl.rebalance.from + ")" : "");
+      KV.qs("w-failover").textContent = Number(cl.slotsAssigned || 0).toLocaleString() + " slots · state " + KV.dash(cl.state);
+      KV.qs("w-replicas").textContent = d.shards + " × (" + replicasText + ")";
+      KV.qs("w-keys-sub").textContent = "on the shard masters";
+      KV.qs("topo-title").textContent = "Shards";
+      KV.qs("topo-note").textContent = "Each shard is a master and its replicas; lag is against the shard's master.";
+    } else {
+      KV.qs("w-master").textContent = KV.dash(d.masterPod);
+      KV.qs("w-failover").textContent = d.lastFailoverTime ? "last failover " + KV.fmtAgo(d.lastFailoverTime) : "no failover yet";
+      KV.qs("w-replicas").textContent = replicasText;
+    }
+    ["btn-shard-down", "btn-shard-up"].forEach(function (id) {
+      KV.qs(id).classList.toggle("hidden", !isSharded);
+    });
+    KV.qs("btn-scale-down").title = isSharded ? "Remove a replica from every shard" : "Remove a replica";
+    KV.qs("btn-scale-up").title = isSharded ? "Add a replica to every shard" : "Add a replica";
     KV.qs("w-age").textContent = "cluster age " + KV.dash(d.age);
 
     setFacts("spec-facts", [
+      ["Shards", d.shards ? d.shards + " × " + (d.replicas + 1) + " pods" : undefined],
       ["Image", d.image + (d.imageDefault ? " (default)" : "")],
       ["Variant", d.variant],
       ["Agent image", d.agentImage || "operator default"],
       ["Port", d.port],
       ["Storage", d.storageSize + (d.storageClassName ? " · " + d.storageClassName : "")],
-      ["Master service", d.masterServiceType || "ClusterIP"],
-      ["Replica service", d.replicaServiceType || "ClusterIP"],
+      ["Master service", d.shards ? undefined : d.masterServiceType || "ClusterIP"],
+      ["Replica service", d.shards ? undefined : d.replicaServiceType || "ClusterIP"],
+      ["Cluster epoch", d.cluster ? d.cluster.currentEpoch : undefined],
+      ["Known nodes", d.cluster ? d.cluster.knownNodes : undefined],
       ["Config", d.configRef],
       ["ACL", d.aclConfigRef],
       ["Generation observed", d.observedGeneration],
@@ -93,7 +317,7 @@
     fillTable(
       "services-table",
       (d.services || []).map(function (s) {
-        return [td(s.name, "mono"), td(s.type), td(s.clusterIP, "mono"), td(s.externalIP, "mono"), td((s.ports || []).join(", "))];
+        return [td(s.name, "mono"), td(s.type + (s.kind ? " · " + s.kind : "")), td(s.clusterIP, "mono"), td(s.externalIP, "mono"), td((s.ports || []).join(", "))];
       }),
       5,
       "No Services yet."
@@ -127,7 +351,16 @@
         return [
           td(s.name, "mono"),
           ph,
-          td((s.sourcePod || "") + (s.sourceRole ? " (" + s.sourceRole + ")" : "")),
+          s.shards && s.shards.length
+            ? el("td", {
+                title: s.shards
+                  .map(function (x) {
+                    return "shard " + x.index + ": " + (x.sourcePod || "?") + (x.error ? " (" + x.error + ")" : "");
+                  })
+                  .join("\n"),
+                text: s.shards.length + " shards" + (s.sourceRole ? " (" + s.sourceRole + "s)" : ""),
+              })
+            : td((s.sourcePod || "") + (s.sourceRole ? " (" + s.sourceRole + ")" : "")),
           td(s.sizeBytes ? KV.fmtBytes(s.sizeBytes) : null),
           td(s.durationMs ? (s.durationMs / 1000).toFixed(1) + " s" : null),
           td(s.completionTime ? KV.fmtAgo(s.completionTime) : s.error),
@@ -158,7 +391,7 @@
       var cur = sel.value;
       KV.clear(sel);
       (detail.pods || []).forEach(function (p) {
-        sel.appendChild(el("option", { value: p.name, text: p.name + (p.role ? " · " + p.role : "") }));
+        sel.appendChild(el("option", { value: p.name, text: p.name + (p.role ? " · " + p.role : "") + (p.shard != null ? " · shard " + p.shard : "") }));
       });
       if (cur) sel.value = cur;
       else if (detail.masterPod) sel.value = detail.masterPod;
@@ -199,10 +432,10 @@
         var ready = el("td", null, el("span", { className: "badge " + (p.ready ? "phase-green" : "phase-red"), text: p.ready ? "yes" : "no" }));
         return [
           td(p.name, "mono"),
-          td(p.role),
+          td((p.role || "") + (p.shard != null ? " · shard " + p.shard : "")),
           ready,
           td(p.phase),
-          td(Number(l ? l.replicationOffset : p.replicationOffset || 0).toLocaleString(), "mono"),
+          td(Number(l && l.replicationOffset != null ? l.replicationOffset : p.replicationOffset || 0).toLocaleString(), "mono"),
           td(l && l.usedMemory ? KV.fmtBytes(l.usedMemory) : null),
           td(l && l.keys != null ? KV.fmtNum(l.keys) : null),
           td(p.nodeName, "mono"),
@@ -237,7 +470,7 @@
     }
     row("memory", l && l.usedMemory ? KV.fmtBytes(l.usedMemory) : "–");
     row("keys", l && l.keys != null ? KV.fmtNum(l.keys) : "–");
-    row("offset", Number(l ? l.replicationOffset : p.replicationOffset || 0).toLocaleString());
+    row("offset", Number(l && l.replicationOffset != null ? l.replicationOffset : p.replicationOffset || 0).toLocaleString());
     row("node", KV.dash(p.nodeName));
     return el(
       "div",
@@ -252,6 +485,11 @@
     var box = KV.clear(KV.qs("topology"));
     if (!detail || !(detail.pods || []).length) {
       box.appendChild(el("span", { className: "muted", text: "No pods yet." }));
+      return;
+    }
+    if (sharded()) {
+      box.classList.add("is-sharded");
+      renderShardTopology(box);
       return;
     }
     var m = masterLive();
@@ -310,6 +548,15 @@
       }
     });
     KV.qs("w-mem").textContent = haveMem ? KV.fmtBytes(mem) : "–";
+    if (sharded()) {
+      var keys = null;
+      shardMasters().forEach(function (name) {
+        var l = liveFor(name);
+        if (l && l.keys != null) keys = (keys || 0) + Number(l.keys);
+      });
+      KV.qs("w-keys").textContent = keys == null ? "–" : KV.fmtNum(keys);
+      return;
+    }
     var m = masterLive();
     KV.qs("w-keys").textContent = m && m.keys != null ? KV.fmtNum(m.keys) : "–";
   }
@@ -321,12 +568,14 @@
   }
 
   function lagSeries(pods, masterName) {
-    var mpts = (pods[masterName] && pods[masterName].replOffset) || [];
     var out = [];
+    var masters = sharded() ? shardMasters() : [masterName];
     Object.keys(pods)
       .sort()
       .forEach(function (name) {
-        if (name === masterName) return;
+        if (masters.indexOf(name) >= 0) return;
+        var mine = sharded() ? masterNameFor(name) : masterName;
+        var mpts = (pods[mine] && pods[mine].replOffset) || [];
         var rpts = pods[name].replOffset || [];
         var pts = [];
         var j = 0;
@@ -472,7 +721,13 @@
       title: "Restart " + pod + "?",
       message:
         "Kubernetes deletes the pod and the StatefulSet recreates it." +
-        (detail && pod === detail.masterPod ? " It is the master: the operator fails over to a replica first if one is ready." : ""),
+        (sharded()
+          ? shardMasters().indexOf(pod) >= 0
+            ? " It is shard " + shardOfPod(pod) + "'s master: a replica takes over once the node timeout passes, and writes in that moment can be lost. To move the role first, promote the replica."
+            : ""
+          : detail && pod === detail.masterPod
+          ? " It is the master: the operator fails over to a replica first if one is ready."
+          : ""),
       confirmText: "Restart pod",
     }).then(function (ok) {
       if (ok) act(KV.sendJSON("DELETE", base() + "/pods/" + encodeURIComponent(pod)), "Restarting " + pod);
@@ -487,7 +742,9 @@
     if (pod) {
       KV.dialog({
         title: "Promote " + pod + "?",
-        message: "It becomes the master and the current master becomes its replica. Writes that reach the old master in the moment between the two steps are not carried over.",
+        message: sharded()
+          ? "It takes over shard " + shardOfPod(pod) + " with CLUSTER FAILOVER: the shard's master pauses writes until it has caught up, so nothing is lost, and becomes its replica."
+          : "It becomes the master and the current master becomes its replica. Writes that reach the old master in the moment between the two steps are not carried over.",
         confirmText: "Promote",
       }).then(function (ok) {
         if (ok) go(pod);
@@ -503,12 +760,13 @@
     }
     KV.dialog({
       title: "Promote a replica",
-      message: "The chosen replica becomes the master; the current master becomes its replica.",
+      message: sharded() ? "The chosen replica takes over its shard with CLUSTER FAILOVER; nothing acknowledged is lost." : "The chosen replica becomes the master; the current master becomes its replica.",
       confirmText: "Promote",
       choices: replicas.map(function (p) {
         var l = liveFor(p.name);
-        var lag = m && l && !l.error ? lagInfo(Math.max(0, m.replicationOffset - l.replicationOffset)).text : p.ready ? "" : "not ready";
-        return { value: p.name, label: p.name, note: lag };
+        var ml = sharded() ? liveFor(masterNameFor(p.name)) : m;
+        var lag = ml && l && !l.error ? lagInfo(Math.max(0, ml.replicationOffset - l.replicationOffset)).text : p.ready ? "" : "not ready";
+        return { value: p.name, label: p.name + (p.shard != null ? " · shard " + p.shard : ""), note: lag };
       }),
     }).then(function (pick) {
       if (pick) go(pick);
@@ -522,9 +780,10 @@
       KV.toast("Already at 0 replicas: the master runs alone.", "info");
       return;
     }
+    var shards = detail.shards || 1;
     KV.dialog({
-      title: (delta > 0 ? "Add" : "Remove") + " a replica?",
-      message: "spec.replicas goes from " + detail.replicas + " to " + n + ": " + (n + 1) + " pods in all." + (delta < 0 ? " The highest-numbered replica is removed; its volume stays." : ""),
+      title: (delta > 0 ? "Add" : "Remove") + " a replica" + (detail.shards ? " in every shard?" : "?"),
+      message: "spec.replicas goes from " + detail.replicas + " to " + n + ": " + shards * (n + 1) + " pods in all." + (delta < 0 ? " The highest-numbered replica" + (detail.shards ? " of each shard" : "") + " is removed; its volume stays." : ""),
       confirmText: delta > 0 ? "Add replica" : "Remove replica",
     }).then(function (ok) {
       if (ok)
@@ -534,7 +793,45 @@
     });
   }
 
+  function scaleShards(delta) {
+    if (!detail || !detail.shards) return;
+    var n = detail.shards + delta;
+    if (n < 1) {
+      KV.toast("A sharded cluster keeps at least one shard.", "info");
+      return;
+    }
+    if (rebalance()) {
+      KV.toast("The shard count is already changing; you can still change the target.", "info");
+    }
+    KV.dialog({
+      title: (delta > 0 ? "Add" : "Remove") + " a shard?",
+      message:
+        "spec.shards goes from " +
+        detail.shards +
+        " to " +
+        n +
+        ". " +
+        (delta > 0
+          ? "The new shard's pods start, join, and the other shards each give it part of their slots, " + Math.round(TOTAL_SLOTS / n) + " in all."
+          : "Shard " + (n) + " gives all its slots to the others, then its pods go. Its volumes stay.") +
+        " Slots move one move at a time without clients seeing ASK; rolling restarts wait until it is done.",
+      confirmText: delta > 0 ? "Add shard" : "Remove shard",
+      danger: delta < 0,
+    }).then(function (ok) {
+      if (ok)
+        act(KV.sendJSON("POST", base() + "/scale", { shards: n }), function (j) {
+          return "Changing to " + j.shards + " shards (" + j.desiredPods + " pods)";
+        });
+    });
+  }
+
   function wireActions() {
+    KV.qs("btn-shard-up").addEventListener("click", function () {
+      scaleShards(1);
+    });
+    KV.qs("btn-shard-down").addEventListener("click", function () {
+      scaleShards(-1);
+    });
     KV.qs("btn-scale-up").addEventListener("click", function () {
       scale(1);
     });
@@ -549,9 +846,16 @@
         KV.toast("Backups are off for this cluster: set spec.snapshotConfigRef first.", "info");
         return;
       }
-      KV.dialog({ title: "Take a snapshot now?", message: "The master's data is saved and uploaded to the configured object store.", confirmText: "Take snapshot" }).then(function (ok) {
+      KV.dialog({
+        title: "Take a snapshot now?",
+        message: sharded()
+          ? "A backup run starts now: every shard is saved and uploaded under one run, with a manifest. It shows under Backups when done."
+          : "The master's data is saved and uploaded to the configured object store.",
+        confirmText: "Take snapshot",
+      }).then(function (ok) {
         if (ok)
           act(KV.sendJSON("POST", base() + "/snapshot", {}), function (j) {
+            if (j.job) return "Backup run started (" + j.job + ")";
             return "Snapshot uploaded" + (j.objectKey ? ": " + j.objectKey : "");
           });
       });
@@ -559,7 +863,9 @@
     KV.qs("btn-restart").addEventListener("click", function () {
       KV.dialog({
         title: "Rolling restart?",
-        message: "Creates a KividbDbOps that restarts the pods one at a time: replicas first, then the master after a failover.",
+        message: sharded()
+          ? "Creates a KividbDbOps that restarts the pods one at a time across the shards: replicas first, then each shard's master once a replica has taken over."
+          : "Creates a KividbDbOps that restarts the pods one at a time: replicas first, then the master after a failover.",
         confirmText: "Start restart",
       }).then(function (ok) {
         if (ok) act(KV.sendJSON("POST", base() + "/restart", {}), "Rolling restart started");

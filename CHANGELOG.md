@@ -70,6 +70,12 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   `status.cluster.rebalance`. `status.cluster.shards` is the count the
   slots are spread over. Removed shards' PVCs are kept. The agent has
   `/cluster/migration/import` and `/cluster/migration/status`.
+- **The console shows sharded clusters.**
+  - **Shards:** one card per shard, with its slots, master and replicas, and each replica's lag against its own shard's master.
+  - **Slot map:** the slots coloured by shard; the ones moving are striped.
+  - **Rebalance:** progress while the shard count changes.
+  - **Tiles:** slots and `cluster_state`.
+  - **Actions:** **+/− Shard**. **Promote** runs `CLUSTER FAILOVER` on the replica. **Take snapshot** starts a backup run of every shard, as a Job from the backup CronJob, so the GUI's ClusterRole gains `create` on `jobs`.
 - **Sharded clusters form and look after themselves.** The operator
   introduces the nodes (`CLUSTER MEET`), assigns the slots evenly across the
   shards once every pod is up, puts each shard's replicas behind its

@@ -14,7 +14,8 @@
 #   - cronjobs.batch
 #   - storageclasses.storage.k8s.io     (the new-cluster form's choices)
 # and, for its writes (refused unless GUI auth is configured), creates,
-# patches and deletes kividbclusters, creates kividbdbops and deletes pods.
+# patches and deletes kividbclusters, creates kividbdbops, deletes pods,
+# and creates Jobs (a sharded cluster's backup run, from its CronJob).
 # It never calls Watch (it polls every 10s instead of maintaining a
 # long-lived watch/informer), and it never touches secrets in any group.
 # "watch" is still granted below since it's a harmless superset and keeps
@@ -65,6 +66,10 @@ rules:
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
     verbs: ["get", "list", "watch"]
+  # A sharded cluster's "Take snapshot": a Job from its backup CronJob.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

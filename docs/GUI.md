@@ -77,6 +77,27 @@ makes the current master its replica, and the operator then moves the
 replicas. Writes that reach the old master in the moment between those two
 steps are not carried over.
 
+**A sharded cluster** (`spec.shards`) gets its own Overview:
+
+- **Shards**: one card per shard, each with the slots it owns, its master
+  and its replicas, each replica's lag against its own shard's master. A
+  shard added or being removed by a change of the shard count is marked.
+- **Slot map**: the 16,384 slots, coloured by the shard that owns them.
+  The slots being moved stripe.
+- **Rebalance**: while the shard count changes, the move under way, how
+  many are done and the last error.
+- **Tiles and dashboard**: the shard count, the slots served and
+  `cluster_state`; keys added up over the shard masters.
+- **Actions**:
+  - **+ Shard** and **− Shard** change `spec.shards`.
+  - **+/− Replica** changes the replicas of every shard.
+  - **Promote** a replica: it takes over its shard with `CLUSTER
+    FAILOVER`, and no acknowledged write is lost.
+  - **Take snapshot** starts a backup run of every shard: a Job from the
+    backup CronJob.
+- **Services**: the cluster's, the replicas', each shard's and each
+  shard's headless one (not the one per pod).
+
 ### New cluster (`/new`)
 
 <p align="center">
@@ -203,7 +224,8 @@ kubectl -n kividb-operator-system port-forward svc/kividb-operator-gui 8090:8090
 services, events, statefulsets, cronjobs; `get`/`list` on storageclasses
 (the new-cluster form); **`create`, `patch`, `update` and `delete` on
 `kividbclusters`**; **`create` on `kividbdbops`**; **`delete` on pods**;
-**`get` on `pods/log`**. Never `secrets` via the API clients.
+**`get` on `pods/log`**; **`create` on `jobs`** (a sharded cluster's
+snapshot). Never `secrets` via the API clients.
 
 ## Building the image
 
