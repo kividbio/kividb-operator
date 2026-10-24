@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,5 +233,39 @@ func TestRetargetHalfWay(t *testing.T) {
 	// Shard 3 may own slots by now: it stays until it has given them away.
 	if rb := rebalanceOf(c); rb.From != 4 || rb.To != 3 || shardCount(c) != 4 || targetShards(c) != 3 {
 		t.Fatalf("%+v, %d shards", rb, shardCount(c))
+	}
+}
+
+// A new shard's -1 pod can come up before its -0: it is not taken for the
+// shard's master in the meantime (and then replaced, which looked like a
+// failover).
+func TestNewShardMasterIsItsFirstPod(t *testing.T) {
+	h := newFormingHarness(t, 2, 1)
+	for i := 0; i < 4; i++ {
+		h.pass()
+	}
+	h.c.Spec.Shards = int32p(3)
+	h.r.startRebalance(h.c)
+	ctx := context.Background()
+	if err := h.r.Create(ctx, shardedPod(h.c, 2, 1, "10.0.2.2")); err != nil {
+		t.Fatal(err)
+	}
+	h.engine.add(nodeID("s-2-1"), "10.0.2.2")
+	observed := h.r.observeShardedPods(ctx, h.c, h.pods())
+	if m := buildView(h.c, observed).masters[2]; m != nil {
+		t.Fatalf("shard 2's master is %s before its -0 is up", m.pod.Name)
+	}
+	if err := h.r.Create(ctx, shardedPod(h.c, 2, 0, "10.0.2.1")); err != nil {
+		t.Fatal(err)
+	}
+	h.engine.add(nodeID("s-2-0"), "10.0.2.1")
+	observed = h.r.observeShardedPods(ctx, h.c, h.pods())
+	if m := buildView(h.c, observed).masters[2]; m == nil || m.pod.Name != "s-2-0" {
+		t.Fatalf("shard 2's master: %v", m)
+	}
+	h.reshard(3, 20)
+	h.checkSpread(3)
+	if h.c.Status.LastFailoverTime != nil || strings.Contains(events(h.r), "ShardFailover") {
+		t.Fatal("adding a shard was recorded as a failover")
 	}
 }
