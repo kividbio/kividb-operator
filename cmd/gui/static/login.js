@@ -11,7 +11,11 @@
     var params = new URLSearchParams(window.location.search);
     var next = params.get("next");
     if (next && next.charAt(0) === "/" && next.slice(0, 2) !== "//") KV.qs("next").value = next;
+    var USER_KEY = "kividb-gui-login-user";
     var err = MESSAGES[params.get("error")];
+    try {
+      if (err && sessionStorage.getItem(USER_KEY)) KV.qs("username").value = sessionStorage.getItem(USER_KEY);
+    } catch (e) {}
     if (err) {
       var box = KV.qs("login-error");
       box.textContent = err;
@@ -19,6 +23,9 @@
       KV.qs("password").focus();
     }
     KV.qs("login-form").addEventListener("submit", function () {
+      try {
+        sessionStorage.setItem(USER_KEY, KV.qs("username").value);
+      } catch (e) {}
       var b = KV.qs("login-submit");
       b.disabled = true;
       b.textContent = "Signing in…";

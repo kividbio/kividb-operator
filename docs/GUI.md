@@ -125,6 +125,10 @@ Default engine image when `spec.image` is empty:
 Set both `GUI_AUTH_USERNAME` and `GUI_AUTH_PASSWORD` to require signing in
 on every route except `/healthz`, the sign-in page and the static assets.
 
+<p align="center">
+  <img src="../assets/gui-login.png" alt="The sign-in page" width="560">
+</p>
+
 In a browser you sign in on the GUI's own page (`/login`), which sets a
 session cookie for 12 hours: HttpOnly, SameSite=Lax, and Secure when the GUI
 is reached over HTTPS (directly, or through a proxy that sets
