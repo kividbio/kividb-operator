@@ -543,3 +543,32 @@ func TestColdRestartReintroducesEveryNode(t *testing.T) {
 		}
 	}
 }
+
+// The master's pod goes down first, and only then does a replica take
+// over (what happens when a master is killed): the move is still a
+// failover, though no pass saw both masters.
+func TestFailoverAfterTheMasterWentDown(t *testing.T) {
+	h := newFormingHarness(t, 2, 1)
+	for i := 0; i < 4; i++ {
+		h.pass()
+	}
+	ctx := context.Background()
+	var pod corev1.Pod
+	_ = h.r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "s-0-0"}, &pod)
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+	if err := h.r.Status().Update(ctx, &pod); err != nil {
+		_ = h.r.Update(ctx, &pod)
+	}
+	h.pass()
+	if h.c.Status.Shards[0].MasterPod != "s-0-0" || h.c.Status.Phase != kividbv1alpha1.PhaseDegraded {
+		t.Fatalf("while the master is down: %+v, %s", h.c.Status.Shards[0], h.c.Status.Phase)
+	}
+	old, promoted := h.node("s-0-0"), h.node("s-0-1")
+	promoted.slots, old.slots = old.slots, nil
+	promoted.master, old.master = "", promoted.id
+	_ = events(h.r)
+	h.pass()
+	if h.c.Status.Shards[0].MasterPod != "s-0-1" || h.c.Status.LastFailoverTime == nil || !strings.Contains(events(h.r), "ShardFailover") {
+		t.Fatalf("failover not recorded: %+v, %v", h.c.Status.Shards[0], h.c.Status.LastFailoverTime)
+	}
+}

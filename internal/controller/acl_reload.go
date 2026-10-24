@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strconv"
+	"strings"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
@@ -104,6 +105,14 @@ func (r *KividbClusterReconciler) reconcileAclReload(ctx context.Context, c *kiv
 		}
 
 		reloaded, err := r.Agent.AclReload(ctx, p.Status.PodIP, fileHash)
+		if err != nil && strings.Contains(err.Error(), "LOADING") {
+			// A replica loading the dataset from its master answers
+			// LOADING to everything; it reads the file anyway, and is
+			// stamped on a later pass. Not worth a warning: a burst of
+			// them uses up the Events the cluster may record.
+			log.V(1).Info("pod is still loading its dataset; ACL reload later", "pod", p.Name)
+			continue
+		}
 		if err != nil {
 			log.Error(err, "ACL reload failed", "pod", p.Name)
 			r.event(c, corev1.EventTypeWarning, "AclReloadFailed", "reloading the ACL file on %s: %v", p.Name, err)

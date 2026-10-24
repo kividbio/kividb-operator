@@ -504,5 +504,24 @@ func (r *KividbClusterReconciler) updateShardedStatus(ctx context.Context, c *ki
 		cond.Message = topoErr.Error()
 	}
 	setCondition(&c.Status.Conditions, cond)
-	return phase, r.Status().Update(ctx, c)
+	return phase, r.writeStatus(ctx, c)
+}
+
+// writeStatus writes c's status. The operator is its only writer, so a
+// conflict (the object read from the cache was a version behind) is
+// settled by writing the same status onto the latest version.
+func (r *KividbClusterReconciler) writeStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster) error {
+	err := r.Status().Update(ctx, c)
+	for try := 0; try < 3 && apierrors.IsConflict(err); try++ {
+		time.Sleep(time.Duration(try+1) * 100 * time.Millisecond) // the cache catching up
+		var latest kividbv1alpha1.KividbCluster
+		if err = r.Get(ctx, client.ObjectKeyFromObject(c), &latest); err != nil {
+			return err
+		}
+		latest.Status = *c.Status.DeepCopy()
+		if err = r.Status().Update(ctx, &latest); err == nil {
+			c.ResourceVersion = latest.ResourceVersion
+		}
+	}
+	return err
 }

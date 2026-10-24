@@ -393,6 +393,14 @@ func shardedStatus(c *kividbv1alpha1.KividbCluster, pods []*shardPod) (kividbv1a
 		shards[s].MasterNodeID = me.ID
 		shards[s].Slots = me.Slots
 	}
+	// A shard whose master is down keeps its last known master, until
+	// another pod takes over: that is how a failover is told from an
+	// outage (noteShardFailovers), and where the slots were.
+	for _, prev := range c.Status.Shards {
+		if i := int(prev.Index); i < len(shards) && shards[i].MasterPod == "" && v.masters[prev.Index] == nil {
+			shards[i].MasterPod, shards[i].MasterNodeID, shards[i].Slots = prev.MasterPod, prev.MasterNodeID, prev.Slots
+		}
+	}
 	c.Status.Shards = shards
 	c.Status.MasterPod = ""
 
@@ -446,7 +454,7 @@ func shardedStatus(c *kividbv1alpha1.KividbCluster, pods []*shardPod) (kividbv1a
 		return kividbv1alpha1.PhaseRebalancing, "Rebalancing", msg
 	}
 	for _, sh := range shards {
-		if sh.MasterPod == "" {
+		if v.masters[sh.Index] == nil {
 			return kividbv1alpha1.PhaseDegraded, "ShardWithoutMaster", fmt.Sprintf("shard %d has no master owning slots", sh.Index)
 		}
 	}

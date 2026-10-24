@@ -399,7 +399,9 @@ spec:
 - **Hostnames and IPv4 addresses** only.
 - **Everyone sees the outside address,** clients inside Kubernetes too,
   since a node announces one address. Inside clients then go through the
-  load balancer.
+  load balancer. If you restrict it with `loadBalancerSourceRanges`, allow
+  the pod network as well: kube-proxy applies the ranges to traffic from
+  inside the cluster too, and inside clients would time out.
 - **The operator never creates, changes or deletes these Services.** It
   reads them, and reconciles when one changes. Deleting one puts the
   pod's DNS name back.
