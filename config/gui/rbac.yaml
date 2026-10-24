@@ -12,6 +12,9 @@
 #   - events                            (core)
 #   - statefulsets.apps
 #   - cronjobs.batch
+#   - storageclasses.storage.k8s.io     (the new-cluster form's choices)
+# and, for its writes (refused unless GUI auth is configured), creates,
+# patches and deletes kividbclusters, creates kividbdbops and deletes pods.
 # It never calls Watch (it polls every 10s instead of maintaining a
 # long-lived watch/informer), and it never touches secrets in any group.
 # "watch" is still granted below since it's a harmless superset and keeps
@@ -37,7 +40,7 @@ metadata:
 rules:
   - apiGroups: ["kividb.io"]
     resources: ["kividbclusters"]
-    verbs: ["get", "list", "watch", "patch", "update", "delete"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   - apiGroups: ["kividb.io"]
     resources: ["kividbsnapshotconfigs", "kividbsnapshots", "kividbdbops"]
     verbs: ["get", "list", "watch"]
@@ -53,6 +56,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch"]

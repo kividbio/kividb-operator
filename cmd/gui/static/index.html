@@ -4,30 +4,66 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KiviDB Clusters</title>
-<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
-<link rel="stylesheet" href="/static/style.css?v=040">
+<link rel="icon" type="image/png" href="/static/kividb-logo.png">
+<link rel="stylesheet" href="/static/style.css?v=053">
+<script src="/static/common.js?v=053"></script>
 </head>
 <body data-page="dashboard">
 <header class="topbar">
   <div class="topbar-brand">
-    <img src="/static/kividb-logo.png" alt="KiviDB" class="brand-logo">
-    <h1>KiviDB Clusters</h1>
+    <img src="/static/kividb-logo.png" alt="" class="brand-logo">
+    <h1><a href="/">KiviDB Clusters</a></h1>
   </div>
   <div class="topbar-meta">
-    <span id="refresh-indicator" class="muted">loading&hellip;</span>
+    <span id="refresh-indicator" class="refresh-indicator">loading&hellip;</span>
+    <span id="mode-pill" class="mode-pill"></span>
+    <button type="button" id="theme-toggle" class="icon-btn" aria-label="Switch theme"></button>
   </div>
 </header>
 
 <main>
   <div id="error-banner" class="banner error hidden"></div>
-  <div id="cluster-cards" class="cluster-cards"></div>
-  <p id="empty-state" class="muted hidden">No KividbCluster objects found.</p>
+
+  <section class="tiles" aria-label="Summary">
+    <div class="tile"><div class="label">Clusters</div><div class="value" id="t-clusters">–</div><div class="sub" id="t-pods">–</div></div>
+    <div class="tile good"><div class="label">Healthy</div><div class="value" id="t-healthy">–</div><div class="sub">phase Running</div></div>
+    <div class="tile warn"><div class="label">Needs attention</div><div class="value" id="t-attention">–</div><div class="sub">provisioning, degraded, failing over</div></div>
+    <div class="tile bad"><div class="label">Errors</div><div class="value" id="t-error">–</div><div class="sub">phase Error</div></div>
+    <div class="tile"><div class="label">Memory</div><div class="value" id="t-memory">–</div><div class="sub">all pods</div></div>
+    <div class="tile"><div class="label">Commands / s</div><div class="value" id="t-ops">–</div><div class="sub" id="t-clients">–</div></div>
+  </section>
+
+  <div class="toolbar">
+    <input type="search" id="search" class="search" placeholder="Filter by name, namespace or version" aria-label="Filter clusters">
+    <div class="segmented" id="phase-filter" role="group" aria-label="Filter by health">
+      <button type="button" data-filter="all" class="active">All<span class="count" id="c-all"></span></button>
+      <button type="button" data-filter="healthy">Healthy<span class="count" id="c-healthy"></span></button>
+      <button type="button" data-filter="attention">Attention<span class="count" id="c-attention"></span></button>
+      <button type="button" data-filter="error">Error<span class="count" id="c-error"></span></button>
+    </div>
+    <span class="spacer"></span>
+    <a href="/new" class="btn-primary" id="btn-new" data-write>+ New cluster</a>
+  </div>
+
+  <div id="cluster-cards" class="cluster-cards">
+    <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+  </div>
+  <div id="empty-state" class="empty hidden">
+    <h2>No KiviDB clusters yet</h2>
+    <p>Create one here, or apply a <code>KividbCluster</code> manifest with kubectl.</p>
+    <a href="/new" class="btn-primary" data-write>+ New cluster</a>
+  </div>
+  <div id="no-match" class="empty hidden">
+    <h2>No clusters match</h2>
+    <p>Nothing matches the filter.</p>
+    <button type="button" class="btn-secondary" id="btn-clear-filter">Clear filter</button>
+  </div>
 </main>
 
 <footer>
-  <span class="muted">Management console. Auto-refreshes every 10s. Secrets are never exposed to the browser.</span>
+  <span class="muted">kividb-operator console. Refreshes every 10 s. Secrets never reach the browser.</span>
 </footer>
 
-<script src="/static/app.js?v=040"></script>
+<script src="/static/dashboard.js?v=053"></script>
 </body>
 </html>

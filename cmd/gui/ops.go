@@ -169,6 +169,8 @@ func (s *server) handleAPILiveStatus(w http.ResponseWriter, r *http.Request) {
 		IP                string `json:"ip"`
 		ReplicationOffset int64  `json:"replicationOffset"`
 		MasterHost        string `json:"masterHost,omitempty"`
+		Keys              *int64 `json:"keys,omitempty"`
+		AofEnabled        bool   `json:"aofEnabled"`
 		UsedMemory        string `json:"usedMemory,omitempty"`
 		Error             string `json:"error,omitempty"`
 	}
@@ -193,6 +195,11 @@ func (s *server) handleAPILiveStatus(w http.ResponseWriter, r *http.Request) {
 				rr.Role = string(st.Role)
 				rr.ReplicationOffset = st.ReplicationOffset
 				rr.MasterHost = st.MasterHost
+				rr.AofEnabled = st.AofEnabled
+				if st.KeyCountKnown {
+					keys := st.KeyCount
+					rr.Keys = &keys
+				}
 			}
 			if mem, err := scrapeUsedMemory(r.Context(), p.Status.PodIP); err == nil {
 				rr.UsedMemory = mem

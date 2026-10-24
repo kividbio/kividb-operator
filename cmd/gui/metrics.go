@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,6 +195,92 @@ func (ms *metricsStore) query(namespace, cluster string, from, to int64) map[str
 			Commands:   filterRange(s.Commands, from, to),
 		}
 	}
+	return out
+}
+
+// statsWindow and statsBucket shape the dashboard's sparklines: the last
+// hour, a point a minute. statsFresh is how old a pod's last scrape may be
+// and still count as its current value (a few missed scrapes).
+const (
+	statsWindow = time.Hour
+	statsBucket = time.Minute
+	statsFresh  = 4 * metricsScrapeEvery
+)
+
+// clusterStats sums one cluster's pods for the dashboard, or nil when there
+// is nothing scraped for it yet.
+func (ms *metricsStore) clusterStats(namespace, cluster string, now time.Time) *ClusterStats {
+	prefix := namespace + "/" + cluster + "/"
+	from := now.Add(-statsWindow).UnixMilli()
+	fresh := now.Add(-statsFresh).UnixMilli()
+	bucket := statsBucket.Milliseconds()
+
+	stats := &ClusterStats{}
+	memBuckets := map[int64]float64{}
+	opsBuckets := map[int64]float64{}
+	found := false
+
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	for k, s := range ms.series {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		found = true
+		if n := len(s.Memory); n > 0 && s.Memory[n-1].T >= fresh {
+			stats.MemoryBytes += s.Memory[n-1].V
+		}
+		if n := len(s.Clients); n > 0 && s.Clients[n-1].T >= fresh {
+			stats.Clients += s.Clients[n-1].V
+		}
+		// Memory: the pod's last value in each minute, added across pods.
+		last := map[int64]float64{}
+		for _, pt := range s.Memory {
+			if pt.T >= from {
+				last[pt.T/bucket*bucket] = pt.V
+			}
+		}
+		for b, v := range last {
+			memBuckets[b] += v
+		}
+		// Commands: a counter. Its rate between scrapes, averaged in each
+		// minute; a drop (a restart) is no rate rather than a negative one.
+		sum := map[int64]float64{}
+		cnt := map[int64]float64{}
+		for i := 1; i < len(s.Commands); i++ {
+			a, b := s.Commands[i-1], s.Commands[i]
+			if b.T < from || b.T <= a.T || b.V < a.V {
+				continue
+			}
+			rate := (b.V - a.V) / (float64(b.T-a.T) / 1000)
+			k := b.T / bucket * bucket
+			sum[k] += rate
+			cnt[k]++
+			if i == len(s.Commands)-1 && b.T >= fresh {
+				stats.OpsPerSec += rate
+			}
+		}
+		for k, v := range sum {
+			opsBuckets[k] += v / cnt[k]
+		}
+	}
+	if !found {
+		return nil
+	}
+	stats.Memory = sortedPoints(memBuckets)
+	stats.Ops = sortedPoints(opsBuckets)
+	return stats
+}
+
+func sortedPoints(m map[int64]float64) []metricPoint {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]metricPoint, 0, len(m))
+	for t, v := range m {
+		out = append(out, metricPoint{T: t, V: v})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].T < out[j].T })
 	return out
 }
 

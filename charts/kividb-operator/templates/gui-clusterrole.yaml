@@ -17,6 +17,7 @@ rules:
       - get
       - list
       - watch
+      - create
       - patch
       - update
       - delete
@@ -36,6 +37,13 @@ rules:
       - kividbdbops
     verbs:
       - create
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+    verbs:
+      - get
+      - list
   - apiGroups:
       - apps
     resources:

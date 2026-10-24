@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -81,6 +82,14 @@ func summarizeCluster(c *kividbv1alpha1.KividbCluster) ClusterSummary {
 	}
 
 	created := c.CreationTimestamp.Time
+	image, imageDefault := c.Spec.Image, false
+	if image == "" {
+		image, imageDefault = defaultKividbImage, true
+	}
+	variant := string(c.Spec.Variant)
+	if variant == "" {
+		variant = string(kividbv1alpha1.VariantStandard)
+	}
 
 	// BackupLastSuccess/BackupLastError are deliberately left unset here:
 	// they'd require listing KividbSnapshot objects per cluster, which the
@@ -91,6 +100,11 @@ func summarizeCluster(c *kividbv1alpha1.KividbCluster) ClusterSummary {
 		Name:              c.Name,
 		Phase:             string(c.Status.Phase),
 		MasterPod:         c.Status.MasterPod,
+		Image:             image,
+		ImageDefault:      imageDefault,
+		Version:           imageTag(image),
+		Variant:           variant,
+		Replicas:          c.Spec.Replicas,
 		DesiredPods:       c.Spec.Replicas + 1,
 		ReadyPods:         ready,
 		TotalPods:         len(c.Status.Pods),
@@ -98,6 +112,21 @@ func summarizeCluster(c *kividbv1alpha1.KividbCluster) ClusterSummary {
 		CreationTimestamp: created,
 		Age:               humanizeAge(time.Since(created)),
 	}
+}
+
+// imageTag is an image reference's tag ("v1.1.2-lua" of
+// "docker.io/kividb/kividb:v1.1.2-lua"), without any digest; "" if it has
+// none.
+func imageTag(image string) string {
+	if i := strings.IndexByte(image, '@'); i >= 0 {
+		image = image[:i]
+	}
+	slash := strings.LastIndexByte(image, '/')
+	colon := strings.LastIndexByte(image, ':')
+	if colon <= slash {
+		return ""
+	}
+	return image[colon+1:]
 }
 
 // listClusterSummaries lists KividbClusters (scoped to namespace if
@@ -138,22 +167,14 @@ func getClusterDetail(ctx context.Context, ctrlClient client.Client, clientset k
 		return nil, err
 	}
 
-	image := c.Spec.Image
-	if image == "" {
-		image = defaultKividbImage + " (default)"
-	}
-
 	det := &ClusterDetail{
 		ClusterSummary:     summarizeCluster(&c),
-		Image:              image,
 		AgentImage:         c.Spec.AgentImage,
 		Port:               portOrDefault(c.Spec.Port),
-		Replicas:           c.Spec.Replicas,
 		StorageSize:        c.Spec.Storage.Size,
 		MasterServiceType:  string(c.Spec.Services.Master.Type),
 		ReplicaServiceType: string(c.Spec.Services.Replicas.Type),
 		ObservedGeneration: c.Status.ObservedGeneration,
-		Variant:            string(c.Spec.Variant),
 	}
 	if c.Spec.ConfigRef != nil {
 		det.ConfigRef = c.Spec.ConfigRef.Name

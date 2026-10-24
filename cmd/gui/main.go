@@ -29,7 +29,7 @@ const defaultPort = 8090
 var staticFiles embed.FS
 
 // staticSub is staticFiles rooted at "static/" so http.FileServerFS serves
-// e.g. static/app.js at /static/app.js once mounted with StripPrefix.
+// e.g. static/common.js at /static/common.js once mounted with StripPrefix.
 var staticSub = mustSub(staticFiles, "static")
 
 func mustSub(f embed.FS, dir string) fs.FS {
