@@ -192,6 +192,14 @@ spec:
     limits: {cpu: "100m", memory: "128Mi"}
 ```
 
+**Set a memory request and limit for `kividb`, and `maxmemory` below the
+limit** (in a `KividbConfig`). Without them the scheduler cannot tell how
+much a pod needs, and pods packed onto one node can drive it out of
+memory together. A node's out-of-memory killer then picks a kividb, most
+likely the one using the most. Leave headroom above `maxmemory` for a full
+resync, a backup, and in a sharded cluster a slot move, which each hold
+extra copies for a while.
+
 ### `services` — master and replica exposure
 
 ```yaml
