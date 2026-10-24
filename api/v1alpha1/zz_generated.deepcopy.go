@@ -209,6 +209,10 @@ func (in *ShardStatus) DeepCopy() *ShardStatus {
 
 func (in *ClusterModeStatus) DeepCopyInto(out *ClusterModeStatus) {
 	*out = *in
+	if in.StaleNodeIDs != nil {
+		out.StaleNodeIDs = make([]string, len(in.StaleNodeIDs))
+		copy(out.StaleNodeIDs, in.StaleNodeIDs)
+	}
 }
 
 func (in *ClusterModeStatus) DeepCopy() *ClusterModeStatus {

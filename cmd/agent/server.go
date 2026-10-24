@@ -50,6 +50,13 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /acl/reload", s.withToken(s.handleAclReload))
 	mux.HandleFunc("POST /backup", s.withToken(s.handleBackup))
 	mux.HandleFunc("POST /exec", s.withToken(s.handleExec))
+	// Cluster mode (sharded KividbClusters).
+	mux.HandleFunc("GET /cluster/status", s.withToken(s.handleClusterStatus))
+	mux.HandleFunc("POST /cluster/meet", s.withToken(s.handleClusterMeet))
+	mux.HandleFunc("POST /cluster/addslots", s.withToken(s.handleClusterAddSlots))
+	mux.HandleFunc("POST /cluster/replicate", s.withToken(s.handleClusterReplicate))
+	mux.HandleFunc("POST /cluster/forget", s.withToken(s.handleClusterForget))
+	mux.HandleFunc("POST /cluster/announce", s.withToken(s.handleClusterAnnounce))
 	return mux
 }
 

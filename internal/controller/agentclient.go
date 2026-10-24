@@ -93,6 +93,49 @@ func (a *AgentClient) post(ctx context.Context, podIP, path string, payload any)
 	return resp.StatusCode, nil
 }
 
+// ClusterStatus is the pod's view of the cluster (GET /cluster/status).
+func (a *AgentClient) ClusterStatus(ctx context.Context, podIP string) (*agentapi.ClusterStatusResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.url(podIP, "/cluster/status"), nil)
+	if err != nil {
+		return nil, err
+	}
+	agentapi.SetToken(req, a.Token)
+	resp, err := a.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("agent %s: cluster status %d: %s", podIP, resp.StatusCode, string(body))
+	}
+	var out agentapi.ClusterStatusResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("agent %s: decode cluster status: %w", podIP, err)
+	}
+	return &out, nil
+}
+
+func (a *AgentClient) ClusterMeet(ctx context.Context, podIP, ip string, port int) error {
+	return a.postAction(ctx, podIP, "/cluster/meet", agentapi.ClusterMeetRequest{IP: ip, Port: port})
+}
+
+func (a *AgentClient) ClusterAddSlots(ctx context.Context, podIP string, ranges [][2]int) error {
+	return a.postAction(ctx, podIP, "/cluster/addslots", agentapi.ClusterSlotsRequest{Ranges: ranges})
+}
+
+func (a *AgentClient) ClusterReplicate(ctx context.Context, podIP, masterID string) error {
+	return a.postAction(ctx, podIP, "/cluster/replicate", agentapi.ClusterNodeRequest{NodeID: masterID})
+}
+
+func (a *AgentClient) ClusterForget(ctx context.Context, podIP, nodeID string) error {
+	return a.postAction(ctx, podIP, "/cluster/forget", agentapi.ClusterNodeRequest{NodeID: nodeID})
+}
+
+func (a *AgentClient) ClusterAnnounce(ctx context.Context, podIP, hostname string) error {
+	return a.postAction(ctx, podIP, "/cluster/announce", agentapi.ClusterAnnounceRequest{Hostname: hostname})
+}
+
 func (a *AgentClient) Promote(ctx context.Context, podIP string) error {
 	return a.postAction(ctx, podIP, "/promote", nil)
 }

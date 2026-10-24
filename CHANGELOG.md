@@ -38,6 +38,16 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   `min-replicas-to-write` and the bus secret (generated when unset). The
   operator owns every cluster-mode directive. A cluster is sharded or not
   from its creation; up to 24 nodes for now.
+- **Sharded clusters form and look after themselves.** The operator
+  introduces the nodes (`CLUSTER MEET`), assigns the slots evenly across the
+  shards once every pod is up, puts each shard's replicas behind its
+  master, and has every node announce its pod's DNS name. Failover is the
+  engine's: the operator reports it and moves the role labels, and never
+  promotes in cluster mode. It re-introduces nodes after IP changes (a
+  cold restart), and forgets the old ID of a pod that rejoined with a new
+  one, never a node that owns slots. The agent gains `/cluster/status`,
+  `/meet`, `/addslots`, `/replicate`, `/forget` and `/announce`, all behind
+  the agent token.
 
 ### Changed
 

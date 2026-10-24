@@ -524,6 +524,13 @@ type ClusterModeStatus struct {
 	// CurrentEpoch is the cluster's current configuration epoch.
 	// +optional
 	CurrentEpoch int64 `json:"currentEpoch,omitempty"`
+
+	// StaleNodeIDs are the old node IDs of pods that rejoined with a new
+	// one (their volume was lost). The operator forgets them on every node
+	// that still knows them, until none does: gossip would otherwise bring
+	// them back.
+	// +optional
+	StaleNodeIDs []string `json:"staleNodeIDs,omitempty"`
 }
 
 // KividbClusterStatus defines the observed state of a KividbCluster.

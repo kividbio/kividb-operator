@@ -23,6 +23,12 @@ func TestAgentEndpointsNeedTheToken(t *testing.T) {
 		{http.MethodPost, "/acl/reload", true},
 		{http.MethodPost, "/backup", true},
 		{http.MethodPost, "/exec", true},
+		{http.MethodGet, "/cluster/status", true},
+		{http.MethodPost, "/cluster/meet", true},
+		{http.MethodPost, "/cluster/addslots", true},
+		{http.MethodPost, "/cluster/replicate", true},
+		{http.MethodPost, "/cluster/forget", true},
+		{http.MethodPost, "/cluster/announce", true},
 	}
 	withToken := (&server{cfg: agentConfig{AgentToken: "s3cret", KividbAddr: "127.0.0.1:1"}}).routes()
 	noToken := (&server{cfg: agentConfig{KividbAddr: "127.0.0.1:1"}}).routes()

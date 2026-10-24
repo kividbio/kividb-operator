@@ -292,6 +292,27 @@ spec:
   (`cluster-*`, `min-replicas-*`, `masteruser`/`masterauth`, `replicaof`,
   `tls-cluster`); a `KividbConfig` that sets one is refused. The bus
   secret is always on.
+- **Forming the cluster.** Once every pod is ready, the operator
+  introduces the nodes to each other (`CLUSTER MEET`), gives each shard's
+  `-0` pod an even share of the slots, and has the shard's other pods
+  `CLUSTER REPLICATE` it. Each node announces its pod's DNS name to clients
+  (`cluster-announce-hostname`).
+- **Failover is kividb's.** When a master fails, the engine promotes one of
+  its replicas; the operator does not promote anything in cluster mode. It
+  reports the move (`status.shards[].masterPod`, `lastFailoverTime`, a
+  `ShardFailover` Event) and moves the `kividb.io/role` label, so
+  `<cluster>-replicas` follows.
+- **Looking after it.** Every few seconds the operator re-introduces a node
+  the others have at an old address (after a cold restart, every pod's IP
+  changes), puts a pod that came back empty behind its shard's master, and,
+  for a pod that rejoined with a new node ID because its volume was lost,
+  forgets the old ID on every node (`status.cluster.staleNodeIDs` while it
+  does). It never forgets a node that owns slots.
+- **Status.** `status.shards[]` (each shard's master, its slots, its pods),
+  `status.cluster` (`cluster_state`, slots assigned and failed, known
+  nodes), and each pod's shard and node ID. `Running` when every slot is
+  served and every pod is ready; `Degraded` when the cluster serves but a
+  pod is down, or `cluster_state` is `fail`.
 - **Not yet:** `bootstrapFromSnapshot`, and `KividbDbOps` restarts.
 
 **Services**, all ClusterIP; the operator never creates a load balancer:

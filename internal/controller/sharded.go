@@ -5,9 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -19,6 +19,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // A sharded KividbCluster (spec.shards set) runs kividb in cluster mode:
@@ -382,9 +383,9 @@ func (r *KividbClusterReconciler) reconcileBusSecret(ctx context.Context, c *kiv
 // reconcileSharded is the reconcile of a sharded cluster, after the parts
 // both modes share (validation, references, the auth Secret).
 //
-// This release creates the shards' workloads and Services and reports
-// their pods. Forming the cluster (MEET, slots, replicas), failover
-// reporting, rollouts and backups come in the next steps of 0.7.0.
+// It creates the shards' workloads and Services, forms the cluster and
+// looks after it (see cluster_form.go). Rollouts and backups of sharded
+// clusters come in the next steps of 0.7.0.
 func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig, aclContent, defaultPassword string, generations authGenerations) (ctrl.Result, error) {
 	bus, err := r.reconcileBusSecret(ctx, c)
 	if err != nil {
@@ -417,11 +418,26 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	}
 	r.reconcileAclReload(ctx, c, pods.Items, aclContent, generations)
 
-	if err := r.updateShardedStatus(ctx, c, pods.Items); err != nil {
+	observed := r.observeShardedPods(ctx, c, pods.Items)
+	acted, topoErr := r.reconcileClusterTopology(ctx, c, observed)
+	if topoErr != nil {
+		logf.FromContext(ctx).Error(topoErr, "cluster topology")
+	}
+	r.labelShardedRoles(ctx, observed)
+
+	phase, err := r.updateShardedStatus(ctx, c, observed, topoErr)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+	}
+	if acted || topoErr != nil || phase != kividbv1alpha1.PhaseRunning {
+		return ctrl.Result{RequeueAfter: shardedFormingInterval}, nil
 	}
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
 }
+
+// shardedFormingInterval is how soon a sharded cluster that is forming, or
+// not healthy, is looked at again.
+const shardedFormingInterval = 3 * time.Second
 
 func (r *KividbClusterReconciler) applyPDB(ctx context.Context, c *kividbv1alpha1.KividbCluster, desired *policyv1.PodDisruptionBudget) error {
 	pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: c.Namespace}}
@@ -434,73 +450,27 @@ func (r *KividbClusterReconciler) applyPDB(ctx context.Context, c *kividbv1alpha
 	return err
 }
 
-// shardedPodStatuses reports each of the cluster's pods with its shard.
-func shardedPodStatuses(pods []corev1.Pod) []kividbv1alpha1.KividbPodStatus {
-	out := make([]kividbv1alpha1.KividbPodStatus, 0, len(pods))
-	for i := range pods {
-		p := &pods[i]
-		st := kividbv1alpha1.KividbPodStatus{
-			Name:  p.Name,
-			Role:  kividbv1alpha1.NodeRole(p.Labels[kividbv1alpha1.RoleLabel]),
-			Ready: isPodReady(p),
-		}
-		if st.Role == "" {
-			st.Role = kividbv1alpha1.RoleUnknown
-		}
-		if s, err := strconv.Atoi(p.Labels[ShardLabel]); err == nil {
-			shard := int32(s)
-			st.Shard = &shard
-		}
-		out = append(out, st)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
-}
-
-func shardStatuses(c *kividbv1alpha1.KividbCluster, pods []kividbv1alpha1.KividbPodStatus) []kividbv1alpha1.ShardStatus {
-	out := make([]kividbv1alpha1.ShardStatus, shardCount(c))
-	for i := range out {
-		out[i].Index = int32(i)
-	}
-	for _, p := range pods {
-		if p.Shard == nil || int(*p.Shard) >= len(out) {
-			continue
-		}
-		s := &out[*p.Shard]
-		s.Pods = append(s.Pods, p.Name)
-		if p.Ready {
-			s.ReadyPods++
-		}
-	}
-	return out
-}
-
-func (r *KividbClusterReconciler) updateShardedStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []corev1.Pod) error {
-	statuses := shardedPodStatuses(pods)
-	c.Status.Pods = statuses
-	c.Status.Shards = shardStatuses(c, statuses)
-	c.Status.MasterPod = ""
+func (r *KividbClusterReconciler) updateShardedStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []*shardPod, topoErr error) (kividbv1alpha1.ClusterPhase, error) {
+	before := append([]kividbv1alpha1.ShardStatus(nil), c.Status.Shards...)
+	phase, reason, message := shardedStatus(c, pods)
+	r.noteShardFailovers(c, before)
+	c.Status.Phase = phase
 	c.Status.ObservedGeneration = c.Generation
 
-	want := int(shardCount(c) * (c.Spec.Replicas + 1))
-	ready := 0
-	for _, p := range statuses {
-		if p.Ready {
-			ready++
-		}
-	}
-	c.Status.Phase = kividbv1alpha1.PhaseProvisioning
 	cond := metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionFalse,
-		Reason:             "PodsNotReady",
-		Message:            fmt.Sprintf("%d of %d pods ready", ready, want),
+		Reason:             reason,
+		Message:            message,
 		ObservedGeneration: c.Generation,
 	}
-	if ready >= want {
-		cond.Reason = "ClusterNotFormed"
-		cond.Message = fmt.Sprintf("all %d pods are ready; the cluster is not formed yet", want)
+	if phase == kividbv1alpha1.PhaseRunning {
+		cond.Status = metav1.ConditionTrue
+	}
+	if topoErr != nil && phase != kividbv1alpha1.PhaseRunning {
+		cond.Reason = "ReconcileError"
+		cond.Message = topoErr.Error()
 	}
 	setCondition(&c.Status.Conditions, cond)
-	return r.Status().Update(ctx, c)
+	return phase, r.Status().Update(ctx, c)
 }
