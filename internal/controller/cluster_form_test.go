@@ -32,6 +32,8 @@ type fakeNode struct {
 	id, ip, master, hostname string
 	seen                     map[string]string // node ID -> the IP this node has for it
 	slots                    [][2]int
+	offset                   int64
+	linkDown                 bool // a replica whose link to its master is down
 }
 
 func newFakeEngine() *fakeEngine {
@@ -93,6 +95,7 @@ func (e *fakeEngine) status(n *fakeNode) agentapi.ClusterStatusResponse {
 	return agentapi.ClusterStatusResponse{
 		Enabled: true, MyID: n.id, State: state, SlotsAssigned: covered, KnownNodes: len(ids),
 		Hostname: n.hostname, Nodes: agentapi.ParseClusterNodes(strings.Join(lines, "\n")),
+		ReplicationOffset: n.offset, MasterLinkUp: n.master != "" && !n.linkDown,
 	}
 }
 
@@ -152,6 +155,18 @@ func (e *fakeEngine) RoundTrip(req *http.Request) (*http.Response, error) {
 		delete(n.seen, body.NodeID)
 	case "/cluster/announce":
 		n.hostname = body.Hostname
+	case "/cluster/failover":
+		old := e.nodes[n.master]
+		if old == nil {
+			return reply(http.StatusInternalServerError, agentapi.ErrorResponse{Error: "You should send CLUSTER FAILOVER to a replica"}), nil
+		}
+		n.slots, old.slots = old.slots, nil
+		for _, o := range e.nodes {
+			if o.master == old.id {
+				o.master = n.id
+			}
+		}
+		n.master, old.master = "", n.id
 	}
 	return reply(http.StatusOK, agentapi.OKResponse{OK: true}), nil
 }
@@ -220,7 +235,7 @@ func (h *formingHarness) pass() []*shardPod {
 	h.r.labelShardedRoles(ctx, observed)
 	before := append([]kividbv1alpha1.ShardStatus(nil), h.c.Status.Shards...)
 	h.c.Status.Phase, _, _ = shardedStatus(h.c, observed)
-	h.r.noteShardFailovers(h.c, before)
+	h.r.noteShardFailovers(h.c, before, observed)
 	return observed
 }
 

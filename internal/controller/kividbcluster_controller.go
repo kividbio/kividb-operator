@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -44,6 +45,10 @@ type KividbClusterReconciler struct {
 	Scheme   *runtime.Scheme
 	Agent    *AgentClient
 	Recorder record.EventRecorder
+
+	// failovers: when the operator last asked a shard for a CLUSTER
+	// FAILOVER ("<ns>/<cluster>/<shard>" -> time.Time).
+	failovers sync.Map
 }
 
 func (r *KividbClusterReconciler) scheme() *runtime.Scheme { return r.Scheme }

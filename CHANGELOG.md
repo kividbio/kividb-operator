@@ -47,6 +47,12 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   The operator only reads these Services. The `ExternallyAccessible`
   condition says whether every pod is exposed (`PartiallyExposed` when
   only some are) and what is wrong with a Service that cannot be used.
+- **Rolling restarts of sharded clusters**, for a template change or a
+  `KividbDbOps` restart: one pod at a time across the cluster, replicas
+  first, and each shard's master only after its most caught-up replica
+  has taken over with `CLUSTER FAILOVER`. The agent has a
+  `/cluster/failover` endpoint, and reports whether a replica's link to
+  its master is up; `status.pods[].synced` is set for sharded clusters.
 - **Sharded clusters form and look after themselves.** The operator
   introduces the nodes (`CLUSTER MEET`), assigns the slots evenly across the
   shards once every pod is up, puts each shard's replicas behind its

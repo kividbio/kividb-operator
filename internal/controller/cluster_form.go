@@ -350,6 +350,7 @@ func shardedStatus(c *kividbv1alpha1.KividbCluster, pods []*shardPod) (kividbv1a
 		if p.status != nil {
 			st.NodeID = p.status.MyID
 			st.ReplicationOffset = p.status.ReplicationOffset
+			st.Synced = shardHealthy(v, p)
 		}
 		if p.ready {
 			ready++
@@ -406,14 +407,23 @@ func shardedStatus(c *kividbv1alpha1.KividbCluster, pods []*shardPod) (kividbv1a
 	return kividbv1alpha1.PhaseRunning, "ClusterOK", fmt.Sprintf("%d shards, all %d slots served, %d pods ready", len(shards), agentapi.TotalSlots, ready)
 }
 
-// noteShardFailovers records a shard whose master moved to another pod.
-func (r *KividbClusterReconciler) noteShardFailovers(c *kividbv1alpha1.KividbCluster, before []kividbv1alpha1.ShardStatus) {
+// noteShardFailovers records a shard whose master moved to another pod,
+// unless the operator asked for the move (a step-down).
+func (r *KividbClusterReconciler) noteShardFailovers(c *kividbv1alpha1.KividbCluster, before []kividbv1alpha1.ShardStatus, pods []*shardPod) {
 	prev := map[int32]string{}
 	for _, s := range before {
 		prev[s.Index] = s.MasterPod
 	}
+	planned := map[string]bool{}
+	for _, p := range pods {
+		planned[p.pod.Name] = p.pod.Annotations[StepDownAnnotation] == "true"
+	}
 	for _, s := range c.Status.Shards {
 		if old := prev[s.Index]; old != "" && s.MasterPod != "" && old != s.MasterPod {
+			if planned[old] {
+				r.event(c, corev1.EventTypeNormal, "ShardSwitchover", "shard %d: master moved from %s to %s, as asked", s.Index, old, s.MasterPod)
+				continue
+			}
 			now := metav1.Now()
 			c.Status.LastFailoverTime = &now
 			r.event(c, corev1.EventTypeWarning, "ShardFailover", "shard %d: master moved from %s to %s", s.Index, old, s.MasterPod)

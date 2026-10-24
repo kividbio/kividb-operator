@@ -132,6 +132,13 @@ func (a *AgentClient) ClusterForget(ctx context.Context, podIP, nodeID string) e
 	return a.postAction(ctx, podIP, "/cluster/forget", agentapi.ClusterNodeRequest{NodeID: nodeID})
 }
 
+// ClusterFailover asks the replica at podIP to take over from its master
+// (CLUSTER FAILOVER, the coordinated kind: the master pauses its clients
+// until the replica has caught up).
+func (a *AgentClient) ClusterFailover(ctx context.Context, podIP string) error {
+	return a.postAction(ctx, podIP, "/cluster/failover", nil)
+}
+
 func (a *AgentClient) ClusterAnnounce(ctx context.Context, podIP, hostname string) error {
 	return a.postAction(ctx, podIP, "/cluster/announce", agentapi.ClusterAnnounceRequest{Hostname: hostname})
 }

@@ -428,6 +428,12 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 		logf.FromContext(ctx).Error(topoErr, "cluster topology")
 	}
 	r.labelShardedRoles(ctx, observed)
+	if r.reconcileShardStepDown(ctx, c, observed) {
+		acted = true
+	}
+	if r.reconcileShardedRollout(ctx, c, observed) {
+		acted = true
+	}
 
 	if cond := exposureCondition(c, exposed); cond != nil {
 		setCondition(&c.Status.Conditions, *cond)
@@ -438,6 +444,7 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
+	r.clearShardStepDowns(ctx, observed)
 	if acted || topoErr != nil || phase != kividbv1alpha1.PhaseRunning {
 		return ctrl.Result{RequeueAfter: shardedFormingInterval}, nil
 	}
@@ -462,7 +469,7 @@ func (r *KividbClusterReconciler) applyPDB(ctx context.Context, c *kividbv1alpha
 func (r *KividbClusterReconciler) updateShardedStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []*shardPod, topoErr error) (kividbv1alpha1.ClusterPhase, error) {
 	before := append([]kividbv1alpha1.ShardStatus(nil), c.Status.Shards...)
 	phase, reason, message := shardedStatus(c, pods)
-	r.noteShardFailovers(c, before)
+	r.noteShardFailovers(c, before, pods)
 	c.Status.Phase = phase
 	c.Status.ObservedGeneration = c.Generation
 

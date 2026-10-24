@@ -62,6 +62,7 @@ func (s *server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out.ReplicationOffset, _ = strconv.ParseInt(repl[key], 10, 64)
+		out.MasterLinkUp = repl["master_link_status"] == "up"
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -149,4 +150,21 @@ func (s *server) handleClusterAnnounce(w http.ResponseWriter, r *http.Request) {
 		}
 		return []string{"CONFIG", "SET", "cluster-announce-hostname", req.Hostname}, nil
 	})
+}
+
+// handleClusterFailover asks this node, a replica, to take over from its
+// master: CLUSTER FAILOVER, which the two run together without losing a
+// write. The engine refuses it on a master.
+func (s *server) handleClusterFailover(w http.ResponseWriter, r *http.Request) {
+	c, err := s.dial()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	defer c.Close()
+	if _, err := c.Do("CLUSTER", "FAILOVER"); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("CLUSTER FAILOVER: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, agentapi.OKResponse{OK: true})
 }

@@ -313,7 +313,18 @@ spec:
   nodes), and each pod's shard and node ID. `Running` when every slot is
   served and every pod is ready; `Degraded` when the cluster serves but a
   pod is down, or `cluster_state` is `fail`.
-- **Not yet:** `bootstrapFromSnapshot`, and `KividbDbOps` restarts.
+- **Restarts.** A change to the pod template (image, resources, config,
+  a new password) and a `KividbDbOps` restart replace the pods one at a
+  time across the whole cluster, replicas first, and only while every
+  slot is served and every other pod is ready and in sync. A shard's
+  master is never restarted while it is the master: its most caught-up
+  replica takes over first with `CLUSTER FAILOVER`, which the engine runs
+  without losing a write, and the old master is restarted as a replica
+  (a `ShardSwitchover` Event, not a `ShardFailover`). A shard with
+  `replicas: 0` has no one to hand over to: its master restarts in place,
+  and its slots are down until it is back. A pod that has been unready
+  for 30 s on an old template is replaced straight away.
+- **Not yet:** `bootstrapFromSnapshot`.
 
 **Services**, all ClusterIP; the operator never creates a load balancer:
 

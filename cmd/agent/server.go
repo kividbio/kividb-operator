@@ -57,6 +57,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /cluster/replicate", s.withToken(s.handleClusterReplicate))
 	mux.HandleFunc("POST /cluster/forget", s.withToken(s.handleClusterForget))
 	mux.HandleFunc("POST /cluster/announce", s.withToken(s.handleClusterAnnounce))
+	mux.HandleFunc("POST /cluster/failover", s.withToken(s.handleClusterFailover))
 	return mux
 }
 

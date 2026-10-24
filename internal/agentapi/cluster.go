@@ -14,6 +14,7 @@ import (
 //	POST /cluster/replicate -> body ClusterNodeRequest      (CLUSTER REPLICATE id)
 //	POST /cluster/forget    -> body ClusterNodeRequest      (CLUSTER FORGET id)
 //	POST /cluster/announce  -> body ClusterAnnounceRequest  (CONFIG SET cluster-announce-hostname)
+//	POST /cluster/failover  -> on a replica: CLUSTER FAILOVER, its master hands over
 
 // TotalSlots is the number of hash slots in a cluster.
 const TotalSlots = 16384
@@ -128,8 +129,11 @@ type ClusterStatusResponse struct {
 	Hostname string `json:"hostname,omitempty"`
 	// ReplicationOffset is the node's own offset (master_repl_offset on a
 	// master, the applied offset on a replica).
-	ReplicationOffset int64         `json:"replicationOffset,omitempty"`
-	Nodes             []ClusterNode `json:"nodes,omitempty"`
+	ReplicationOffset int64 `json:"replicationOffset,omitempty"`
+	// MasterLinkUp: a replica's link to its master is up
+	// (master_link_status).
+	MasterLinkUp bool          `json:"masterLinkUp,omitempty"`
+	Nodes        []ClusterNode `json:"nodes,omitempty"`
 }
 
 // Myself is the node's own line of CLUSTER NODES.
