@@ -19,12 +19,38 @@ type ClusterSummary struct {
 	ReadyPods int `json:"readyPods"`
 	TotalPods int `json:"totalPods"`
 
+	// Image is the engine image the pods run: spec.image, or the operator's
+	// default when that is unset (ImageDefault). Version is its tag.
+	Image        string `json:"image"`
+	ImageDefault bool   `json:"imageDefault,omitempty"`
+	Version      string `json:"version,omitempty"`
+	Variant      string `json:"variant,omitempty"`
+	// Replicas is spec.replicas: the replicas, not counting the master.
+	Replicas int32 `json:"replicas"`
+
+	// Stats is what the GUI's own scraper last saw of the cluster's pods,
+	// nil until it has scraped them. It comes from memory, not from the
+	// Kubernetes API, so the dashboard stays one List call.
+	Stats *ClusterStats `json:"stats,omitempty"`
+
 	BackupEnabled     bool       `json:"backupEnabled"`
 	BackupLastSuccess *time.Time `json:"backupLastSuccess,omitempty"`
 	BackupLastError   string     `json:"backupLastError,omitempty"`
 
 	CreationTimestamp time.Time `json:"creationTimestamp"`
 	Age               string    `json:"age"`
+}
+
+// ClusterStats sums a cluster's pods: the latest scrape of each, and the
+// last hour by the minute for the dashboard's sparklines.
+type ClusterStats struct {
+	MemoryBytes float64 `json:"memoryBytes"`
+	OpsPerSec   float64 `json:"opsPerSec"`
+	Clients     float64 `json:"clients"`
+	// Memory and Ops are one point a minute: the pods' memory added up, and
+	// their commands per second added up.
+	Memory []metricPoint `json:"memory,omitempty"`
+	Ops    []metricPoint `json:"ops,omitempty"`
 }
 
 // PodView describes one pod for the cluster detail page. Name/Role/Ready/
@@ -111,10 +137,8 @@ type EventView struct {
 type ClusterDetail struct {
 	ClusterSummary
 
-	Image            string `json:"image"`
 	AgentImage       string `json:"agentImage,omitempty"`
 	Port             int32  `json:"port"`
-	Replicas         int32  `json:"replicas"` // spec.replicas (not including master)
 	StorageSize      string `json:"storageSize"`
 	StorageClassName string `json:"storageClassName,omitempty"`
 
@@ -130,7 +154,6 @@ type ClusterDetail struct {
 	ConfigRef         string `json:"configRef,omitempty"`
 	AclConfigRef      string `json:"aclConfigRef,omitempty"`
 	SnapshotConfigRef string `json:"snapshotConfigRef,omitempty"`
-	Variant           string `json:"variant,omitempty"`
 
 	Pods        []PodView        `json:"pods"`
 	Services    []ServiceView    `json:"services,omitempty"`

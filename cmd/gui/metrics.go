@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,11 +56,14 @@ type metricsStore struct {
 
 func newMetricsStore(dataDir string) *metricsStore {
 	ms := &metricsStore{
-		series:      make(map[string]*podSeries),
-		dataDir:     dataDir,
-		persistPath: filepath.Join(dataDir, "metrics.json"),
+		series:  make(map[string]*podSeries),
+		dataDir: dataDir,
 	}
+	// No directory: in memory only. (Joined with "", the path would be
+	// metrics.json in the working directory, which in the image is on a
+	// read-only root filesystem.)
 	if dataDir != "" {
+		ms.persistPath = filepath.Join(dataDir, "metrics.json")
 		if err := os.MkdirAll(dataDir, 0o750); err != nil {
 			log.Printf("metrics: mkdir %s: %v (continuing in-memory only)", dataDir, err)
 			ms.dataDir = ""
@@ -197,6 +201,92 @@ func (ms *metricsStore) query(namespace, cluster string, from, to int64) map[str
 	return out
 }
 
+// statsWindow and statsBucket shape the dashboard's sparklines: the last
+// hour, a point a minute. statsFresh is how old a pod's last scrape may be
+// and still count as its current value (a few missed scrapes).
+const (
+	statsWindow = time.Hour
+	statsBucket = time.Minute
+	statsFresh  = 4 * metricsScrapeEvery
+)
+
+// clusterStats sums one cluster's pods for the dashboard, or nil when there
+// is nothing scraped for it yet.
+func (ms *metricsStore) clusterStats(namespace, cluster string, now time.Time) *ClusterStats {
+	prefix := namespace + "/" + cluster + "/"
+	from := now.Add(-statsWindow).UnixMilli()
+	fresh := now.Add(-statsFresh).UnixMilli()
+	bucket := statsBucket.Milliseconds()
+
+	stats := &ClusterStats{}
+	memBuckets := map[int64]float64{}
+	opsBuckets := map[int64]float64{}
+	found := false
+
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	for k, s := range ms.series {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		found = true
+		if n := len(s.Memory); n > 0 && s.Memory[n-1].T >= fresh {
+			stats.MemoryBytes += s.Memory[n-1].V
+		}
+		if n := len(s.Clients); n > 0 && s.Clients[n-1].T >= fresh {
+			stats.Clients += s.Clients[n-1].V
+		}
+		// Memory: the pod's last value in each minute, added across pods.
+		last := map[int64]float64{}
+		for _, pt := range s.Memory {
+			if pt.T >= from {
+				last[pt.T/bucket*bucket] = pt.V
+			}
+		}
+		for b, v := range last {
+			memBuckets[b] += v
+		}
+		// Commands: a counter. Its rate between scrapes, averaged in each
+		// minute; a drop (a restart) is no rate rather than a negative one.
+		sum := map[int64]float64{}
+		cnt := map[int64]float64{}
+		for i := 1; i < len(s.Commands); i++ {
+			a, b := s.Commands[i-1], s.Commands[i]
+			if b.T < from || b.T <= a.T || b.V < a.V {
+				continue
+			}
+			rate := (b.V - a.V) / (float64(b.T-a.T) / 1000)
+			k := b.T / bucket * bucket
+			sum[k] += rate
+			cnt[k]++
+			if i == len(s.Commands)-1 && b.T >= fresh {
+				stats.OpsPerSec += rate
+			}
+		}
+		for k, v := range sum {
+			opsBuckets[k] += v / cnt[k]
+		}
+	}
+	if !found {
+		return nil
+	}
+	stats.Memory = sortedPoints(memBuckets)
+	stats.Ops = sortedPoints(opsBuckets)
+	return stats
+}
+
+func sortedPoints(m map[int64]float64) []metricPoint {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]metricPoint, 0, len(m))
+	for t, v := range m {
+		out = append(out, metricPoint{T: t, V: v})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].T < out[j].T })
+	return out
+}
+
 func filterRange(pts []metricPoint, from, to int64) []metricPoint {
 	if len(pts) == 0 {
 		return nil
@@ -289,6 +379,12 @@ type agentGauges struct {
 	haveMem, haveClients, haveRepl, haveCmd bool
 }
 
+// replicaOffsetMetric is a replica's applied offset. kividb reports it in
+// place of master_repl_offset on a replica, so it is the replica's point in
+// the replication-offset series, and the lag chart compares it with the
+// master's.
+const replicaOffsetMetric = "kividb_slave_repl_offset"
+
 func scrapeAgentGauges(ctx context.Context, podIP string) (agentGauges, error) {
 	var out agentGauges
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s:8081/metrics", podIP), nil)
@@ -320,6 +416,10 @@ func scrapeAgentGauges(ctx context.Context, podIP string) (agentGauges, error) {
 		case "kividb_connected_clients":
 			out.clients, out.haveClients = val, true
 		case "kividb_master_repl_offset":
+			if !out.haveRepl {
+				out.replOffset, out.haveRepl = val, true
+			}
+		case replicaOffsetMetric:
 			out.replOffset, out.haveRepl = val, true
 		case "kividb_commands_processed_total":
 			out.commands, out.haveCmd = val, true

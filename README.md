@@ -115,14 +115,33 @@ for the Secrets it references) and the full field reference in
 ## The web GUI
 
 <p align="center">
-  <img src="assets/gui.png" alt="kividb-operator GUI dashboard">
+  <img src="assets/gui.png" alt="The dashboard: health tiles and a card per KividbCluster">
 </p>
 
-A read-only dashboard (`cmd/gui`) ships alongside the operator
-(`gui.enabled: true` by default in the Helm chart) listing every
-`KividbCluster`, its phase, master/replica pods with readiness and
-replication offset, and recent events. It never has RBAC access to
-Secrets. See [docs/GUI.md](docs/GUI.md).
+A management console (`cmd/gui`) ships with the operator
+(`gui.enabled: true` by default in the Helm chart):
+
+- **Dashboard**: every `KividbCluster`'s health, version and build, with
+  live commands per second and memory, search and a health filter.
+- **A cluster's page**: the master and its replicas with each one's
+  replication lag, pods, metrics over 1, 6 or 24 hours, logs, a command
+  console, backups and events; scaling, failover, snapshots, rolling
+  restarts and deleting.
+- **New cluster**: a form, with the manifest checked by the API server as
+  you type.
+- A sign-in page, light and dark themes, and a phone layout.
+
+It never has RBAC access to Secrets, and is read-only until it is given
+credentials. See [docs/GUI.md](docs/GUI.md).
+
+<p align="center">
+  <img src="assets/gui-cluster.png" alt="A cluster: topology with replication lag, pods, spec and services" width="49%">
+  <img src="assets/gui-metrics.png" alt="Metrics per pod over 1, 6 or 24 hours" width="49%">
+</p>
+<p align="center">
+  <img src="assets/gui-create.png" alt="Creating a cluster from a form, previewed by the API server" width="49%">
+  <img src="assets/gui-login.png" alt="The sign-in page" width="49%">
+</p>
 
 ```bash
 kubectl port-forward -n kividb-operator-system svc/kividb-operator-gui 8090:8090
@@ -146,7 +165,7 @@ kubectl port-forward -n kividb-operator-system svc/kividb-operator-gui 8090:8090
 
 ## Status
 
-This project is at `v0.5.2` — see [CHANGELOG.md](CHANGELOG.md). Validated
+This project is at `v0.6.0` — see [CHANGELOG.md](CHANGELOG.md). Validated
 against kividb **v1.1.2** (that tag is also the default when
 `spec.image` is unset). The CRD API version is `kividb.io/v1alpha1`:
 expect it to evolve.

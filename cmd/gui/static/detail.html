@@ -4,139 +4,171 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KiviDB Cluster</title>
-<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
-<link rel="stylesheet" href="/static/style.css?v=040">
+<link rel="icon" type="image/png" href="/static/kividb-logo.png">
+<link rel="stylesheet" href="/static/style.css?v=060">
+<script src="/static/common.js?v=060"></script>
 </head>
 <body data-page="detail">
 <header class="topbar">
   <div class="topbar-brand">
-    <img src="/static/kividb-logo.png" alt="KiviDB" class="brand-logo">
-    <h1><a href="/" class="back-link">Clusters</a> <span class="crumb">/</span> <span id="cluster-title">&hellip;</span></h1>
+    <img src="/static/kividb-logo.png" alt="" class="brand-logo">
+    <h1><a href="/" class="back-link">Clusters</a><span class="crumb">/</span><span id="crumb-ns" class="muted"></span><span class="crumb">/</span><span id="crumb-name">&hellip;</span></h1>
   </div>
   <div class="topbar-meta">
-    <span id="phase-badge" class="badge">&hellip;</span>
-    <span id="refresh-indicator" class="muted">loading&hellip;</span>
+    <span id="refresh-indicator" class="refresh-indicator">loading&hellip;</span>
+    <span id="mode-pill" class="mode-pill"></span>
+    <button type="button" id="theme-toggle" class="icon-btn" aria-label="Switch theme"></button>
   </div>
 </header>
 
 <main>
   <div id="error-banner" class="banner error hidden"></div>
-  <div id="ok-banner" class="banner ok hidden"></div>
 
-  <div class="toolbar">
-    <button type="button" id="btn-restart" class="btn-primary">Restart cluster</button>
-    <button type="button" id="btn-scale-down" class="btn-secondary">− Replica</button>
-    <button type="button" id="btn-scale-up" class="btn-secondary">+ Replica</button>
-    <button type="button" id="btn-promote" class="btn-secondary">Promote replica</button>
-    <button type="button" id="btn-snapshot" class="btn-secondary">Take snapshot</button>
-    <button type="button" id="btn-delete" class="btn-danger">Delete cluster</button>
+  <div class="detail-head">
+    <div class="title">
+      <h2 id="cluster-name">&hellip;</h2>
+      <span id="phase-badge" class="badge">&hellip;</span>
+      <span id="version-chip" class="chip brand hidden"></span>
+      <span id="variant-chip" class="chip hidden"></span>
+    </div>
+    <div class="actions">
+      <button type="button" id="btn-scale-down" class="btn-secondary" data-write title="Remove a replica">− Replica</button>
+      <button type="button" id="btn-scale-up" class="btn-secondary" data-write title="Add a replica">+ Replica</button>
+      <button type="button" id="btn-promote" class="btn-secondary" data-write>Promote replica</button>
+      <button type="button" id="btn-snapshot" class="btn-secondary" data-write>Take snapshot</button>
+      <button type="button" id="btn-restart" class="btn-secondary" data-write>Rolling restart</button>
+      <button type="button" id="btn-delete" class="btn-danger" data-write>Delete</button>
+    </div>
   </div>
 
-  <section class="widgets" id="widgets">
-    <div class="widget"><div class="label">Phase</div><div class="value" id="w-phase">–</div></div>
-    <div class="widget"><div class="label">Master</div><div class="value" id="w-master">–</div></div>
-    <div class="widget"><div class="label">Pods ready</div><div class="value" id="w-pods">–</div><div class="sub" id="w-replicas">–</div></div>
-    <div class="widget"><div class="label">Memory</div><div class="value" id="w-mem">–</div></div>
-    <div class="widget"><div class="label">Clients</div><div class="value" id="w-clients">–</div></div>
-    <div class="widget"><div class="label">Age</div><div class="value" id="w-age">–</div></div>
+  <section class="tiles" aria-label="Summary">
+    <div class="tile"><div class="label">Master</div><div class="value sm" id="w-master">–</div><div class="sub" id="w-failover">–</div></div>
+    <div class="tile"><div class="label">Pods ready</div><div class="value" id="w-pods">–</div><div class="sub" id="w-replicas">–</div></div>
+    <div class="tile"><div class="label">Commands / s</div><div class="value" id="w-ops">–</div><div class="sub">all pods</div></div>
+    <div class="tile"><div class="label">Memory</div><div class="value" id="w-mem">–</div><div class="sub">all pods</div></div>
+    <div class="tile"><div class="label">Keys</div><div class="value" id="w-keys">–</div><div class="sub">on the master</div></div>
+    <div class="tile"><div class="label">Clients</div><div class="value" id="w-clients">–</div><div class="sub" id="w-age">–</div></div>
   </section>
 
   <nav class="tabs" role="tablist">
     <button type="button" class="tab active" data-tab="overview">Overview</button>
     <button type="button" class="tab" data-tab="metrics">Metrics</button>
     <button type="button" class="tab" data-tab="logs">Logs</button>
-    <button type="button" class="tab" data-tab="events">Events</button>
-    <button type="button" class="tab" data-tab="explorer">Explorer</button>
-    <button type="button" class="tab" data-tab="ops">Operations</button>
+    <button type="button" class="tab" data-tab="console">Console</button>
+    <button type="button" class="tab" data-tab="backups">Backups</button>
+    <button type="button" class="tab" data-tab="events">Events &amp; operations</button>
   </nav>
 
   <section class="tab-panel" id="panel-overview">
     <div class="card">
+      <div class="card-head"><h2>Topology</h2><span class="muted" style="font-size:.8rem">Replication lag is how far each replica's offset is behind the master's.</span></div>
+      <div id="topology" class="topology"><span class="muted">loading&hellip;</span></div>
+    </div>
+
+    <div class="card">
       <div class="card-head"><h2>Pods</h2></div>
       <div class="table-wrap">
         <table id="pods-table">
-          <thead>
-            <tr>
-              <th>Name</th><th>Role</th><th>Ready</th><th>Phase</th>
-              <th>Offset</th><th>Node</th><th>Restarts</th><th>Actions</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Name</th><th>Role</th><th>Ready</th><th>Phase</th><th>Offset</th><th>Memory</th><th>Keys</th><th>Node</th><th>Restarts</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
     </div>
 
-    <div class="card">
-      <h2>Cluster spec</h2>
-      <div class="facts" id="spec-facts"></div>
-    </div>
-
-    <div class="card">
-      <h2>Services</h2>
-      <div class="table-wrap">
-        <table id="services-table">
-          <thead><tr><th>Name</th><th>Type</th><th>ClusterIP</th><th>External</th><th>Ports</th></tr></thead>
-          <tbody></tbody>
-        </table>
+    <div class="grid-2">
+      <div class="card">
+        <h2>Spec</h2>
+        <div class="facts" id="spec-facts"></div>
       </div>
-    </div>
-
-    <div class="card">
-      <h2>Backup</h2>
-      <div class="facts" id="backup-facts"></div>
-    </div>
-
-    <div class="card">
-      <h2>Conditions</h2>
-      <div class="table-wrap">
-        <table id="conditions-table">
-          <thead><tr><th>Type</th><th>Status</th><th>Reason</th><th>Message</th></tr></thead>
-          <tbody></tbody>
-        </table>
+      <div class="card">
+        <h2>Services</h2>
+        <div class="table-wrap">
+          <table id="services-table">
+            <thead><tr><th>Name</th><th>Type</th><th>Cluster IP</th><th>External</th><th>Ports</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <h2 style="margin-top:1.1rem">Conditions</h2>
+        <div class="table-wrap">
+          <table id="conditions-table">
+            <thead><tr><th>Type</th><th>Status</th><th>Reason</th><th>Message</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </section>
 
   <section class="tab-panel hidden" id="panel-metrics">
-    <div class="card">
-      <h2>Live status</h2>
-      <div class="table-wrap">
-        <table id="live-table">
-          <thead><tr><th>Pod</th><th>Role</th><th>Ready</th><th>Offset</th><th>Master</th><th>Memory</th></tr></thead>
-          <tbody></tbody>
-        </table>
+    <div class="toolbar">
+      <div class="segmented" id="range" role="group" aria-label="Time range">
+        <button type="button" data-range="3600000" class="active">1 h</button>
+        <button type="button" data-range="21600000">6 h</button>
+        <button type="button" data-range="86400000">24 h</button>
       </div>
+      <span class="muted" style="font-size:.8rem">Scraped by the GUI from each pod's agent every 15 s; kept for 24 h. No Prometheus needed.</span>
     </div>
-    <div class="card">
-      <h2>Last 24 hours</h2>
-      <p class="muted">Scraped from agent <code>/metrics</code> every 15s. No Prometheus required.</p>
-      <div class="metrics-grid">
-        <div class="metric-panel"><h3>Memory</h3><svg id="chart-memory" class="sparkline" viewBox="0 0 320 110" preserveAspectRatio="none"></svg></div>
-        <div class="metric-panel"><h3>Clients</h3><svg id="chart-clients" class="sparkline" viewBox="0 0 320 110" preserveAspectRatio="none"></svg></div>
-        <div class="metric-panel"><h3>Replication offset</h3><svg id="chart-repl" class="sparkline" viewBox="0 0 320 110" preserveAspectRatio="none"></svg></div>
-        <div class="metric-panel"><h3>Commands / s</h3><svg id="chart-ops" class="sparkline" viewBox="0 0 320 110" preserveAspectRatio="none"></svg></div>
-      </div>
+    <div class="chart-grid">
+      <div class="card chart-card"><div class="card-head"><h2>Commands / s</h2><span class="now" id="now-ops"></span></div><div class="chart" id="chart-ops"></div></div>
+      <div class="card chart-card"><div class="card-head"><h2>Memory</h2><span class="now" id="now-mem"></span></div><div class="chart" id="chart-memory"></div></div>
+      <div class="card chart-card"><div class="card-head"><h2>Connected clients</h2><span class="now" id="now-clients"></span></div><div class="chart" id="chart-clients"></div></div>
+      <div class="card chart-card"><div class="card-head"><h2>Replication lag</h2><span class="now" id="now-lag"></span></div><div class="chart" id="chart-lag"></div></div>
     </div>
   </section>
 
   <section class="tab-panel hidden" id="panel-logs">
     <div class="card">
-      <h2>Pod logs</h2>
       <div class="ops-row">
-        <select id="log-pod"></select>
-        <select id="log-container">
+        <select id="log-pod" aria-label="Pod"></select>
+        <select id="log-container" aria-label="Container">
           <option value="kividb">kividb</option>
           <option value="agent">agent</option>
         </select>
-        <button type="button" id="btn-logs" class="btn-primary">Load logs</button>
+        <select id="log-tail" aria-label="Lines">
+          <option value="200">last 200 lines</option>
+          <option value="500" selected>last 500 lines</option>
+          <option value="2000">last 2000 lines</option>
+        </select>
+        <input type="text" id="log-filter" placeholder="Highlight text" aria-label="Highlight">
+        <label class="check"><input type="checkbox" id="log-follow"> Follow</label>
+        <button type="button" id="btn-logs" class="btn-primary">Load</button>
       </div>
-      <pre id="log-view" class="log-view muted">Select a pod and load logs.</pre>
+      <pre id="log-view" class="log-view">Pick a pod and load its logs.</pre>
+    </div>
+  </section>
+
+  <section class="tab-panel hidden" id="panel-console">
+    <div class="card">
+      <div class="card-head"><h2>Console</h2><span class="muted" style="font-size:.8rem">Runs a command on the chosen pod, as the agent's user. Quotes keep words together; ↑ and ↓ go through history.</span></div>
+      <div class="ops-row">
+        <select id="exec-pod" aria-label="Pod"></select>
+        <input id="exec-cmd" type="text" placeholder='INFO replication    ·    SET greeting "hello world"' autocomplete="off" spellcheck="false" data-write>
+        <button type="button" id="btn-exec" class="btn-primary" data-write>Run</button>
+        <button type="button" id="btn-exec-clear" class="btn-ghost">Clear</button>
+      </div>
+      <pre id="exec-out" class="log-view"></pre>
+    </div>
+  </section>
+
+  <section class="tab-panel hidden" id="panel-backups">
+    <div class="card">
+      <h2>Backup configuration</h2>
+      <div class="facts" id="backup-facts"></div>
+    </div>
+    <div class="card">
+      <h2>Snapshots</h2>
+      <div class="table-wrap">
+        <table id="snapshots-table">
+          <thead><tr><th>Name</th><th>Phase</th><th>Source</th><th>Size</th><th>Took</th><th>Finished</th><th>Object key</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
   </section>
 
   <section class="tab-panel hidden" id="panel-events">
     <div class="card">
-      <h2>Recent events</h2>
+      <h2>Events</h2>
       <div class="table-wrap">
         <table id="events-table">
           <thead><tr><th>Last seen</th><th>Type</th><th>Reason</th><th>Count</th><th>Message</th></tr></thead>
@@ -144,36 +176,11 @@
         </table>
       </div>
     </div>
-  </section>
-
-  <section class="tab-panel hidden" id="panel-explorer">
     <div class="card">
-      <h2>RESP explorer</h2>
-      <p class="muted">Runs as the agent's authenticated default user against the selected pod.</p>
-      <div class="ops-row">
-        <select id="exec-pod"></select>
-        <input id="exec-cmd" type="text" placeholder="INFO replication">
-        <button type="button" id="btn-exec" class="btn-primary">Run</button>
-      </div>
-      <pre id="exec-out" class="log-view"> </pre>
-    </div>
-  </section>
-
-  <section class="tab-panel hidden" id="panel-ops">
-    <div class="card">
-      <h2>DbOps history</h2>
+      <h2>Operations (KividbDbOps)</h2>
       <div class="table-wrap">
         <table id="dbops-table">
-          <thead><tr><th>Name</th><th>Op</th><th>Phase</th><th>Message</th><th>Age</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </div>
-    <div class="card">
-      <h2>Snapshots</h2>
-      <div class="table-wrap">
-        <table id="snapshots-table">
-          <thead><tr><th>Name</th><th>Phase</th><th>Source</th><th>Object key</th><th>Size</th></tr></thead>
+          <thead><tr><th>Name</th><th>Operation</th><th>Phase</th><th>Message</th><th>Created</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -182,9 +189,9 @@
 </main>
 
 <footer>
-  <span class="muted">Management console. Auto-refreshes every 10s. Secrets are never exposed to the browser.</span>
+  <span class="muted">kividb-operator console. Refreshes every 10 s. Secrets never reach the browser.</span>
 </footer>
 
-<script src="/static/app.js?v=040"></script>
+<script src="/static/detail.js?v=060"></script>
 </body>
 </html>

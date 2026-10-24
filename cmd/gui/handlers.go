@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
@@ -71,7 +72,28 @@ func (s *server) handleAPIClusters(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if s.metrics != nil {
+		now := time.Now()
+		for i := range summaries {
+			summaries[i].Stats = s.metrics.clusterStats(summaries[i].Namespace, summaries[i].Name, now)
+		}
+	}
 	writeJSON(w, http.StatusOK, summaries)
+}
+
+// handleAPISession tells the pages whether writes are allowed, so they can
+// disable what would only be refused, and which namespace they are held to.
+func (s *server) handleAPISession(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"writable":       s.auth.enabled(),
+		"user":           s.auth.Username,
+		"watchNamespace": s.watchNamespace,
+		"defaultImage":   defaultKividbImage,
+	})
+}
+
+func (s *server) handleCreatePage(w http.ResponseWriter, r *http.Request) {
+	serveEmbeddedHTML(w, "static/create.html")
 }
 
 func (s *server) handleAPIClusterDetail(w http.ResponseWriter, r *http.Request) {
@@ -100,8 +122,15 @@ func (s *server) routes() http.Handler {
 
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /clusters/{namespace}/{name}", s.handleClusterPage)
+	mux.HandleFunc("GET /new", s.handleCreatePage)
+	mux.HandleFunc("GET /login", s.auth.handleLoginPage)
+	mux.HandleFunc("POST /login", s.auth.handleLogin)
+	mux.HandleFunc("POST /logout", s.auth.handleLogout)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /api/clusters", s.handleAPIClusters)
+	mux.HandleFunc("POST /api/clusters", s.handleAPICreateCluster)
+	mux.HandleFunc("GET /api/create-options", s.handleAPICreateOptions)
+	mux.HandleFunc("GET /api/session", s.handleAPISession)
 	mux.HandleFunc("GET /api/clusters/{namespace}/{name}", s.handleAPIClusterDetail)
 	mux.HandleFunc("GET /api/clusters/{namespace}/{name}/live", s.handleAPILiveStatus)
 	mux.HandleFunc("GET /api/clusters/{namespace}/{name}/dbops", s.handleAPIListDbOps)

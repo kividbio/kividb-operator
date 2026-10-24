@@ -15,10 +15,11 @@ description: |
   failover via a per-pod agent sidecar, scheduled S3-compatible backups, and
   (optionally) a management web GUI.
 type: application
-version: 0.5.2
-appVersion: "0.5.2"
+version: 0.6.0
+appVersion: "0.6.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/kividbio/kividb-operator
+icon: https://raw.githubusercontent.com/kividbio/kividb-operator/master/cmd/gui/static/kividb-logo.png
 sources:
   - https://github.com/kividbio/kividb-operator
 keywords:
@@ -36,12 +37,39 @@ annotations:
   artifacthub.io/operator: "true"
   artifacthub.io/links: |
     - name: Documentation
-      url: https://github.com/kividbio/kividb-operator/tree/main/docs
+      url: https://github.com/kividbio/kividb-operator/tree/master/docs
     - name: Source
       url: https://github.com/kividbio/kividb-operator
-  # No icon is set here yet -- add "artifacthub.io/logo-url" once kividbio
-  # has a hosted logo image; ArtifactHub falls back to a generic icon
-  # without it, which is fine, just less polished.
+  # Shown as a gallery on the chart's Artifact Hub page. Absolute URLs:
+  # Artifact Hub fetches them from GitHub, not from the chart.
+  artifacthub.io/screenshots: |
+    - title: Dashboard
+      url: https://raw.githubusercontent.com/kividbio/kividb-operator/master/assets/gui.png
+    - title: A cluster - topology, pods, spec and services
+      url: https://raw.githubusercontent.com/kividbio/kividb-operator/master/assets/gui-cluster.png
+    - title: Metrics per pod, over 1, 6 or 24 hours
+      url: https://raw.githubusercontent.com/kividbio/kividb-operator/master/assets/gui-metrics.png
+    - title: Creating a cluster, checked by the API server as you type
+      url: https://raw.githubusercontent.com/kividbio/kividb-operator/master/assets/gui-create.png
+    - title: Sign in
+      url: https://raw.githubusercontent.com/kividbio/kividb-operator/master/assets/gui-login.png
+    - title: Light theme
+      url: https://raw.githubusercontent.com/kividbio/kividb-operator/master/assets/gui-light.png
+  artifacthub.io/changes: |
+    - kind: added
+      description: "GUI dashboard: health tiles, search and filter, per-cluster sparklines"
+    - kind: added
+      description: "GUI cluster page: topology with replication lag, charts with a 1h/6h/24h range"
+    - kind: added
+      description: "GUI: create a cluster from a form, previewed by an API server dry run"
+    - kind: added
+      description: "GUI: a sign-in page with a session cookie, in place of the browser's Basic-auth box"
+    - kind: added
+      description: "GUI: light and dark themes, phone layout, in-page dialogs"
+    - kind: fixed
+      description: "GUI: no metrics file written without GUI_METRICS_DIR (read-only root filesystem)"
+    - kind: fixed
+      description: "Replication-lag chart: the agent exports replicas' offsets"
   artifacthub.io/crds: |
     - kind: KividbCluster
       version: v1alpha1

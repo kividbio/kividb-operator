@@ -57,7 +57,7 @@ const (
 	// pre-release checklist in docs/RELEASING.md) -- there is currently no
 	// build-time (-ldflags) mechanism that does this automatically, despite
 	// what an earlier version of this comment claimed.
-	DefaultAgentImage = "docker.io/kividb/kividb-operator-agent:0.5.2"
+	DefaultAgentImage = "docker.io/kividb/kividb-operator-agent:0.6.0"
 
 	// DefaultKividbImage is used when KividbClusterSpec.Image is unset.
 	// Pinned to the kividb engine line this operator release was validated

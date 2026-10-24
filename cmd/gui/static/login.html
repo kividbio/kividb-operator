@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Sign in · KiviDB</title>
+<link rel="icon" type="image/png" href="/static/kividb-logo.png">
+<link rel="stylesheet" href="/static/style.css?v=060">
+<script src="/static/common.js?v=060"></script>
+</head>
+<body data-page="login" class="login-body">
+<main class="login-main">
+  <form class="login-card" method="post" action="/login" id="login-form">
+    <img src="/static/kividb-logo.png" alt="KiviDB" class="brand-logo login-logo">
+    <h1>Sign in to KiviDB</h1>
+    <p class="muted">The kividb-operator console</p>
+    <div id="login-error" class="banner error hidden" role="alert"></div>
+    <div class="field">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <input type="hidden" name="next" id="next" value="/">
+    <button type="submit" class="btn-primary login-submit" id="login-submit">Sign in</button>
+    <p class="faint login-note">The credentials are the GUI's own (<code>gui.auth</code> in the chart), not a Kubernetes or KiviDB user.</p>
+  </form>
+  <button type="button" id="theme-toggle" class="icon-btn login-theme" aria-label="Switch theme"></button>
+</main>
+<script src="/static/login.js?v=060"></script>
+</body>
+</html>

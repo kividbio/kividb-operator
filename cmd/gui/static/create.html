@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>New cluster · KiviDB</title>
+<link rel="icon" type="image/png" href="/static/kividb-logo.png">
+<link rel="stylesheet" href="/static/style.css?v=060">
+<script src="/static/common.js?v=060"></script>
+</head>
+<body data-page="create">
+<header class="topbar">
+  <div class="topbar-brand">
+    <img src="/static/kividb-logo.png" alt="" class="brand-logo">
+    <h1><a href="/" class="back-link">Clusters</a><span class="crumb">/</span>New cluster</h1>
+  </div>
+  <div class="topbar-meta">
+    <span id="mode-pill" class="mode-pill"></span>
+    <button type="button" id="theme-toggle" class="icon-btn" aria-label="Switch theme"></button>
+  </div>
+</header>
+
+<main>
+  <div id="readonly-banner" class="banner info hidden">This GUI is read-only: you can fill in the form and copy the manifest, but creating needs GUI authentication (<code>gui.auth</code> in the chart).</div>
+
+  <form id="create-form" class="create-layout" novalidate>
+    <div class="stack">
+      <section class="card form-section">
+        <h2>Name</h2>
+        <p class="muted">Lowercase letters, digits and dashes. The pods are named <code>&lt;name&gt;-0</code>, <code>&lt;name&gt;-1</code>, &hellip;</p>
+        <div class="form-grid">
+          <div class="field">
+            <label for="f-name">Cluster name</label>
+            <input id="f-name" type="text" required maxlength="40" placeholder="cache" autocomplete="off" spellcheck="false">
+            <span class="err-msg hidden" id="e-name"></span>
+          </div>
+          <div class="field">
+            <label for="f-namespace">Namespace</label>
+            <input id="f-namespace" type="text" required list="ns-list" value="default" autocomplete="off" spellcheck="false">
+            <datalist id="ns-list"></datalist>
+            <span class="hint">It must exist already.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card form-section">
+        <h2>Build</h2>
+        <p class="muted">Which KiviDB build the pods run. Job queues such as BullMQ and Sidekiq run Lua scripts: pick <b>lua</b> or <b>full</b> for them.</p>
+        <div class="option-cards" id="variant-cards">
+          <div class="option-card active" data-variant="standard" tabindex="0"><b>standard</b><span>the fastest; no Lua, no TLS</span></div>
+          <div class="option-card" data-variant="lua" tabindex="0"><b>lua</b><span>EVAL, FUNCTION, job queues</span></div>
+          <div class="option-card" data-variant="tls" tabindex="0"><b>tls</b><span>TLS listener</span></div>
+          <div class="option-card" data-variant="full" tabindex="0"><b>full</b><span>Lua and TLS</span></div>
+        </div>
+        <div class="form-grid" style="margin-top:.9rem">
+          <div class="field full">
+            <label for="f-image">Image</label>
+            <input id="f-image" type="text" autocomplete="off" spellcheck="false">
+            <span class="hint">Set by the build; change it only to pin another version or registry.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card form-section">
+        <h2>Size</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="f-replicas">Replicas</label>
+            <div class="stepper">
+              <button type="button" class="btn-secondary btn-sm" id="rep-dec" aria-label="Fewer replicas">−</button>
+              <input id="f-replicas" type="number" min="0" max="9" value="2">
+              <button type="button" class="btn-secondary btn-sm" id="rep-inc" aria-label="More replicas">+</button>
+            </div>
+            <span class="hint" id="h-replicas">1 master + 2 replicas: 3 pods. Failover needs at least 1.</span>
+          </div>
+          <div class="field">
+            <label for="f-storage">Storage per pod</label>
+            <input id="f-storage" type="text" value="1Gi" spellcheck="false">
+            <span class="hint">A Kubernetes quantity: 512Mi, 1Gi, 20Gi.</span>
+          </div>
+          <div class="field">
+            <label for="f-memory">Memory per pod</label>
+            <input id="f-memory" type="text" placeholder="no limit" spellcheck="false">
+            <span class="hint">Request and limit, e.g. 2Gi. Empty: none.</span>
+          </div>
+          <div class="field">
+            <label for="f-cpu">CPU per pod</label>
+            <input id="f-cpu" type="text" placeholder="no request" spellcheck="false">
+            <span class="hint">A request, e.g. 500m or 2. Empty: none.</span>
+          </div>
+          <div class="field">
+            <label for="f-storageclass">Storage class</label>
+            <select id="f-storageclass"><option value="">cluster default</option></select>
+          </div>
+        </div>
+      </section>
+
+      <section class="card form-section">
+        <h2>Access and operations</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="f-service">Master service</label>
+            <select id="f-service">
+              <option value="ClusterIP">ClusterIP: inside the cluster</option>
+              <option value="LoadBalancer">LoadBalancer: an external address</option>
+              <option value="NodePort">NodePort</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="f-snapshot">Backups</label>
+            <select id="f-snapshot"><option value="">off</option></select>
+            <span class="hint">A KividbSnapshotConfig in the namespace.</span>
+          </div>
+          <div class="field full">
+            <label class="check"><input type="checkbox" id="f-monitoring"> Prometheus exporter sidecar (<code>spec.monitoring.enabled</code>)</label>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <aside class="card preview">
+      <div class="card-head">
+        <h2>Manifest</h2>
+        <button type="button" class="btn-ghost btn-sm" id="btn-copy">Copy</button>
+      </div>
+      <p class="muted" style="font-size:.8rem;margin:-.4rem 0 .6rem" id="preview-note">Checked by the API server as you type (a dry run: nothing is created).</p>
+      <pre id="yaml" class="log-view">&hellip;</pre>
+      <div id="create-error" class="banner error hidden" style="margin-top:.75rem"></div>
+      <div class="form-actions">
+        <a href="/" class="btn-secondary">Cancel</a>
+        <button type="submit" class="btn-primary" id="btn-create" data-write>Create cluster</button>
+      </div>
+    </aside>
+  </form>
+</main>
+
+<script src="/static/create.js?v=060"></script>
+</body>
+</html>
