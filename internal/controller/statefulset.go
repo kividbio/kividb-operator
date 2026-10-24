@@ -234,9 +234,7 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 		{
 			Name: "config",
 			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: configMapName(c)},
-				},
+				Secret: &corev1.SecretVolumeSource{SecretName: configSecretName(c)},
 			},
 		},
 		{

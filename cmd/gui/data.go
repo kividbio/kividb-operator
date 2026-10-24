@@ -105,13 +105,23 @@ func summarizeCluster(c *kividbv1alpha1.KividbCluster) ClusterSummary {
 		Version:           imageTag(image),
 		Variant:           variant,
 		Replicas:          c.Spec.Replicas,
-		DesiredPods:       c.Spec.Replicas + 1,
+		DesiredPods:       desiredPods(c),
 		ReadyPods:         ready,
 		TotalPods:         len(c.Status.Pods),
 		BackupEnabled:     c.Spec.SnapshotConfigRef != nil,
 		CreationTimestamp: created,
 		Age:               humanizeAge(time.Since(created)),
 	}
+}
+
+// desiredPods is the number of pods the cluster should have: the master and
+// its replicas, in each shard of a sharded cluster.
+func desiredPods(c *kividbv1alpha1.KividbCluster) int32 {
+	per := c.Spec.Replicas + 1
+	if c.Spec.Shards != nil {
+		return *c.Spec.Shards * per
+	}
+	return per
 }
 
 // imageTag is an image reference's tag ("v1.1.2-lua" of

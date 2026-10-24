@@ -130,7 +130,7 @@ does, in order:
    (`renderACLFile`), hashing passwords with SHA-256 exactly like kividb's
    own `ACL SETUSER ... >password` would.
 3. Create/update the `<cluster>-auth` Secret (ACL file) and
-   `<cluster>-config` ConfigMap (kividb.conf, rendered from the
+   `<cluster>-config` Secret (kividb.conf, rendered from the
    `KividbConfig`'s `spec.directives` plus the operator-owned
    `port`/`aclfile`/TLS directives — `replicaof` is deliberately never
    written here; topology is runtime-managed, not config-file-managed).

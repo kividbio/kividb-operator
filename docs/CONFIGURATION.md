@@ -29,7 +29,8 @@ All fields below are under `spec:` unless stated otherwise.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `replicas` | int32 | `2` | Replica pods **in addition to** the single master. Total pods = `replicas + 1`. |
+| `shards` | int32 | unset | Makes the cluster **sharded**: that many shards in kividb's cluster mode. See [Sharded clusters](#sharded-clusters-shards). Set or left unset only when the cluster is created. |
+| `replicas` | int32 | `2` | Replica pods **in addition to** each master: beside the single master (total pods = `replicas + 1`), or in each shard (total = `shards × (replicas + 1)`). |
 | `image` | string | `docker.io/kividb/kividb:v1.1.2` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.1.2` or `docker.io/kividb/kividb:v1.1.2-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
 | `variant` | string | `standard` | One of `standard`, `tls`, `lua`, `full`. See [Image and variant](#image-and-variant) — informational only, does not affect which image gets pulled. |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
@@ -259,6 +260,52 @@ patch the `kividb.io/role` pod label and expect the controller to leave it
 alone). Lowering `unhealthyThresholdSeconds` makes failover more
 aggressive at the cost of being more sensitive to transient blips (a slow
 `BGSAVE`, a brief network hiccup).
+
+### Sharded clusters: `shards`
+
+With `spec.shards`, kividb runs in its cluster mode: the 16,384 hash slots
+are spread over the shards, each a master and `replicas` replicas, and
+clients use any Redis Cluster client.
+
+```yaml
+spec:
+  shards: 3
+  replicas: 1          # per shard: 6 pods
+  storage: {size: 20Gi}
+  cluster:
+    nodeTimeoutMs: 5000          # cluster-node-timeout
+    requireFullCoverage: true    # cluster-require-full-coverage
+    minReplicasToWrite: 0        # min-replicas-to-write
+    minReplicasMaxLagSeconds: 10 # min-replicas-max-lag
+    # busSecretRef: {name: my-bus, key: secret}   # generated into <cluster>-bus when unset
+```
+
+- **Fixed at creation.** A cluster is sharded, or not, for good:
+  `spec.shards` cannot be added to or removed from an existing cluster.
+- **At most 24 nodes** (`shards × (replicas + 1)`) for now, and a name of
+  at most 40 characters.
+- **Workloads.** One StatefulSet per shard, `<cluster>-<shard>`, whose pods
+  are `<cluster>-<shard>-<n>`, and a PodDisruptionBudget per shard
+  (`maxUnavailable: 1`). Pods prefer other nodes than their shard's other
+  pods, then than the cluster's.
+- **Configuration.** The operator sets every cluster-mode directive
+  (`cluster-*`, `min-replicas-*`, `masteruser`/`masterauth`, `replicaof`,
+  `tls-cluster`); a `KividbConfig` that sets one is refused. The bus
+  secret is always on.
+- **Not yet:** `bootstrapFromSnapshot`, and `KividbDbOps` restarts.
+
+**Services**, all ClusterIP; the operator never creates a load balancer:
+
+| Service | Selects | For |
+|---|---|---|
+| `<cluster>` | every pod | a seed address for cluster clients |
+| `<cluster>-shard-<i>` | shard `i`'s pods | one shard |
+| `<cluster>-replicas` | every replica | reads from replicas |
+| `<pod>` (one per pod) | that pod (`statefulset.kubernetes.io/pod-name`) | a stable address per node |
+| `<cluster>-<i>-headless` | shard `i`'s pods, not-ready included | each pod's DNS name, `<pod>.<cluster>-<i>-headless.<ns>.svc`; the only one with the agent port |
+
+For access from outside Kubernetes, create your own Service (a
+LoadBalancer, say) with the same selector as a pod's Service.
 
 ### `podAnnotations` / `podLabels`
 

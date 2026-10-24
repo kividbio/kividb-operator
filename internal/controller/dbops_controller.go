@@ -56,6 +56,11 @@ func (r *KividbDbOpsReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{}, err
 	}
+	if isSharded(&cluster) {
+		// Restarting a shard's master needs a CLUSTER FAILOVER first, not
+		// this restart's step-down: not done yet for sharded clusters.
+		return r.fail(ctx, &op, "restarts of sharded clusters are not supported yet")
+	}
 
 	var podList corev1.PodList
 	if err := r.List(ctx, &podList, client.InNamespace(op.Namespace), client.MatchingLabels(selectorLabels(&cluster))); err != nil {

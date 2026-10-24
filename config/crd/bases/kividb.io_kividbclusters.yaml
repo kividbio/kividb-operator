@@ -29,6 +29,9 @@ spec:
         - name: Master
           type: string
           jsonPath: .status.masterPod
+        - name: Shards
+          type: integer
+          jsonPath: .spec.shards
         - name: Replicas
           type: integer
           jsonPath: .spec.replicas
@@ -56,12 +59,49 @@ spec:
             spec:
               type: object
               required: [storage]
+              x-kubernetes-validations:
+                - rule: "has(self.shards) == has(oldSelf.shards)"
+                  message: "spec.shards cannot be added or removed after creation: a cluster is sharded, or not, for good"
               properties:
+                shards:
+                  type: integer
+                  minimum: 1
+                  description: >-
+                    Makes the cluster sharded: that many shards, each a master
+                    and spec.replicas replicas, in kividb's cluster mode. Unset:
+                    one master and its replicas. Set or unset only at creation;
+                    the number can change later.
+                cluster:
+                  type: object
+                  description: Cluster-mode settings, for a cluster with spec.shards.
+                  properties:
+                    nodeTimeoutMs:
+                      type: integer
+                      minimum: 1000
+                      description: cluster-node-timeout in milliseconds. Defaults to 5000.
+                    requireFullCoverage:
+                      type: boolean
+                      description: cluster-require-full-coverage. Defaults to true.
+                    minReplicasToWrite:
+                      type: integer
+                      minimum: 0
+                      description: min-replicas-to-write. 0 (the default) turns it off.
+                    minReplicasMaxLagSeconds:
+                      type: integer
+                      minimum: 1
+                      description: min-replicas-max-lag. Defaults to 10.
+                    busSecretRef:
+                      type: object
+                      description: The cluster-bus-secret. Generated into <cluster>-bus when unset.
+                      required: [name, key]
+                      properties:
+                        name: {type: string}
+                        key: {type: string}
                 replicas:
                   type: integer
                   minimum: 0
                   default: 2
-                  description: Number of replica pods in addition to the single master. Total pods = replicas+1.
+                  description: Number of replicas of each master (beside the single master, or in each shard).
                 image:
                   type: string
                   description: >-
@@ -236,7 +276,7 @@ spec:
               properties:
                 phase:
                   type: string
-                  enum: [Pending, Provisioning, Running, Degraded, FailingOver, Error]
+                  enum: [Pending, Provisioning, Running, Degraded, FailingOver, Rebalancing, Error]
                 masterPod:
                   type: string
                 pods:
@@ -254,6 +294,36 @@ spec:
                       replicationOffset:
                         type: integer
                         format: int64
+                      shard:
+                        type: integer
+                      nodeID:
+                        type: string
+                shards:
+                  type: array
+                  items:
+                    type: object
+                    required: [index]
+                    properties:
+                      index: {type: integer}
+                      masterPod: {type: string}
+                      masterNodeID: {type: string}
+                      slots:
+                        type: array
+                        items: {type: string}
+                      pods:
+                        type: array
+                        items: {type: string}
+                      readyPods: {type: integer}
+                cluster:
+                  type: object
+                  properties:
+                    state: {type: string}
+                    slotsAssigned: {type: integer}
+                    slotsFail: {type: integer}
+                    knownNodes: {type: integer}
+                    currentEpoch:
+                      type: integer
+                      format: int64
                 lastFailoverTime:
                   type: string
                   format: date-time

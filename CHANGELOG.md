@@ -28,8 +28,24 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 - **The agent port is on the headless Service only**, not on the master
   and replica Services.
 
+### Added
+
+- **`spec.shards`**: sharded clusters in kividb's cluster mode, one
+  StatefulSet per shard (`<cluster>-<shard>`), a PodDisruptionBudget per
+  shard, and ClusterIP Services only: one per pod, one per shard,
+  `<cluster>-replicas`, `<cluster>` for the whole cluster, and a headless
+  Service per shard. `spec.cluster` sets the node timeout, full coverage,
+  `min-replicas-to-write` and the bus secret (generated when unset). The
+  operator owns every cluster-mode directive. A cluster is sharded or not
+  from its creation; up to 24 nodes for now.
+
 ### Changed
 
+- **The rendered `kividb.conf` is a Secret** (`<cluster>-config`), not a
+  ConfigMap, for every cluster: a sharded cluster's carries the bus secret
+  and `masterauth`. The old ConfigMap is removed once no pod mounts it;
+  the pods move to the Secret as they roll.
+- The operator's ClusterRole adds PodDisruptionBudgets.
 - The backup Job finds the pod to back up by asking every pod's agent for
   its role, through the headless Service's per-pod names, instead of going
   through the master or replica Service.

@@ -25,7 +25,7 @@ func TestNamingHelpers(t *testing.T) {
 		{"headlessServiceName", headlessServiceName(c), "mycluster-headless"},
 		{"masterServiceName", masterServiceName(c), "mycluster-master"},
 		{"replicaServiceName", replicaServiceName(c), "mycluster-replicas"},
-		{"configMapName", configMapName(c), "mycluster-config"},
+		{"configSecretName", configSecretName(c), "mycluster-config"},
 		{"secretName", secretName(c), "mycluster-auth"},
 		{"backupCronJobName", backupCronJobName(c), "mycluster-backup"},
 	}

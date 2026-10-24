@@ -74,7 +74,7 @@ KividbCluster (CRD)
         ├─▶ StatefulSet (pods, role tracked via label kividb.io/role)
         ├─▶ Service <name>-master     (selects role=master)
         ├─▶ Service <name>-replicas   (selects role=replica)
-        ├─▶ ConfigMap <name>-config   (kividb.conf)
+        ├─▶ Secret <name>-config      (kividb.conf)
         ├─▶ Secret <name>-auth        (ACL file)
         └─▶ CronJob <name>-backup     (triggers agent's /backup over HTTP)
 ```

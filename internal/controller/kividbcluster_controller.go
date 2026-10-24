@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -60,6 +62,7 @@ func (r *KividbClusterReconciler) agentToken() string {
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbsnapshots,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbsnapshots/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=services;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
@@ -81,12 +84,15 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := validateSpec(&c); err != nil {
 		return ctrl.Result{}, r.rejectSpec(ctx, &c, err)
 	}
+	if err := validateSharded(&c); err != nil {
+		return ctrl.Result{}, r.rejectSpec(ctx, &c, err)
+	}
 
 	kdbConfig, err := r.resolveKividbConfig(ctx, &c)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolving configRef: %w", err)
 	}
-	if err := validateKividbConfig(kdbConfig); err != nil {
+	if err := validateKividbConfig(&c, kdbConfig); err != nil {
 		return ctrl.Result{}, r.rejectSpec(ctx, &c, err)
 	}
 	aclConfig, err := r.resolveAclConfig(ctx, &c)
@@ -118,8 +124,11 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling secret: %w", err)
 	}
-	if err := r.reconcileConfigMap(ctx, &c, kdbConfig); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling configmap: %w", err)
+	if isSharded(&c) {
+		return r.reconcileSharded(ctx, &c, kdbConfig, aclConfig, snapCfg, aclContent, defaultPassword, generations)
+	}
+	if err := r.reconcileConfig(ctx, &c, kdbConfig, clusterSecrets{}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling config: %w", err)
 	}
 	if err := r.reconcileServices(ctx, &c, kdbConfig); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling services: %w", err)
@@ -294,15 +303,54 @@ func (r *KividbClusterReconciler) reconcileSecret(ctx context.Context, c *kividb
 	return generations, err
 }
 
-func (r *KividbClusterReconciler) reconcileConfigMap(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) error {
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: configMapName(c), Namespace: c.Namespace}}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		desired := desiredConfigMap(c, kdbConfig)
-		cm.Labels = desired.Labels
-		cm.Data = desired.Data
-		return controllerutil.SetControllerReference(c, cm, r.scheme())
+// reconcileConfig writes the rendered kividb.conf into its Secret, and
+// removes the ConfigMap that held it before 0.7.0 once the Secret exists.
+// (The pods move from one to the other when they next roll: the config
+// volume is part of their template.)
+func (r *KividbClusterReconciler) reconcileConfig(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, secrets clusterSecrets) error {
+	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: configSecretName(c), Namespace: c.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, s, func() error {
+		desired := desiredConfigSecret(c, kdbConfig, secrets)
+		s.Labels = desired.Labels
+		s.Type = desired.Type
+		s.StringData = desired.StringData
+		return controllerutil.SetControllerReference(c, s, r.scheme())
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	return r.deleteLegacyConfigMap(ctx, c)
+}
+
+func (r *KividbClusterReconciler) deleteLegacyConfigMap(ctx context.Context, c *kividbv1alpha1.KividbCluster) error {
+	var cm corev1.ConfigMap
+	err := r.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: configSecretName(c)}, &cm)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !metav1.IsControlledBy(&cm, c) {
+		return nil // not ours: leave it
+	}
+	// Kept while any pod still mounts it: a pod of the old template could
+	// not start again without it. They move to the Secret as they roll.
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(c.Namespace), client.MatchingLabels(selectorLabels(c))); err != nil {
+		return err
+	}
+	for _, p := range pods.Items {
+		for _, v := range p.Spec.Volumes {
+			if v.ConfigMap != nil && v.ConfigMap.Name == cm.Name {
+				return nil
+			}
+		}
+	}
+	if err := r.Delete(ctx, &cm); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 func (r *KividbClusterReconciler) reconcileServices(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) error {
@@ -337,9 +385,14 @@ func (r *KividbClusterReconciler) reconcileServices(ctx context.Context, c *kivi
 // something the pods read once at startup changes (see ConfigHashAnnotation
 // and AuthGenerationAnnotation), so the StatefulSet rolls them.
 func (r *KividbClusterReconciler) reconcileStatefulSet(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig, rollout map[string]string) error {
-	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: statefulSetName(c), Namespace: c.Namespace}}
+	return r.applyStatefulSet(ctx, c, desiredStatefulSet(c, kdbConfig, aclConfig, snapCfg), rollout)
+}
+
+// applyStatefulSet creates or updates the StatefulSet desired, with the
+// rollout annotations on its pod template.
+func (r *KividbClusterReconciler) applyStatefulSet(ctx context.Context, c *kividbv1alpha1.KividbCluster, desired *appsv1.StatefulSet, rollout map[string]string) error {
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: c.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
-		desired := desiredStatefulSet(c, kdbConfig, aclConfig, snapCfg)
 		creating := sts.CreationTimestamp.IsZero()
 		sts.Labels = desired.Labels
 		sts.Spec.Replicas = desired.Spec.Replicas
@@ -436,9 +489,23 @@ func validateSpec(c *kividbv1alpha1.KividbCluster) error {
 // cluster-enabled turns on kividb's cluster mode, whose failover the
 // operator's own (REPLICAOF-driven) failover would fight: the replicas
 // would be refused, roles mislabelled and rollouts stuck. Sharded clusters
-// are spec.shards, not a directive.
-func validateKividbConfig(kdbConfig *kividbv1alpha1.KividbConfig) error {
+// are spec.shards, not a directive. In a sharded cluster, the operator
+// sets every cluster-mode directive itself.
+func validateKividbConfig(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) error {
 	if kdbConfig == nil {
+		return nil
+	}
+	if isSharded(c) {
+		var owned []string
+		for k := range kdbConfig.Spec.Directives {
+			if operatorOwnedClusterDirective(k) {
+				owned = append(owned, k)
+			}
+		}
+		if len(owned) > 0 {
+			sort.Strings(owned)
+			return fmt.Errorf("KividbConfig %s sets %s: in a sharded cluster the operator sets these itself (see spec.cluster)", kdbConfig.Name, strings.Join(owned, ", "))
+		}
 		return nil
 	}
 	for k, v := range kdbConfig.Spec.Directives {
@@ -493,6 +560,7 @@ func (r *KividbClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Owns(&batchv1.CronJob{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(mapPodToCluster)).
 		Complete(r)

@@ -151,7 +151,7 @@ func TestClusterEnabledIsRefused(t *testing.T) {
 		{"Cluster-Enabled": "YES"},
 		{"cluster-enabled": "true"},
 	} {
-		if validateKividbConfig(cfg(d)) == nil {
+		if validateKividbConfig(&kividbv1alpha1.KividbCluster{}, cfg(d)) == nil {
 			t.Errorf("accepted %v", d)
 		}
 	}
@@ -161,11 +161,11 @@ func TestClusterEnabledIsRefused(t *testing.T) {
 		{"cluster-enabled": " No "},
 		{"maxmemory": "1gb"},
 	} {
-		if err := validateKividbConfig(cfg(d)); err != nil {
+		if err := validateKividbConfig(&kividbv1alpha1.KividbCluster{}, cfg(d)); err != nil {
 			t.Errorf("refused %v: %v", d, err)
 		}
 	}
-	if validateKividbConfig(nil) != nil {
+	if validateKividbConfig(&kividbv1alpha1.KividbCluster{}, nil) != nil {
 		t.Error("refused no KividbConfig")
 	}
 }
