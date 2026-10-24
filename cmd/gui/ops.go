@@ -171,7 +171,7 @@ func (s *server) handleAPILiveStatus(w http.ResponseWriter, r *http.Request) {
 		ReplicationOffset int64  `json:"replicationOffset"`
 		MasterHost        string `json:"masterHost,omitempty"`
 		// MasterLinkUp: a replica's link to its master is up.
-		MasterLinkUp bool   `json:"masterLinkUp"`
+		MasterLinkUp *bool  `json:"masterLinkUp,omitempty"`
 		Keys         *int64 `json:"keys,omitempty"`
 		AofEnabled   bool   `json:"aofEnabled"`
 		UsedMemory   string `json:"usedMemory,omitempty"`
