@@ -157,6 +157,11 @@
           return {};
         })
         .then(function (body) {
+          // Signed out (the session expired): back to the login page.
+          if (resp.status === 401 && document.body.dataset.page !== "login") {
+            var here = window.location.pathname + window.location.search + window.location.hash;
+            window.location.href = "/login?next=" + encodeURIComponent(here);
+          }
           if (!resp.ok) {
             var err = new Error((body && body.error) || "HTTP " + resp.status);
             err.status = resp.status;
@@ -203,6 +208,14 @@
     if (pill) {
       pill.textContent = ro ? "read-only" : "signed in" + (KV.session.user ? " as " + KV.session.user : "");
       pill.title = ro ? "Changes are disabled until GUI authentication is configured." : "";
+      if (!ro && !KV.qs("signout-form")) {
+        var form = KV.el(
+          "form",
+          { id: "signout-form", className: "signout", method: "post", action: "/logout" },
+          KV.el("button", { type: "submit", className: "btn-ghost btn-sm", text: "Sign out" })
+        );
+        pill.parentNode.insertBefore(form, pill.nextSibling);
+      }
     }
   };
 

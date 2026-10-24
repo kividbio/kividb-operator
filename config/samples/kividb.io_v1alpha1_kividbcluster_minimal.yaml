@@ -1,6 +1,6 @@
 # Smallest valid KividbCluster: only the one required spec field
 # (spec.storage.size). spec.image is left unset here, so the operator
-# uses its release default (docker.io/kividb/kividb:v1.1.2 for 0.5.3).
+# uses its release default (docker.io/kividb/kividb:v1.1.2 for 0.6.0).
 # Pin spec.image explicitly for a different tag/variant (e.g.
 # "docker.io/kividb/kividb:v1.1.2-tls"). Everything else takes the CRD's
 # defaults: replicas=2

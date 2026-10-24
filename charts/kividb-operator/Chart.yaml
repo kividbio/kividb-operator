@@ -15,8 +15,8 @@ description: |
   failover via a per-pod agent sidecar, scheduled S3-compatible backups, and
   (optionally) a management web GUI.
 type: application
-version: 0.5.3
-appVersion: "0.5.3"
+version: 0.6.0
+appVersion: "0.6.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/kividbio/kividb-operator
 sources:

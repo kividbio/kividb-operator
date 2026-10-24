@@ -122,8 +122,19 @@ Default engine image when `spec.image` is empty:
 
 ## Auth
 
-Set both `GUI_AUTH_USERNAME` and `GUI_AUTH_PASSWORD` to enable HTTP Basic
-auth on all routes except `/healthz`. Chart:
+Set both `GUI_AUTH_USERNAME` and `GUI_AUTH_PASSWORD` to require signing in
+on every route except `/healthz`, the sign-in page and the static assets.
+
+In a browser you sign in on the GUI's own page (`/login`), which sets a
+session cookie for 12 hours: HttpOnly, SameSite=Lax, and Secure when the GUI
+is reached over HTTPS (directly, or through a proxy that sets
+`X-Forwarded-Proto`). The cookie is signed with a key derived from the
+credentials, so sessions survive a GUI restart and end when the password
+changes. Ten failed sign-ins from one address lock it out for five minutes.
+**Sign out** is in the top bar.
+
+Scripts can keep using HTTP Basic auth on the API:
+`curl -u admin:… https://gui.example/api/clusters`. Chart:
 
 ```yaml
 gui:
@@ -154,7 +165,7 @@ Open <http://localhost:8090/>.
 |----------|---------|---------|
 | `GUI_PORT` | `8090` | Listen port |
 | `WATCH_NAMESPACE` | (unset) | Restrict to one namespace |
-| `GUI_AUTH_USERNAME` / `GUI_AUTH_PASSWORD` | unset | Basic auth |
+| `GUI_AUTH_USERNAME` / `GUI_AUTH_PASSWORD` | unset | The sign-in credentials (also accepted as Basic auth) |
 | `GUI_METRICS_DIR` | unset | Persist 24h metrics JSON here |
 
 ## Deploying
@@ -192,5 +203,5 @@ services, events, statefulsets, cronjobs; `get`/`list` on storageclasses
 ## Building the image
 
 ```sh
-docker build -f Dockerfile.gui -t docker.io/kividb/kividb-operator-gui:0.5.3 .
+docker build -f Dockerfile.gui -t docker.io/kividb/kividb-operator-gui:0.6.0 .
 ```

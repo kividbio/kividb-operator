@@ -6,12 +6,24 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.5.3] - 2026-10-24
+## [0.6.0] - 2026-10-24
 
 A new management GUI. The default engine stays kividb **1.1.2**.
 
+**Read before upgrading:** with GUI authentication on, the GUI now has its
+own sign-in page and session cookie in place of the browser's Basic-auth
+box. Scripts that call the API with Basic auth (`curl -u`) keep working.
+
 ### Added
 
+- **A sign-in page** (`/login`). Signing in sets a session cookie
+  (HttpOnly, SameSite=Lax, Secure over HTTPS, 12 hours) signed with a key
+  derived from the GUI's credentials, so it survives a GUI restart and
+  ends when the password changes. Pages redirect to it when signed out,
+  and come back to where you were; the API answers 401 without the header
+  that makes browsers show their own login box. Ten failed attempts from
+  one address lock it out for five minutes. **Sign out** is in the top
+  bar. Basic auth still works for scripts.
 - **Dashboard overview.** Summary tiles (clusters; healthy, needing
   attention, in error; memory, commands per second and clients across all
   pods), a search box and a health filter, and for each cluster its engine
@@ -50,7 +62,7 @@ A new management GUI. The default engine stays kividb **1.1.2**.
 - The GUI's ClusterRole (chart and `config/gui/rbac.yaml`) adds `create` on
   `kividbclusters` and `get`/`list` on `storageclasses`, for the new-cluster
   form.
-- Default agent image **`docker.io/kividb/kividb-operator-agent:0.5.3`**.
+- Default agent image **`docker.io/kividb/kividb-operator-agent:0.6.0`**.
   A `KividbCluster` that leaves `spec.agentImage` unset rolls its pods to
   it, one by one, when the operator is upgraded.
 - The chart is signed with cosign, and Artifact Hub's repository metadata

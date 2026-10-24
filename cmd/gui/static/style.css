@@ -613,6 +613,43 @@ tbody tr:hover { background: color-mix(in srgb, var(--brand) 4%, transparent); }
 .preview pre { max-height: 60vh; }
 .form-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem; }
 
+/* ---------- login ---------- */
+
+.login-body {
+  min-height: 100vh;
+  background:
+    radial-gradient(60rem 30rem at 50% -10%, color-mix(in srgb, var(--brand) 14%, transparent), transparent 70%),
+    var(--bg);
+}
+.login-main {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 1rem;
+  max-width: none;
+}
+.login-card {
+  width: min(380px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 2rem 1.75rem 1.5rem;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.login-card h1 { margin: 0.4rem 0 0; font-size: 1.3rem; text-align: center; }
+.login-card > p { margin: -0.5rem 0 0.3rem; text-align: center; font-size: 0.86rem; }
+.login-logo { width: 3.6rem; height: 3.6rem; padding: 0.45rem; align-self: center; }
+.login-card .banner { margin: 0; }
+.login-card input { width: 100%; padding: 0.6rem 0.7rem; }
+.login-submit { width: 100%; padding: 0.65rem; font-size: 0.92rem; margin-top: 0.3rem; }
+.login-note { font-size: 0.74rem; text-align: center; margin: 0.2rem 0 0; }
+.login-theme { position: fixed; top: 1rem; right: 1rem; }
+.signout { display: inline; margin: 0; }
+
 /* ---------- dialogs, toasts ---------- */
 
 .dialog-backdrop {

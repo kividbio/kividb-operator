@@ -35,10 +35,10 @@ minikube start --cpus=4 --memory=6144 --driver=docker
 Build operator images locally, then load them into minikube:
 
 ```bash
-make docker-build VERSION=0.5.3-local
-# or: docker build -t docker.io/kividb/kividb-operator:0.5.3-local -f Dockerfile .
-LOAD_IMAGES=1 OPERATOR_TAG=0.5.3-local make e2e
-# Pre-GA engine: KIVIDB_VERSION=v1.1.2-rc1 LOAD_IMAGES=1 OPERATOR_TAG=0.5.3-local make e2e
+make docker-build VERSION=0.6.0-local
+# or: docker build -t docker.io/kividb/kividb-operator:0.6.0-local -f Dockerfile .
+LOAD_IMAGES=1 OPERATOR_TAG=0.6.0-local make e2e
+# Pre-GA engine: KIVIDB_VERSION=v1.1.2-rc1 LOAD_IMAGES=1 OPERATOR_TAG=0.6.0-local make e2e
 ```
 
 ## Quick start
@@ -63,7 +63,7 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `OPERATOR_TAG` | `0.5.3-local` | Manager / agent / GUI image tag |
+| `OPERATOR_TAG` | `0.6.0-local` | Manager / agent / GUI image tag |
 | `OPERATOR_REGISTRY` | `docker.io/kividb` | Image registry prefix |
 | `KIVIDB_VERSION` | `v1.1.2` | Engine tag prefix (`v1.1.2`, or e.g. `v1.1.2-rc1` pre-GA) |
 | `LOAD_IMAGES` | `0` | `1` → `minikube image load` for operator (+ engine in compat) |
