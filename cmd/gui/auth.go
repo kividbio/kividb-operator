@@ -224,7 +224,10 @@ func clientAddr(r *http.Request) string {
 // safeNext keeps the after-login redirect on this GUI: a path, never
 // another site ("//evil.example", "https://…", "/\\evil.example").
 func safeNext(next string) string {
-	if next == "" || next[0] != '/' || strings.HasPrefix(next, "//") || strings.ContainsRune(next, '\\') {
+	if next == "" || next[0] != '/' || (len(next) > 1 && (next[1] == '/' || next[1] == '\\')) {
+		return "/"
+	}
+	if strings.ContainsRune(next, '\\') {
 		return "/"
 	}
 	// Browsers drop tabs and newlines from a URL: "/<tab>/evil.example"
