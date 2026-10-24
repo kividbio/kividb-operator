@@ -6,6 +6,56 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-24
+
+A new management GUI. The default engine stays kividb **1.1.2**.
+
+### Added
+
+- **Dashboard overview.** Summary tiles (clusters; healthy, needing
+  attention, in error; memory, commands per second and clients across all
+  pods), a search box and a health filter, and for each cluster its engine
+  version and build, a pod bar, and sparklines of the last hour's commands
+  per second and memory. The figures come from the GUI's own scrapes, so
+  the dashboard is still one `List` of `KividbCluster`s.
+- **Topology** on a cluster's page: the master and its replicas, each with
+  its readiness, memory, keys, replication offset and node, and how far each
+  replica is behind the master.
+- **Charts** with axes, a hover readout of every pod, a legend, and a 1 h /
+  6 h / 24 h range: commands per second, memory and clients per pod, and
+  each replica's replication lag (which replaces the raw offset chart).
+- **New cluster** (`/new`): a form for the name, namespace, build (standard,
+  lua, tls, full), replicas, storage, memory and CPU, storage class, master
+  service type, backups and monitoring. The manifest beside it is the API
+  server's dry run of the form, updated as you type, so a mistake shows
+  before anything is created; it can be copied for `kubectl apply`. Picking
+  a build sets the matching image as well as `spec.variant` (the operator
+  never derives one from the other). Creating needs GUI authentication, as
+  every other change does. `POST /api/clusters` (`?dryRun=1` for the
+  preview) and `GET /api/create-options` back it.
+- **Light and dark themes**, following the system setting until you pick
+  one; a layout for phones and tablets.
+- **Logs**: a line count, follow mode, highlighting, and errors and warnings
+  in colour. **Console** (the RESP explorer): replies printed as
+  `redis-cli` prints them, quoted arguments, and history on ↑ / ↓.
+- `GET /api/session`: whether the GUI accepts changes. On a read-only GUI
+  every button that would only be refused is disabled, and says why.
+
+### Changed
+
+- Confirmations are in-page dialogs, not the browser's `confirm` and
+  `prompt`; deleting a cluster asks for its name. Results show as toasts.
+- The cluster page's tabs are Overview, Metrics, Logs, Console, Backups,
+  and Events & operations.
+- The GUI's ClusterRole (chart and `config/gui/rbac.yaml`) adds `create` on
+  `kividbclusters` and `get`/`list` on `storageclasses`, for the new-cluster
+  form.
+- Default agent image **`docker.io/kividb/kividb-operator-agent:0.5.3`**.
+  A `KividbCluster` that leaves `spec.agentImage` unset rolls its pods to
+  it, one by one, when the operator is upgraded.
+- The chart is signed with cosign, and Artifact Hub's repository metadata
+  is published with it (from #8).
+
 ## [0.5.2] - 2026-10-24
 
 A security release. The default engine stays kividb **1.1.2**.

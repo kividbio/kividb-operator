@@ -146,7 +146,7 @@ kubectl port-forward -n kividb-operator-system svc/kividb-operator-gui 8090:8090
 
 ## Status
 
-This project is at `v0.5.2` — see [CHANGELOG.md](CHANGELOG.md). Validated
+This project is at `v0.5.3` — see [CHANGELOG.md](CHANGELOG.md). Validated
 against kividb **v1.1.2** (that tag is also the default when
 `spec.image` is unset). The CRD API version is `kividb.io/v1alpha1`:
 expect it to evolve.
