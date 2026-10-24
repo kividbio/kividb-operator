@@ -466,6 +466,7 @@
     if (l && l.error) row("agent", "unreachable", "lag bad");
     if (!isMaster) {
       if (l && !l.error && !l.masterHost) row("master", "none", "lag bad");
+      else if (l && !l.error && l.masterLinkUp === false) row("master link", "down", "lag bad");
       else row("lag", lag.text, "lag " + lag.cls);
     }
     row("memory", l && l.usedMemory ? KV.fmtBytes(l.usedMemory) : "–");
@@ -1109,6 +1110,10 @@
 
     var hash = (window.location.hash || "").slice(1);
     if (hash && KV.qs("panel-" + hash)) showTab(hash);
+    window.addEventListener("hashchange", function () {
+      var h = (window.location.hash || "").slice(1);
+      if (h && KV.qs("panel-" + h) && h !== activeTab) showTab(h);
+    });
     KV.loadSession().then(function () {
       KV.applyWriteMode();
     });

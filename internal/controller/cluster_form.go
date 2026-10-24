@@ -239,6 +239,20 @@ func (r *KividbClusterReconciler) reconcileClusterTopology(ctx context.Context, 
 		return acted, errors.Join(errs...)
 	}
 
+	// 3b. A replica must reach its own master. One that knows it at an old
+	// address (it was down when the master moved, or came back on an old
+	// volume) retries that address for ever: introduce them again.
+	for _, p := range pods {
+		master, ok := v.masters[p.shard]
+		me, mine := p.myself()
+		if !ok || master == p || master.status == nil || !mine || me.MasterID != master.status.MyID {
+			continue
+		}
+		if seen, known := p.status.Node(master.status.MyID); known && (seen.IP != master.ip() || seen.Has("noaddr")) {
+			do("meet "+master.pod.Name+" from "+p.pod.Name, func() error { return r.Agent.ClusterMeet(ctx, p.ip(), master.ip(), port) })
+		}
+	}
+
 	// 4. Each shard's other pods replicate its master: a pod that is a
 	// master owning nothing (new, or its volume was replaced), or that
 	// follows a node outside its shard.
@@ -294,6 +308,35 @@ func (r *KividbClusterReconciler) reconcileClusterTopology(ctx context.Context, 
 			}
 		}
 	}
+	// Any other node no pod is, which owns nothing and is failed: a node
+	// forgotten while some pod was away, and brought back by it (from its
+	// volume). The node IDs last seen on each pod count as the cluster's
+	// own, so a pod that is merely down is never taken for one.
+	current := map[string]bool{}
+	for _, p := range pods {
+		if p.status != nil {
+			current[p.status.MyID] = true
+		}
+	}
+	for _, ps := range c.Status.Pods {
+		if ps.NodeID != "" {
+			current[ps.NodeID] = true
+		}
+	}
+	if len(current) > 0 {
+		for _, q := range pods {
+			if q.status == nil {
+				continue
+			}
+			for _, n := range q.status.Nodes {
+				if !current[n.ID] && !stale[n.ID] && n.Failed() && n.SlotCount() == 0 {
+					log.Info("a node no pod is is still known; forgetting it", "node", n.ID, "on", q.pod.Name)
+					stale[n.ID] = true
+				}
+			}
+		}
+	}
+
 	// A pod that did not answer may still know an ID, and would gossip it
 	// back: an ID leaves the list only when every pod answered and none
 	// knows it.

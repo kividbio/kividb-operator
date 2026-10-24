@@ -183,6 +183,7 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 				out.MasterPort = int32(port)
 			}
 			out.ReplicationOffset = roleReply.Array[4].Int
+			out.MasterLinkUp = roleReply.Array[3].Str == "connected"
 		}
 	}
 

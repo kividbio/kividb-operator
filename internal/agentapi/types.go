@@ -31,8 +31,11 @@ const (
 
 // StatusResponse is returned by GET /status.
 type StatusResponse struct {
-	Role              Role   `json:"role"`
-	Connected         bool   `json:"connected"`
+	Role      Role `json:"role"`
+	Connected bool `json:"connected"`
+	// MasterLinkUp: on a replica, its link to the master is up (ROLE's
+	// state is "connected").
+	MasterLinkUp      bool   `json:"masterLinkUp,omitempty"`
 	MasterHost        string `json:"masterHost,omitempty"`
 	MasterPort        int32  `json:"masterPort,omitempty"`
 	ReplicationOffset int64  `json:"replicationOffset"`

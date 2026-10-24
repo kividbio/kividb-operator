@@ -68,7 +68,8 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   IMPORT` on the destination master (no `ASK` for clients). Phase
   `Rebalancing`, with the plan, the move under way and the last error in
   `status.cluster.rebalance`. `status.cluster.shards` is the count the
-  slots are spread over. Removed shards' PVCs are kept. The agent has
+  slots are spread over. Removed shards' PVCs are deleted once their
+  slots have all moved out. The agent has
   `/cluster/migration/import` and `/cluster/migration/status`.
 - **The console shows sharded clusters.**
   - **Shards:** one card per shard, with its slots, master and replicas, and each replica's lag against its own shard's master.

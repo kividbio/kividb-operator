@@ -341,9 +341,10 @@ spec:
     gives the new ones its share. Going from 3 to 4 shards moves 4,096
     slots, a quarter, and nothing else.
   - **Removing shards:** the shards past the new count give all their
-    slots to the others; then their StatefulSets are deleted and their
-    nodes forgotten. **Their PersistentVolumeClaims are kept**: delete
-    them yourself once you no longer want them.
+    slots to the others; then their StatefulSets, their volumes
+    (PersistentVolumeClaims) and their nodes go. The volumes hold none of
+    the cluster's data by then, only the nodes' identity and their view of
+    the cluster, which would confuse a shard added later on them.
   - **How slots move:** one move at a time, each a `CLUSTER MIGRATION
     IMPORT` on the destination master. The engine copies the slots' keys,
     streams the writes made meanwhile, pauses writes for an instant and

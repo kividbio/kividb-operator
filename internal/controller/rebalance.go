@@ -15,6 +15,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -332,6 +333,15 @@ func (r *KividbClusterReconciler) finishRebalance(ctx context.Context, c *kividb
 			logf.FromContext(ctx).Error(err, "rebalance: deleting a removed shard's disruption budget", "shard", s)
 			return true
 		}
+		// Its volumes hold nothing of the cluster's now (every slot has
+		// moved out), but they do hold the node's identity and its view of
+		// the cluster: a shard added later would come back on them, as a
+		// node the others forgot, knowing nodes that are gone, at addresses
+		// that are gone. Kubernetes removes them once their pods are gone.
+		if err := r.deleteShardVolumes(ctx, c, s); err != nil {
+			logf.FromContext(ctx).Error(err, "rebalance: deleting a removed shard's volumes", "shard", s)
+			return true
+		}
 	}
 	stale := map[string]bool{}
 	for _, id := range cl.StaleNodeIDs {
@@ -345,12 +355,33 @@ func (r *KividbClusterReconciler) finishRebalance(ctx context.Context, c *kividb
 	}
 	sort.Strings(cl.StaleNodeIDs)
 	if rb.From > rb.To {
-		r.event(c, corev1.EventTypeNormal, "ShardsRemoved", "removed shards %d to %d; their volumes are kept", rb.To, rb.From-1)
+		r.event(c, corev1.EventTypeNormal, "ShardsRemoved", "removed shards %d to %d, and their volumes", rb.To, rb.From-1)
 	}
 	r.event(c, corev1.EventTypeNormal, "RebalanceCompleted", "%d shards, %d slot moves", rb.To, rb.MovesDone)
 	cl.Shards = rb.To
 	cl.Rebalance = nil
 	return true
+}
+
+// deleteShardVolumes deletes the PersistentVolumeClaims of shard s's pods
+// (data-<cluster>-<shard>-<n>).
+func (r *KividbClusterReconciler) deleteShardVolumes(ctx context.Context, c *kividbv1alpha1.KividbCluster, s int32) error {
+	var pvcs corev1.PersistentVolumeClaimList
+	if err := r.List(ctx, &pvcs, client.InNamespace(c.Namespace)); err != nil {
+		return err
+	}
+	prefix := "data-" + shardStatefulSetName(c, s) + "-"
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		n := strings.TrimPrefix(pvc.Name, prefix)
+		if n == pvc.Name || n == "" || strings.Trim(n, "0123456789") != "" {
+			continue
+		}
+		if err := r.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func podByName(pods []*shardPod, name string) *shardPod {

@@ -9,6 +9,7 @@ import (
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -291,5 +292,55 @@ func TestSlotOwnersPreferEachMastersOwnView(t *testing.T) {
 	owners := slotOwners(v)
 	if owners[100] != 0 || owners[9000] != 1 || owners[12000] != 2 {
 		t.Fatalf("slot 100 -> shard %d, 9000 -> %d, 12000 -> %d", owners[100], owners[9000], owners[12000])
+	}
+}
+
+// A shard removed, then added again: its pods must not come back on the
+// old volumes (deleted with the shard), and a pod that comes back knowing
+// gone nodes and an old address for its master is put right.
+func TestRemovedShardsVolumesGo(t *testing.T) {
+	h := newFormingHarness(t, 3, 1)
+	for i := 0; i < 4; i++ {
+		h.pass()
+	}
+	ctx := context.Background()
+	for _, name := range []string{"data-s-2-0", "data-s-2-1", "data-s-1-0", "data-s-20-0", "other-s-2-0"} {
+		pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+		if err := h.r.Create(ctx, pvc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.reshard(2, 20)
+	h.checkSpread(2)
+	var pvcs corev1.PersistentVolumeClaimList
+	_ = h.r.List(ctx, &pvcs)
+	var left []string
+	for _, p := range pvcs.Items {
+		left = append(left, p.Name)
+	}
+	if fmt.Sprint(left) != "[data-s-1-0 data-s-20-0 other-s-2-0]" {
+		t.Fatalf("volumes left: %v", left)
+	}
+}
+
+func TestStaleViewsArePutRight(t *testing.T) {
+	h := newFormingHarness(t, 2, 1)
+	for i := 0; i < 4; i++ {
+		h.pass()
+	}
+	// s-0-1 has its master at an old address, and knows a node no pod is
+	// (failed, owning nothing): what an old volume brings back.
+	replica := h.node("s-0-1")
+	replica.seen[nodeID("s-0-0")] = "10.9.9.9"
+	ghost := strings.Repeat("9", 40)
+	replica.seen[ghost] = "10.9.9.8"
+	h.engine.calls = nil
+	h.pass()
+	h.pass()
+	if replica.seen[nodeID("s-0-0")] != "10.0.0.1" {
+		t.Fatalf("s-0-1 still has its master at %s; calls %v", replica.seen[nodeID("s-0-0")], h.engine.calls)
+	}
+	if _, still := replica.seen[ghost]; still {
+		t.Fatalf("the gone node is still known; calls %v", h.engine.calls)
 	}
 }

@@ -170,10 +170,12 @@ func (s *server) handleAPILiveStatus(w http.ResponseWriter, r *http.Request) {
 		IP                string `json:"ip"`
 		ReplicationOffset int64  `json:"replicationOffset"`
 		MasterHost        string `json:"masterHost,omitempty"`
-		Keys              *int64 `json:"keys,omitempty"`
-		AofEnabled        bool   `json:"aofEnabled"`
-		UsedMemory        string `json:"usedMemory,omitempty"`
-		Error             string `json:"error,omitempty"`
+		// MasterLinkUp: a replica's link to its master is up.
+		MasterLinkUp bool   `json:"masterLinkUp"`
+		Keys         *int64 `json:"keys,omitempty"`
+		AofEnabled   bool   `json:"aofEnabled"`
+		UsedMemory   string `json:"usedMemory,omitempty"`
+		Error        string `json:"error,omitempty"`
 	}
 	out := make([]row, 0, len(pods.Items))
 	for i := range pods.Items {
@@ -196,6 +198,7 @@ func (s *server) handleAPILiveStatus(w http.ResponseWriter, r *http.Request) {
 				rr.Role = string(st.Role)
 				rr.ReplicationOffset = st.ReplicationOffset
 				rr.MasterHost = st.MasterHost
+				rr.MasterLinkUp = st.MasterLinkUp
 				rr.AofEnabled = st.AofEnabled
 				if st.KeyCountKnown {
 					keys := st.KeyCount
