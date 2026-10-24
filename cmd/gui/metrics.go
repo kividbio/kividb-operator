@@ -379,6 +379,12 @@ type agentGauges struct {
 	haveMem, haveClients, haveRepl, haveCmd bool
 }
 
+// replicaOffsetMetric is a replica's applied offset. kividb reports it in
+// place of master_repl_offset on a replica, so it is the replica's point in
+// the replication-offset series, and the lag chart compares it with the
+// master's.
+const replicaOffsetMetric = "kividb_slave_repl_offset"
+
 func scrapeAgentGauges(ctx context.Context, podIP string) (agentGauges, error) {
 	var out agentGauges
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s:8081/metrics", podIP), nil)
@@ -410,6 +416,10 @@ func scrapeAgentGauges(ctx context.Context, podIP string) (agentGauges, error) {
 		case "kividb_connected_clients":
 			out.clients, out.haveClients = val, true
 		case "kividb_master_repl_offset":
+			if !out.haveRepl {
+				out.replOffset, out.haveRepl = val, true
+			}
+		case replicaOffsetMetric:
 			out.replOffset, out.haveRepl = val, true
 		case "kividb_commands_processed_total":
 			out.commands, out.haveCmd = val, true

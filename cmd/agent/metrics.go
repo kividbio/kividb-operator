@@ -25,6 +25,9 @@ var metricSpecs = []metricSpec{
 	{"uptime_in_seconds", "kividb_uptime_in_seconds", "Seconds since kividb started", false},
 	{"connected_slaves", "kividb_connected_slaves", "Number of connected replicas", false},
 	{"master_repl_offset", "kividb_master_repl_offset", "Current replication offset", false},
+	// A replica's own offset: what it has applied of its master's stream.
+	// kividb reports it only on a replica, and no master_repl_offset there.
+	{"slave_repl_offset", "kividb_slave_repl_offset", "Replication offset this replica has applied", false},
 	{"rdb_changes_since_last_save", "kividb_rdb_changes_since_last_save", "Number of writes since the last snapshot", false},
 	{"total_commands_processed", "kividb_commands_processed_total", "Total commands processed", true},
 	{"total_connections_received", "kividb_connections_received_total", "Total connections accepted", true},

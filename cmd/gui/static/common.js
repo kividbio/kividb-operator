@@ -13,7 +13,7 @@
     return document.getElementById(id);
   };
 
-  // el("div", {className: "x", onclick: fn}, child, "text", ...)
+  // el("div", {className: "x", onclick: fn}, child, "text", [more, children], ...)
   KV.el = function (tag, props) {
     var node = document.createElement(tag);
     if (props) {
@@ -27,11 +27,12 @@
         else node.setAttribute(k, v);
       });
     }
-    for (var i = 2; i < arguments.length; i++) {
-      var c = arguments[i];
-      if (c === null || c === undefined || c === false) continue;
-      node.appendChild(typeof c === "string" || typeof c === "number" ? document.createTextNode(String(c)) : c);
-    }
+    var add = function (c) {
+      if (c === null || c === undefined || c === false) return;
+      if (Array.isArray(c)) c.forEach(add);
+      else node.appendChild(typeof c === "string" || typeof c === "number" ? document.createTextNode(String(c)) : c);
+    };
+    for (var i = 2; i < arguments.length; i++) add(arguments[i]);
     return node;
   };
 
@@ -429,14 +430,14 @@
       return s.points && s.points.length;
     });
     var fmt = opts.format || KV.fmtNum;
-    var rect = container.getBoundingClientRect();
-    var W = Math.max(rect.width, 260),
-      H = Math.max(rect.height, 140);
+    var W = Math.max(container.clientWidth, 260),
+      H = opts.height || 190;
     var padL = 52,
       padR = 10,
       padT = 8,
       padB = 22;
     var svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H });
+    svg.style.height = H + "px";
     container.appendChild(svg);
 
     if (!series.length) {

@@ -202,7 +202,7 @@
           td(p.role),
           ready,
           td(p.phase),
-          td(l ? l.replicationOffset : p.replicationOffset, "mono"),
+          td(Number(l ? l.replicationOffset : p.replicationOffset || 0).toLocaleString(), "mono"),
           td(l && l.usedMemory ? KV.fmtBytes(l.usedMemory) : null),
           td(l && l.keys != null ? KV.fmtNum(l.keys) : null),
           td(p.nodeName, "mono"),
@@ -237,7 +237,7 @@
     }
     row("memory", l && l.usedMemory ? KV.fmtBytes(l.usedMemory) : "–");
     row("keys", l && l.keys != null ? KV.fmtNum(l.keys) : "–");
-    row("offset", l ? KV.fmtNum(l.replicationOffset) : KV.fmtNum(p.replicationOffset));
+    row("offset", Number(l ? l.replicationOffset : p.replicationOffset || 0).toLocaleString());
     row("node", KV.dash(p.nodeName));
     return el(
       "div",
