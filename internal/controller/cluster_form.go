@@ -330,7 +330,7 @@ func (r *KividbClusterReconciler) reconcileClusterTopology(ctx context.Context, 
 			}
 			for _, n := range q.status.Nodes {
 				if !current[n.ID] && !stale[n.ID] && n.Failed() && n.SlotCount() == 0 {
-					log.Info("a node no pod is is still known; forgetting it", "node", n.ID, "on", q.pod.Name)
+					log.Info("a node that is none of the pods is still known; forgetting it", "node", n.ID, "on", q.pod.Name)
 					stale[n.ID] = true
 				}
 			}
