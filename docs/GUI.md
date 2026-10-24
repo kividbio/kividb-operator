@@ -79,6 +79,10 @@ steps are not carried over.
 
 **A sharded cluster** (`spec.shards`) gets its own Overview:
 
+<p align="center">
+  <img src="../assets/gui-shards.png" alt="A sharded cluster going from 4 shards to 3: the slot map with the slots being moved striped, and a card per shard, the one being removed marked" width="720">
+</p>
+
 - **Shards**: one card per shard, each with the slots it owns, its master
   and its replicas, each replica's lag against its own shard's master. A
   shard added or being removed by a change of the shard count is marked.
