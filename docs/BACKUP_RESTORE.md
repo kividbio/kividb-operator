@@ -36,6 +36,38 @@ Every run — success or failure — produces a
 recording exactly which pod/role was used, the object key, size, and
 duration. You don't need to scrape Job logs to find any of this.
 
+### Sharded clusters
+
+A sharded cluster's backup is one **run** across every shard. The Job
+runs `agent backup-trigger --shards <shard 0's agents>;<shard 1's
+agents>;... --cluster <name> --role <source>`, finds a pod with the
+wanted role in each shard, and has all shards upload at once:
+
+```
+s3://<bucket>/<pathPrefix>/<cluster-name>/<run>/shard-<i>-<pod>.tar.gz
+s3://<bucket>/<pathPrefix>/<cluster-name>/<run>/manifest.json
+```
+
+`<run>` is the UTC time the run started (`20261025T101500Z`). Once every
+shard's object is there, shard 0's agent writes `manifest.json`: for each
+shard, its object, the pod and role it came from, and the master's node
+ID and slots when it was taken. **A run without a manifest is
+incomplete**, because a shard failed. The `KividbSnapshot` is `Failed`
+with the shard's error, and the run is pruned with the old ones.
+
+- **Retention counts runs**, not objects: `retention: 24` keeps the 24
+  newest complete runs, every shard's object in them, and deletes older
+  runs whole.
+- **Not one instant:** each shard's snapshot is taken when its `BGSAVE`
+  runs, a moment apart from the others. A write that spans shards (the
+  engine refuses multi-key commands across slots anyway) can be in one
+  shard's snapshot and not another's.
+- **`source: replica`** needs a replica in every shard.
+- The `KividbSnapshot` has `status.objectKey` set to the manifest and
+  `status.shards[]` (each shard's source pod and size).
+- **Restoring** a sharded cluster (`bootstrapFromSnapshot`) is not
+  supported yet. A manifest has what a restore needs.
+
 ## Configuring backups
 
 Create a `KividbSnapshotConfig`:

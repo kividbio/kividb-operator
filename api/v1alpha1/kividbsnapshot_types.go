@@ -67,6 +67,23 @@ type KividbSnapshotStatus struct {
 	// Error holds the failure reason when Phase is Failed.
 	// +optional
 	Error string `json:"error,omitempty"`
+
+	// Shards is a sharded cluster's backup: one snapshot per shard, all
+	// under one run. ObjectKey is then the run's manifest.json, which
+	// names each shard's object and the slots it holds.
+	// +optional
+	Shards []SnapshotShardStatus `json:"shards,omitempty"`
+}
+
+// SnapshotShardStatus is one shard's part of a sharded cluster's backup.
+type SnapshotShardStatus struct {
+	Index int32 `json:"index"`
+	// +optional
+	SourcePod string `json:"sourcePod,omitempty"`
+	// +optional
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
+	// +optional
+	Error string `json:"error,omitempty"`
 }
 
 // +kubebuilder:object:root=true

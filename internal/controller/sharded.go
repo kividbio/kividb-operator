@@ -412,6 +412,15 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 		}
 	}
 
+	if err := r.reconcileBackupCronJob(ctx, c, snapCfg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling backup cronjob: %w", err)
+	}
+	if snapCfg != nil {
+		if err := r.reconcileSnapshots(ctx, c, snapCfg.Name); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling snapshots: %w", err)
+		}
+	}
+
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(c.Namespace), client.MatchingLabels(selectorLabels(c))); err != nil {
 		return ctrl.Result{}, fmt.Errorf("listing pods: %w", err)

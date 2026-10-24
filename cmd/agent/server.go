@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -49,6 +51,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /replicaof", s.withToken(s.handleReplicaOf))
 	mux.HandleFunc("POST /acl/reload", s.withToken(s.handleAclReload))
 	mux.HandleFunc("POST /backup", s.withToken(s.handleBackup))
+	mux.HandleFunc("POST /backup/manifest", s.withToken(s.handleBackupManifest))
 	mux.HandleFunc("POST /exec", s.withToken(s.handleExec))
 	// Cluster mode (sharded KividbClusters).
 	mux.HandleFunc("GET /cluster/status", s.withToken(s.handleClusterStatus))
@@ -367,7 +370,22 @@ func aclFileUsers(content string) map[string]bool {
 }
 
 func (s *server) handleBackup(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.runBackup(r.Context())
+	var req agentapi.BackupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Run != "" {
+		if err := agentapi.CheckRun(req.Run); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if req.Shard < 0 || req.Shard > 1023 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("bad shard %d", req.Shard))
+			return
+		}
+	}
+	resp, err := s.runBackup(r.Context(), req)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

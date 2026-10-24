@@ -15,7 +15,7 @@
 //	POST /promote     * -> 200 OKResponse | 500 ErrorResponse (REPLICAOF NO ONE)
 //	POST /replicaof   * -> body ReplicaOfRequest -> 200 OKResponse | 500 ErrorResponse
 //	POST /acl/reload  * -> 200 OKResponse | 500 ErrorResponse (ACL LOAD)
-//	POST /backup      * -> 200 BackupResponse | 500 ErrorResponse
+//	POST /backup      * -> 200 BackupResponse | 500 ErrorResponse (see backup.go for a sharded cluster's)
 //	POST /exec        * -> body ExecRequest -> 200 ExecResponse (any command)
 package agentapi
 
@@ -87,6 +87,9 @@ type BackupResult struct {
 	Success bool `json:"success"`
 	BackupResponse
 	Error string `json:"error,omitempty"`
+	// Shards is a sharded cluster's backup, one entry per shard;
+	// ObjectKey is then the run's manifest.
+	Shards []BackupShardResult `json:"shards,omitempty"`
 }
 
 // ExecRequest is the body of POST /exec: a RESP command as string args.

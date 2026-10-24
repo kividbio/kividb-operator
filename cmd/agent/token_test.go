@@ -22,6 +22,7 @@ func TestAgentEndpointsNeedTheToken(t *testing.T) {
 		{http.MethodPost, "/replicaof", true},
 		{http.MethodPost, "/acl/reload", true},
 		{http.MethodPost, "/backup", true},
+		{http.MethodPost, "/backup/manifest", true},
 		{http.MethodPost, "/exec", true},
 		{http.MethodGet, "/cluster/status", true},
 		{http.MethodPost, "/cluster/meet", true},

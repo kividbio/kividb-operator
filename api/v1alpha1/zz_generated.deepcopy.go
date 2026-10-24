@@ -714,6 +714,10 @@ func (in *KividbSnapshotStatus) DeepCopyInto(out *KividbSnapshotStatus) {
 	if in.CompletionTime != nil {
 		out.CompletionTime = in.CompletionTime.DeepCopy()
 	}
+	if in.Shards != nil {
+		out.Shards = make([]SnapshotShardStatus, len(in.Shards))
+		copy(out.Shards, in.Shards)
+	}
 }
 
 func (in *KividbSnapshotStatus) DeepCopy() *KividbSnapshotStatus {

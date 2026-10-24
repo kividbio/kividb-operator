@@ -42,6 +42,32 @@ func agentTargets(c *kividbv1alpha1.KividbCluster) string {
 	return strings.Join(targets, ",")
 }
 
+// shardAgentTargets is agentTargets for a sharded cluster: each shard's
+// pods under its headless Service, shards separated by ';'.
+func shardAgentTargets(c *kividbv1alpha1.KividbCluster) string {
+	groups := make([]string, 0, shardCount(c))
+	for s := int32(0); s < shardCount(c); s++ {
+		var targets []string
+		for n := int32(0); n <= c.Spec.Replicas; n++ {
+			targets = append(targets, fmt.Sprintf("%s.%s.%s.svc:%d", shardPodName(c, s, n), shardHeadlessServiceName(c, s), c.Namespace, AgentPort))
+		}
+		groups = append(groups, strings.Join(targets, ","))
+	}
+	return strings.Join(groups, ";")
+}
+
+// backupTriggerArgs is what the backup Job runs: one pod's backup, or in
+// a sharded cluster one run across every shard.
+func backupTriggerArgs(c *kividbv1alpha1.KividbCluster, role agentapi.Role, timeout int32) []string {
+	args := []string{"backup-trigger"}
+	if isSharded(c) {
+		args = append(args, "--shards", shardAgentTargets(c), "--cluster", c.Name)
+	} else {
+		args = append(args, "--targets", agentTargets(c))
+	}
+	return append(args, "--role", string(role), "--timeout", fmt.Sprintf("%ds", timeout))
+}
+
 // desiredBackupCronJob builds the CronJob that triggers scheduled backups,
 // from the KividbCluster's referenced KividbSnapshotConfig. The Job's
 // single container is the *same agent image* running in "backup-trigger"
@@ -110,14 +136,9 @@ func desiredBackupCronJob(c *kividbv1alpha1.KividbCluster, snapCfg *kividbv1alph
 									Name:            "backup-trigger",
 									Image:           agentImage(c),
 									ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
-									Args: []string{
-										"backup-trigger",
-										"--targets", agentTargets(c),
-										"--role", string(snapshotSourceRole(source)),
-										"--timeout", fmt.Sprintf("%ds", timeout),
-									},
-									Env:       []corev1.EnvVar{agentTokenEnv(c)},
-									Resources: resources,
+									Args:            backupTriggerArgs(c, snapshotSourceRole(source), timeout),
+									Env:             []corev1.EnvVar{agentTokenEnv(c)},
+									Resources:       resources,
 								},
 							},
 						},
@@ -232,6 +253,12 @@ func populateSnapshotStatus(ctx context.Context, c client.Client, job *batchv1.J
 	snap.Status.DurationMs = result.DurationMs
 	snap.Status.SourcePod = result.SourcePod
 	snap.Status.SourceRole = kividbv1alpha1.NodeRole(result.SourceRole)
+	snap.Status.Shards = nil
+	for _, s := range result.Shards {
+		snap.Status.Shards = append(snap.Status.Shards, kividbv1alpha1.SnapshotShardStatus{
+			Index: s.Index, SourcePod: s.SourcePod, SizeBytes: s.SizeBytes, Error: s.Error,
+		})
+	}
 }
 
 // latestBackupResult finds the most recent pod belonging to job and reads

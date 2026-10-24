@@ -621,6 +621,11 @@ status:
   error: ""                      # populated only when phase is Failed
 ```
 
+For a sharded cluster, `objectKey` is the run's `manifest.json` and
+`status.shards[]` lists each shard's `index`, `sourcePod`, `sizeBytes`
+and, on failure, `error`. See
+[BACKUP_RESTORE.md](BACKUP_RESTORE.md#sharded-clusters).
+
 You don't create these — the operator creates exactly one per backup Job
 run, named after the owning `KividbSnapshotConfig` and timestamp. List a
 cluster's backup history with:

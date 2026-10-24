@@ -53,6 +53,15 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   has taken over with `CLUSTER FAILOVER`. The agent has a
   `/cluster/failover` endpoint, and reports whether a replica's link to
   its master is up; `status.pods[].synced` is set for sharded clusters.
+- **Backups of sharded clusters.** A run backs up every shard at once,
+  each from a pod with the configured role, under
+  `<cluster>/<run>/shard-<i>-<pod>.tar.gz`. A `manifest.json` names each
+  shard's object, source, master node ID and slots, and is written only
+  when every shard succeeded. Retention counts complete runs and prunes
+  whole runs. `KividbSnapshot.status.shards[]` lists the shards, and
+  `objectKey` is the manifest. The agent has `/backup/manifest`, and
+  `/backup` takes a run and shard. Restoring a sharded cluster is not
+  supported yet.
 - **Sharded clusters form and look after themselves.** The operator
   introduces the nodes (`CLUSTER MEET`), assigns the slots evenly across the
   shards once every pod is up, puts each shard's replicas behind its

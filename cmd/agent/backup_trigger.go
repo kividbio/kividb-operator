@@ -57,12 +57,25 @@ func runBackupTrigger(args []string) error {
 	fs := flag.NewFlagSet("backup-trigger", flag.ExitOnError)
 	url := fs.String("url", "", "URL of one agent's /backup endpoint, instead of --targets")
 	targets := fs.String("targets", "", "Comma-separated host:port of every agent in the cluster, e.g. c-0.c-headless.ns.svc:8081,c-1.c-headless.ns.svc:8081")
+	shards := fs.String("shards", "", "A sharded cluster: each shard's agents as for --targets, shards separated by ';', in shard order")
+	cluster := fs.String("cluster", "", "The cluster's name (with --shards), as in its backups' object keys")
 	role := fs.String("role", string(agentapi.RoleMaster), "Role of the pod to back up: master or replica")
 	timeout := fs.Duration("timeout", 15*time.Minute, "Overall HTTP timeout for the backup request")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	token := os.Getenv(agentapi.TokenEnv)
+
+	if *shards != "" {
+		if *cluster == "" {
+			return fail(fmt.Errorf("--cluster is required with --shards"))
+		}
+		var groups [][]string
+		for _, g := range strings.Split(*shards, ";") {
+			groups = append(groups, strings.Split(g, ","))
+		}
+		return runShardedBackup(groups, agentapi.Role(*role), *cluster, token, *timeout)
+	}
 
 	target := *url
 	if target == "" {
