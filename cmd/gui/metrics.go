@@ -56,11 +56,14 @@ type metricsStore struct {
 
 func newMetricsStore(dataDir string) *metricsStore {
 	ms := &metricsStore{
-		series:      make(map[string]*podSeries),
-		dataDir:     dataDir,
-		persistPath: filepath.Join(dataDir, "metrics.json"),
+		series:  make(map[string]*podSeries),
+		dataDir: dataDir,
 	}
+	// No directory: in memory only. (Joined with "", the path would be
+	// metrics.json in the working directory, which in the image is on a
+	// read-only root filesystem.)
 	if dataDir != "" {
+		ms.persistPath = filepath.Join(dataDir, "metrics.json")
 		if err := os.MkdirAll(dataDir, 0o750); err != nil {
 			log.Printf("metrics: mkdir %s: %v (continuing in-memory only)", dataDir, err)
 			ms.dataDir = ""

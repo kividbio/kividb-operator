@@ -177,3 +177,15 @@ func TestClusterStatsCounterReset(t *testing.T) {
 		t.Errorf("ops %v after a reset, want 0", s.OpsPerSec)
 	}
 }
+
+// Without GUI_METRICS_DIR nothing is written: the image's root filesystem
+// is read-only.
+func TestMetricsStoreWithoutDirWritesNothing(t *testing.T) {
+	ms := newMetricsStore("")
+	if ms.persistPath != "" {
+		t.Fatalf("persist path %q without a directory", ms.persistPath)
+	}
+	if err := ms.persist(); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+}
