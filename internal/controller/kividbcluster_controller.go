@@ -549,6 +549,16 @@ func setCondition(conditions *[]metav1.Condition, next metav1.Condition) {
 	*conditions = append(*conditions, next)
 }
 
+func removeCondition(conditions *[]metav1.Condition, conditionType string) {
+	kept := (*conditions)[:0]
+	for _, existing := range *conditions {
+		if existing.Type != conditionType {
+			kept = append(kept, existing)
+		}
+	}
+	*conditions = kept
+}
+
 // SetupWithManager wires the controller into the manager, watching
 // KividbCluster objects plus the child objects it owns so external edits
 // (e.g. `kubectl edit statefulset`) get reconciled back to the desired
@@ -563,6 +573,7 @@ func (r *KividbClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&policyv1.PodDisruptionBudget{}).
 		Owns(&batchv1.CronJob{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(mapPodToCluster)).
+		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(mapAnnounceServiceToCluster)).
 		Complete(r)
 }
 

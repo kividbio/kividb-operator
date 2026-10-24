@@ -418,13 +418,22 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	}
 	r.reconcileAclReload(ctx, c, pods.Items, aclContent, generations)
 
+	exposed, err := r.exposures(ctx, c)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("listing announced Services: %w", err)
+	}
 	observed := r.observeShardedPods(ctx, c, pods.Items)
-	acted, topoErr := r.reconcileClusterTopology(ctx, c, observed)
+	acted, topoErr := r.reconcileClusterTopology(ctx, c, observed, exposed)
 	if topoErr != nil {
 		logf.FromContext(ctx).Error(topoErr, "cluster topology")
 	}
 	r.labelShardedRoles(ctx, observed)
 
+	if cond := exposureCondition(c, exposed); cond != nil {
+		setCondition(&c.Status.Conditions, *cond)
+	} else {
+		removeCondition(&c.Status.Conditions, "ExternallyAccessible")
+	}
 	phase, err := r.updateShardedStatus(ctx, c, observed, topoErr)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)

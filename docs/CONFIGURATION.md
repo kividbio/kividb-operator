@@ -325,8 +325,55 @@ spec:
 | `<pod>` (one per pod) | that pod (`statefulset.kubernetes.io/pod-name`) | a stable address per node |
 | `<cluster>-<i>-headless` | shard `i`'s pods, not-ready included | each pod's DNS name, `<pod>.<cluster>-<i>-headless.<ns>.svc`; the only one with the agent port |
 
-For access from outside Kubernetes, create your own Service (a
-LoadBalancer, say) with the same selector as a pod's Service.
+#### Access from outside Kubernetes
+
+A cluster client connects to one address, then follows `MOVED` to the
+address each node announces: by default the pod's DNS name, which only
+resolves inside Kubernetes. To reach the cluster from outside, expose
+**every pod** with a Service of your own and label it
+`kividb.io/announce: "true"`; the node then announces that Service's
+address instead.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache-0-0-public
+  labels:
+    kividb.io/announce: "true"
+spec:
+  type: LoadBalancer
+  selector:
+    statefulset.kubernetes.io/pod-name: cache-0-0
+  ports:
+    - port: 6380        # must be the cluster's client port
+      targetPort: 6380
+```
+
+- **The address** is the load balancer's (`status.loadBalancer.ingress`,
+  hostname first), or the `kividb.io/announce-address` annotation
+  (`host` or `host:port`) for a Service without one of its own: a
+  NodePort behind an address you know, an ingress controller's TCP route.
+- **The port must be the client port.** A node announces one port, to
+  clients and to the other nodes alike
+  ([kividbio/kividb#110](https://github.com/kividbio/kividb/issues/110)),
+  so a Service that serves another port, or an annotation that names one,
+  is refused.
+- **Hostnames and IPv4 addresses** only.
+- **Everyone sees the outside address,** clients inside Kubernetes too,
+  since a node announces one address. Inside clients then go through the
+  load balancer.
+- **The operator never creates, changes or deletes these Services.** It
+  reads them, and reconciles when one changes. Deleting one puts the
+  pod's DNS name back.
+- **Condition `ExternallyAccessible`**, once any pod is exposed:
+
+  | Reason | Status | Means |
+  |---|---|---|
+  | `AllPodsExposed` | True | every pod announces an outside address |
+  | `PartiallyExposed` | False | some pods are not exposed: outside clients are sent to every node and cannot reach those |
+  | `WaitingForAddress` | False | a Service has no load-balancer address yet |
+  | `AnnounceServiceProblem` | False | a Service serves the wrong port, its address cannot be announced, or two Services expose one pod |
 
 ### `podAnnotations` / `podLabels`
 

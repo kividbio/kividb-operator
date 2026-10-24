@@ -38,6 +38,15 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   `min-replicas-to-write` and the bus secret (generated when unset). The
   operator owns every cluster-mode directive. A cluster is sharded or not
   from its creation; up to 24 nodes for now.
+- **Access to a sharded cluster from outside Kubernetes.** Expose each pod
+  with a Service of your own (a LoadBalancer, a NodePort) labelled
+  `kividb.io/announce: "true"`, and the pod's node announces that
+  Service's address (its load-balancer address, or the
+  `kividb.io/announce-address` annotation) instead of its DNS name, so
+  cluster clients outside follow `MOVED` to an address they can reach.
+  The operator only reads these Services. The `ExternallyAccessible`
+  condition says whether every pod is exposed (`PartiallyExposed` when
+  only some are) and what is wrong with a Service that cannot be used.
 - **Sharded clusters form and look after themselves.** The operator
   introduces the nodes (`CLUSTER MEET`), assigns the slots evenly across the
   shards once every pod is up, puts each shard's replicas behind its

@@ -177,10 +177,11 @@ func shardedPod(c *kividbv1alpha1.KividbCluster, shard, n int32, ip string) *cor
 // formingHarness: a sharded cluster, its pods, and a fake engine behind
 // their agents.
 type formingHarness struct {
-	t      *testing.T
-	c      *kividbv1alpha1.KividbCluster
-	r      *KividbClusterReconciler
-	engine *fakeEngine
+	t       *testing.T
+	c       *kividbv1alpha1.KividbCluster
+	r       *KividbClusterReconciler
+	engine  *fakeEngine
+	exposed map[string]exposure
 }
 
 func newFormingHarness(t *testing.T, shards, replicas int32) *formingHarness {
@@ -212,7 +213,7 @@ func (h *formingHarness) pods() []corev1.Pod {
 func (h *formingHarness) pass() []*shardPod {
 	ctx := context.Background()
 	observed := h.r.observeShardedPods(ctx, h.c, h.pods())
-	if _, err := h.r.reconcileClusterTopology(ctx, h.c, observed); err != nil {
+	if _, err := h.r.reconcileClusterTopology(ctx, h.c, observed, h.exposed); err != nil {
 		h.t.Fatal(err)
 	}
 	observed = h.r.observeShardedPods(ctx, h.c, h.pods())

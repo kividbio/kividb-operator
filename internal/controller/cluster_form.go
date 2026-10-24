@@ -146,7 +146,7 @@ func buildView(c *kividbv1alpha1.KividbCluster, pods []*shardPod) clusterView {
 // reconcileClusterTopology takes the next steps towards a formed, healthy
 // cluster. It reports whether it did anything (so the caller looks again
 // soon). Errors from single steps are logged and the rest carry on.
-func (r *KividbClusterReconciler) reconcileClusterTopology(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []*shardPod) (acted bool, err error) {
+func (r *KividbClusterReconciler) reconcileClusterTopology(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []*shardPod, exposed map[string]exposure) (acted bool, err error) {
 	log := logf.FromContext(ctx)
 	var errs []error
 	do := func(what string, f func() error) {
@@ -157,12 +157,13 @@ func (r *KividbClusterReconciler) reconcileClusterTopology(ctx context.Context, 
 	}
 	port := int(getPort(c))
 
-	// 1. Every node announces its stable DNS name to clients.
+	// 1. Every node announces its stable DNS name to clients, or the
+	// address of the Service a user exposed it through.
 	for _, p := range pods {
 		if p.status == nil {
 			continue
 		}
-		if want := announceName(c, p); p.status.Hostname != want {
+		if want := announceTarget(c, p, exposed); p.status.Hostname != want {
 			do("announce "+p.pod.Name, func() error { return r.Agent.ClusterAnnounce(ctx, p.ip(), want) })
 		}
 	}
