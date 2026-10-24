@@ -1,7 +1,7 @@
 # kividb-operator GUI
 
 <p align="center">
-  <img src="../assets/gui.png" alt="kividb-operator GUI dashboard listing two KividbClusters">
+  <img src="../assets/gui.png" alt="kividb-operator GUI dashboard: summary tiles and a card per KividbCluster">
 </p>
 
 A management web dashboard for `KividbCluster` objects. It is a single
@@ -19,6 +19,10 @@ through the API.
 Light and dark themes (it follows the system until you pick one) and a
 layout that works on a phone. Every page refreshes every 10 s.
 
+<p align="center">
+  <img src="../assets/gui-mobile.png" alt="The dashboard on a phone" width="260">
+</p>
+
 ### Dashboard (`/`)
 
 - **Summary tiles**: how many clusters, how many are healthy (`Running`),
@@ -35,6 +39,10 @@ listing the dashboard is still one `List` of `KividbCluster`s.
 
 ### Cluster (`/clusters/{namespace}/{name}`)
 
+<p align="center">
+  <img src="../assets/gui-cluster.png" alt="A cluster's page: topology of the master and its replicas, pods, spec and services" width="720">
+</p>
+
 - **Actions**: add or remove a replica, promote a replica, take a snapshot,
   a rolling restart, delete. Each asks first, in a dialog; deleting asks for
   the cluster's name.
@@ -49,6 +57,10 @@ listing the dashboard is still one `List` of `KividbCluster`s.
   set (chart: `gui.metrics.persistence.enabled=true`, plus
   `gui.metrics.persistence.storageClass` on clusters without a default
   StorageClass). No Prometheus needed.
+<p align="center">
+  <img src="../assets/gui-metrics.png" alt="Metrics: commands per second, memory, clients and replication lag per pod" width="720">
+</p>
+
 - **Logs**: either container of any pod, the last 200 to 2000 lines, with
   follow mode, highlighting, and errors and warnings in colour.
 - **Console**: runs a command on a pod through its agent, as the agent's
@@ -66,6 +78,10 @@ replicas. Writes that reach the old master in the moment between those two
 steps are not carried over.
 
 ### New cluster (`/new`)
+
+<p align="center">
+  <img src="../assets/gui-create.png" alt="The new-cluster form beside the manifest the API server's dry run returns" width="720">
+</p>
 
 A form for a `KividbCluster`: name and namespace, the build (standard, lua,
 tls or full), replicas, storage, memory and CPU per pod, storage class,
