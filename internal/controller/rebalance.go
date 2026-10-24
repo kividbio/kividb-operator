@@ -72,26 +72,35 @@ func (r *KividbClusterReconciler) startRebalance(c *kividbv1alpha1.KividbCluster
 	}
 }
 
-// slotOwners maps each slot to the shard whose master owns it, from the
-// anchor's view; -1 for a slot no known pod owns.
+// slotOwners maps each slot to the shard whose master owns it; -1 for a
+// slot no known pod owns. Each master's own word on its slots comes first:
+// the anchor learns of a finished move by gossip, a moment later, and a
+// plan made from its view alone would move slots the destination already
+// has. The anchor's view fills in for a master that did not answer.
 func slotOwners(v clusterView) []int32 {
 	owners := make([]int32, agentapi.TotalSlots)
 	for i := range owners {
 		owners[i] = -1
 	}
-	for _, n := range v.anchor.status.Nodes {
-		p, ok := v.byID[n.ID]
-		if !ok || !n.IsMaster() {
-			continue
-		}
-		for _, rg := range n.Slots {
+	assign := func(shard int32, ranges []string) {
+		for _, rg := range ranges {
 			lo, hi, ok := agentapi.ParseSlotRange(rg)
 			if !ok {
 				continue
 			}
 			for s := lo; s <= hi; s++ {
-				owners[s] = p.shard
+				owners[s] = shard
 			}
+		}
+	}
+	for _, n := range v.anchor.status.Nodes {
+		if p, ok := v.byID[n.ID]; ok && n.IsMaster() {
+			assign(p.shard, n.Slots)
+		}
+	}
+	for _, p := range v.byID {
+		if me, ok := p.myself(); ok && me.IsMaster() {
+			assign(p.shard, me.Slots)
 		}
 	}
 	return owners

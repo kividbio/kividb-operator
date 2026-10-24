@@ -269,3 +269,27 @@ func TestNewShardMasterIsItsFirstPod(t *testing.T) {
 		t.Fatal("adding a shard was recorded as a failover")
 	}
 }
+
+// A third node, the anchor, still has a finished move's slots with the
+// source; source and destination know better. Their word wins.
+func TestSlotOwnersPreferEachMastersOwnView(t *testing.T) {
+	c := shardedCluster("s", 3, 0)
+	line := func(id, flags, slots string) string {
+		return strings.TrimSpace(fmt.Sprintf("%s 10.0.0.1:6380@16380 %s - 0 0 1 connected %s", id, flags, slots))
+	}
+	a, b, x := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
+	pod := func(shard int32, id string, nodes ...string) *shardPod {
+		st := &agentapi.ClusterStatusResponse{MyID: id, Nodes: agentapi.ParseClusterNodes(strings.Join(nodes, "\n"))}
+		return &shardPod{pod: shardedPod(c, shard, 0, "10.0.0.1"), shard: shard, ready: true, status: st}
+	}
+	// 8192-10000 just moved from a (shard 0) to b (shard 1).
+	pa := pod(0, a, line(a, "myself,master", "0-8191"), line(b, "master", "8192-10000"), line(x, "master", "10001-16383"))
+	pb := pod(1, b, line(b, "myself,master", "8192-10000"), line(a, "master", "0-8191"), line(x, "master", "10001-16383"))
+	px := pod(2, x, line(x, "myself,master", "10001-16383"), line(a, "master", "0-10000"), line(b, "master", ""))
+	v := buildView(c, []*shardPod{pa, pb, px})
+	v.anchor = px
+	owners := slotOwners(v)
+	if owners[100] != 0 || owners[9000] != 1 || owners[12000] != 2 {
+		t.Fatalf("slot 100 -> shard %d, 9000 -> %d, 12000 -> %d", owners[100], owners[9000], owners[12000])
+	}
+}
