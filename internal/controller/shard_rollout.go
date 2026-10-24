@@ -172,6 +172,9 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	if replaced {
 		return true
 	}
+	if rebalanceOf(c) != nil {
+		return false // slots are moving: restarts wait for the new shard count
+	}
 
 	// The rest only while the cluster is whole and serving every slot.
 	v := buildView(c, pods)

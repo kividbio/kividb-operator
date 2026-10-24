@@ -61,6 +61,8 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /cluster/forget", s.withToken(s.handleClusterForget))
 	mux.HandleFunc("POST /cluster/announce", s.withToken(s.handleClusterAnnounce))
 	mux.HandleFunc("POST /cluster/failover", s.withToken(s.handleClusterFailover))
+	mux.HandleFunc("POST /cluster/migration/import", s.withToken(s.handleClusterMigrationImport))
+	mux.HandleFunc("GET /cluster/migration/status", s.withToken(s.handleClusterMigrationStatus))
 	return mux
 }
 

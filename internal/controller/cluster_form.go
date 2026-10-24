@@ -125,6 +125,21 @@ func buildView(c *kividbv1alpha1.KividbCluster, pods []*shardPod) clusterView {
 			}
 		}
 	}
+	// A shard added by a change of the shard count owns nothing yet: its
+	// master is its lowest pod that is a master. Only a new shard's: in
+	// any other, a master owning nothing is a pod whose volume was lost,
+	// and must follow the shard's master (down, maybe, and failing over).
+	if cl := c.Status.Cluster; cl != nil && cl.Rebalance != nil && cl.Shards > 0 {
+		for _, p := range pods {
+			me, ok := p.myself()
+			if !ok || !me.IsMaster() || p.shard < cl.Shards {
+				continue
+			}
+			if cur, taken := v.masters[p.shard]; !taken || (cur.status.MyID != "" && mustOwnNothing(cur) && p.index < cur.index) {
+				v.masters[p.shard] = p
+			}
+		}
+	}
 	if v.anchor == nil {
 		for _, p := range pods {
 			if p.status != nil && p.shard == 0 && p.index == 0 {
@@ -141,6 +156,12 @@ func buildView(c *kividbv1alpha1.KividbCluster, pods []*shardPod) clusterView {
 		}
 	}
 	return v
+}
+
+// mustOwnNothing: the pod's node is a master owning no slots.
+func mustOwnNothing(p *shardPod) bool {
+	me, ok := p.myself()
+	return ok && me.IsMaster() && me.SlotCount() == 0
 }
 
 // reconcileClusterTopology takes the next steps towards a formed, healthy
@@ -381,9 +402,24 @@ func shardedStatus(c *kividbv1alpha1.KividbCluster, pods []*shardPod) (kividbv1a
 		if c.Status.Cluster != nil {
 			stale = c.Status.Cluster.StaleNodeIDs
 		}
+		var formed int32
+		var rebalance *kividbv1alpha1.RebalanceStatus
+		if c.Status.Cluster != nil {
+			formed, rebalance = c.Status.Cluster.Shards, c.Status.Cluster.Rebalance
+		}
+		if formed == 0 && v.formed {
+			// The shards whose masters own slots.
+			for s, m := range v.masters {
+				if mustOwnNothing(m) {
+					continue
+				}
+				formed = max(formed, s+1)
+			}
+		}
 		c.Status.Cluster = &kividbv1alpha1.ClusterModeStatus{
 			State: a.State, SlotsAssigned: int32(a.SlotsAssigned), SlotsFail: int32(a.SlotsFail),
 			KnownNodes: int32(a.KnownNodes), CurrentEpoch: a.CurrentEpoch, StaleNodeIDs: stale,
+			Shards: formed, Rebalance: rebalance,
 		}
 	}
 
@@ -398,6 +434,16 @@ func shardedStatus(c *kividbv1alpha1.KividbCluster, pods []*shardPod) (kividbv1a
 		return kividbv1alpha1.PhaseDegraded, "ClusterStateFail", fmt.Sprintf("cluster_state is %s (%d slots failed)", c.Status.Cluster.State, c.Status.Cluster.SlotsFail)
 	case ready < want:
 		return kividbv1alpha1.PhaseDegraded, "PodsNotReady", fmt.Sprintf("serving all slots; %d of %d pods ready", ready, want)
+	}
+	if rb := c.Status.Cluster.Rebalance; rb != nil {
+		msg := fmt.Sprintf("changing from %d to %d shards: %s, %d moves done", rb.From, rb.To, rb.Phase, rb.MovesDone)
+		if rb.Current != nil {
+			msg += fmt.Sprintf(", moving %d slots from shard %d to %d", rb.Current.SlotCount, rb.Current.FromShard, rb.Current.ToShard)
+		}
+		if rb.LastError != "" {
+			msg += "; last error: " + rb.LastError
+		}
+		return kividbv1alpha1.PhaseRebalancing, "Rebalancing", msg
 	}
 	for _, sh := range shards {
 		if sh.MasterPod == "" {

@@ -282,6 +282,7 @@ spec:
 
 - **Fixed at creation.** A cluster is sharded, or not, for good:
   `spec.shards` cannot be added to or removed from an existing cluster.
+  Its value can change: see "Changing the shard count" below.
 - **At most 24 nodes** (`shards × (replicas + 1)`) for now, and a name of
   at most 40 characters.
 - **Workloads.** One StatefulSet per shard, `<cluster>-<shard>`, whose pods
@@ -324,6 +325,31 @@ spec:
   `replicas: 0` has no one to hand over to: its master restarts in place,
   and its slots are down until it is back. A pod that has been unready
   for 30 s on an old template is replaced straight away.
+- **Changing the shard count.** Edit `spec.shards` on a running cluster
+  and the operator moves slots until they are spread evenly over the new
+  count (phase `Rebalancing`, progress in `status.cluster.rebalance`):
+  - **Adding shards:** the new shards' StatefulSets come up and join, the
+    new pods sort into a master and replicas, and each existing shard
+    gives the new ones its share. Going from 3 to 4 shards moves 4,096
+    slots, a quarter, and nothing else.
+  - **Removing shards:** the shards past the new count give all their
+    slots to the others; then their StatefulSets are deleted and their
+    nodes forgotten. **Their PersistentVolumeClaims are kept**: delete
+    them yourself once you no longer want them.
+  - **How slots move:** one move at a time, each a `CLUSTER MIGRATION
+    IMPORT` on the destination master. The engine copies the slots' keys,
+    streams the writes made meanwhile, pauses writes for an instant and
+    hands the slots over; clients never see an `ASK`. The source keeps
+    serving the slots until then.
+  - **Failures:** a move that fails leaves the slots with the source,
+    and is tried again after 30 s (`status.cluster.rebalance.lastError`,
+    a `SlotMoveFailed` Event). If the destination restarts during a move,
+    the keys it had received stay on it (kividbio/kividb#108).
+  - **Meanwhile:** rolling restarts wait until the change is done; a
+    stuck pod is still replaced. Moves wait for every pod to be ready and
+    the cluster to serve every slot. A change can be changed again half
+    way: the shards of both counts are kept until the slots are where the
+    last one says.
 - **Not yet:** `bootstrapFromSnapshot`.
 
 **Services**, all ClusterIP; the operator never creates a load balancer:

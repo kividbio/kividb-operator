@@ -50,11 +50,14 @@ const (
 
 func isSharded(c *kividbv1alpha1.KividbCluster) bool { return c.Spec.Shards != nil }
 
+// shardCount is how many shards exist: spec.shards, or while the count
+// changes, the larger of the old and new (see rebalance.go).
 func shardCount(c *kividbv1alpha1.KividbCluster) int32 {
-	if c.Spec.Shards == nil {
-		return 0
+	n := targetShards(c)
+	if rb := rebalanceOf(c); rb != nil && n > 0 {
+		n = max(n, rb.From, rb.To)
 	}
-	return *c.Spec.Shards
+	return n
 }
 
 func shardStatefulSetName(c *kividbv1alpha1.KividbCluster, shard int32) string {
@@ -86,7 +89,7 @@ func validateSharded(c *kividbv1alpha1.KividbCluster) error {
 		}
 		return nil
 	}
-	shards := shardCount(c)
+	shards := targetShards(c)
 	if shards < 1 {
 		return fmt.Errorf("spec.shards must be at least 1, got %d", shards)
 	}
@@ -399,6 +402,7 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 		return ctrl.Result{}, fmt.Errorf("reconciling services: %w", err)
 	}
 
+	r.startRebalance(c)
 	rollout := map[string]string{
 		ConfigHashAnnotation:     configHash(renderKividbConfWith(c, kdbConfig, secrets))[:16],
 		AuthGenerationAnnotation: generations.auth,
@@ -438,6 +442,9 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	}
 	r.labelShardedRoles(ctx, observed)
 	if r.reconcileShardStepDown(ctx, c, observed) {
+		acted = true
+	}
+	if r.reconcileRebalance(ctx, c, observed) {
 		acted = true
 	}
 	if r.reconcileShardedRollout(ctx, c, observed) {

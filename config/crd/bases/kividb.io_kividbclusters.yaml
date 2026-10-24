@@ -327,6 +327,56 @@ spec:
                     staleNodeIDs:
                       type: array
                       items: {type: string}
+                    shards: {type: integer}
+                    rebalance:
+                      type: object
+                      required: [from, to]
+                      properties:
+                        from: {type: integer}
+                        to: {type: integer}
+                        phase:
+                          type: string
+                          enum: [AddingShards, MovingSlots]
+                        startTime:
+                          type: string
+                          format: date-time
+                        current:
+                          type: object
+                          required: [fromShard, toShard, slots, slotCount]
+                          properties:
+                            fromShard: {type: integer}
+                            toShard: {type: integer}
+                            slots:
+                              type: array
+                              items: {type: string}
+                            slotCount: {type: integer}
+                            destPod: {type: string}
+                            taskID: {type: string}
+                            startTime:
+                              type: string
+                              format: date-time
+                        pending:
+                          type: array
+                          items:
+                            type: object
+                            required: [fromShard, toShard, slots, slotCount]
+                            properties:
+                              fromShard: {type: integer}
+                              toShard: {type: integer}
+                              slots:
+                                type: array
+                                items: {type: string}
+                              slotCount: {type: integer}
+                              destPod: {type: string}
+                              taskID: {type: string}
+                              startTime:
+                                type: string
+                                format: date-time
+                        movesDone: {type: integer}
+                        lastError: {type: string}
+                        lastErrorTime:
+                          type: string
+                          format: date-time
                 lastFailoverTime:
                   type: string
                   format: date-time

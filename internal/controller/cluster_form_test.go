@@ -26,6 +26,10 @@ type fakeEngine struct {
 	nodes map[string]*fakeNode // by node ID
 	byIP  map[string]string    // pod IP -> node ID
 	calls []string
+
+	tasks      map[string]string // migration task ID -> state
+	failImport bool              // the next import fails
+	moved      int               // slots moved by imports
 }
 
 type fakeNode struct {
@@ -37,7 +41,7 @@ type fakeNode struct {
 }
 
 func newFakeEngine() *fakeEngine {
-	return &fakeEngine{nodes: map[string]*fakeNode{}, byIP: map[string]string{}}
+	return &fakeEngine{nodes: map[string]*fakeNode{}, byIP: map[string]string{}, tasks: map[string]string{}}
 }
 
 func nodeID(name string) string {
@@ -62,6 +66,8 @@ func (e *fakeEngine) status(n *fakeNode) agentapi.ClusterStatusResponse {
 	for _, id := range ids {
 		o, ok := e.nodes[id]
 		if !ok {
+			// Gone (its pod was removed): still known, as failed.
+			lines = append(lines, fmt.Sprintf("%s %s:6380@16380 master,fail - 0 0 1 disconnected", id, n.seen[id]))
 			continue
 		}
 		flags := "master"
@@ -119,13 +125,22 @@ func (e *fakeEngine) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Body != nil {
 		_ = json.NewDecoder(req.Body).Decode(&body)
 	}
-	if req.URL.Path != "/cluster/status" {
+	if req.URL.Path != "/cluster/status" && req.URL.Path != "/cluster/migration/status" {
 		e.calls = append(e.calls, fmt.Sprintf("%s %s %s%s", req.URL.Path, n.id[:6], body.IP, body.NodeID))
 	}
 	switch req.URL.Path {
 	case "/cluster/status":
 		st := e.status(n)
 		return reply(http.StatusOK, st), nil
+	case "/cluster/migration/import":
+		return e.importSlots(n, body.Ranges)
+	case "/cluster/migration/status":
+		id := req.URL.Query().Get("id")
+		state, ok := e.tasks[id]
+		if !ok {
+			return reply(http.StatusNotFound, agentapi.ErrorResponse{Error: "no such task"}), nil
+		}
+		return reply(http.StatusOK, agentapi.ClusterMigrationTask{ID: id, State: state, LastError: map[bool]string{true: "source went away"}[state == agentapi.MigrationFailed]}), nil
 	case "/cluster/meet":
 		o := e.nodes[e.byIP[body.IP]]
 		if o == nil {
@@ -170,6 +185,98 @@ func (e *fakeEngine) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	return reply(http.StatusOK, agentapi.OKResponse{OK: true}), nil
 }
+
+// importSlots is CLUSTER MIGRATION IMPORT on n, done at once: every
+// slot must belong to one other master.
+func (e *fakeEngine) importSlots(n *fakeNode, ranges [][2]int) (*http.Response, error) {
+	if n.master != "" {
+		return reply(http.StatusInternalServerError, agentapi.ErrorResponse{Error: "slots can only be imported by a master"}), nil
+	}
+	var source *fakeNode
+	for _, rg := range ranges {
+		for s := rg[0]; s <= rg[1]; s++ {
+			o := e.owner(s)
+			if o == nil || o == n || (source != nil && o != source) {
+				return reply(http.StatusInternalServerError, agentapi.ErrorResponse{Error: fmt.Sprintf("slot %d: not one other owner", s)}), nil
+			}
+			source = o
+		}
+	}
+	id := fmt.Sprintf("%040x", len(e.tasks)+1)
+	if e.failImport {
+		e.failImport = false
+		e.tasks[id] = agentapi.MigrationFailed
+		return reply(http.StatusOK, agentapi.ClusterImportResponse{TaskID: id}), nil
+	}
+	take := map[int]bool{}
+	for _, rg := range ranges {
+		for s := rg[0]; s <= rg[1]; s++ {
+			take[s] = true
+		}
+	}
+	e.moved += len(take)
+	source.slots = subtractSlots(source.slots, take)
+	n.slots = addSlots(n.slots, take)
+	e.tasks[id] = agentapi.MigrationCompleted
+	return reply(http.StatusOK, agentapi.ClusterImportResponse{TaskID: id}), nil
+}
+
+func (e *fakeEngine) owner(slot int) *fakeNode {
+	for _, o := range e.nodes {
+		for _, rg := range o.slots {
+			if slot >= rg[0] && slot <= rg[1] {
+				return o
+			}
+		}
+	}
+	return nil
+}
+
+func rangesOf(set map[int]bool) [][2]int {
+	var slots []int
+	for s := range set {
+		slots = append(slots, s)
+	}
+	sort.Ints(slots)
+	var out [][2]int
+	for i := 0; i < len(slots); {
+		j := i
+		for j+1 < len(slots) && slots[j+1] == slots[j]+1 {
+			j++
+		}
+		out = append(out, [2]int{slots[i], slots[j]})
+		i = j + 1
+	}
+	return out
+}
+
+func slotSet(ranges [][2]int) map[int]bool {
+	set := map[int]bool{}
+	for _, rg := range ranges {
+		for s := rg[0]; s <= rg[1]; s++ {
+			set[s] = true
+		}
+	}
+	return set
+}
+
+func subtractSlots(ranges [][2]int, take map[int]bool) [][2]int {
+	set := slotSet(ranges)
+	for s := range take {
+		delete(set, s)
+	}
+	return rangesOf(set)
+}
+
+func addSlots(ranges [][2]int, take map[int]bool) [][2]int {
+	set := slotSet(ranges)
+	for s := range take {
+		set[s] = true
+	}
+	return rangesOf(set)
+}
+
+func slotCount(ranges [][2]int) int { return len(slotSet(ranges)) }
 
 func reply(status int, v any) *http.Response {
 	b, _ := json.Marshal(v)

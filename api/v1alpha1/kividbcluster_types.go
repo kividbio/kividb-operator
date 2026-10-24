@@ -531,6 +531,72 @@ type ClusterModeStatus struct {
 	// them back.
 	// +optional
 	StaleNodeIDs []string `json:"staleNodeIDs,omitempty"`
+
+	// Shards is how many shards the slots are spread over. When
+	// spec.shards differs, the operator moves slots until it does not.
+	// +optional
+	Shards int32 `json:"shards,omitempty"`
+
+	// Rebalance is a change of the shard count under way.
+	// +optional
+	Rebalance *RebalanceStatus `json:"rebalance,omitempty"`
+}
+
+// RebalancePhase is where a change of the shard count is.
+type RebalancePhase string
+
+const (
+	// RebalanceAddingShards: waiting for every pod, new shards' too, to be
+	// up and in the cluster.
+	RebalanceAddingShards RebalancePhase = "AddingShards"
+	// RebalanceMovingSlots: moving slots, one move at a time.
+	RebalanceMovingSlots RebalancePhase = "MovingSlots"
+)
+
+// RebalanceStatus is a change of the shard count under way: from From
+// shards to To, moving slots with CLUSTER MIGRATION IMPORT.
+type RebalanceStatus struct {
+	// From is the number of shards that may hold slots: the shard count
+	// before, or more if the change was itself changed half way.
+	From int32 `json:"from"`
+	// To is spec.shards.
+	To int32 `json:"to"`
+	// +optional
+	Phase RebalancePhase `json:"phase,omitempty"`
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+	// Current is the move under way.
+	// +optional
+	Current *SlotMove `json:"current,omitempty"`
+	// Pending are the moves still to make after Current, as planned now.
+	// +optional
+	Pending []SlotMove `json:"pending,omitempty"`
+	// MovesDone counts the moves completed.
+	// +optional
+	MovesDone int32 `json:"movesDone,omitempty"`
+	// LastError is the last move's failure, retried after a while.
+	// +optional
+	LastError string `json:"lastError,omitempty"`
+	// +optional
+	LastErrorTime *metav1.Time `json:"lastErrorTime,omitempty"`
+}
+
+// SlotMove is slots moving from one shard's master to another's.
+type SlotMove struct {
+	FromShard int32 `json:"fromShard"`
+	ToShard   int32 `json:"toShard"`
+	// Slots are ranges, "0-1364".
+	Slots []string `json:"slots"`
+	// SlotCount is how many slots Slots covers.
+	SlotCount int32 `json:"slotCount"`
+	// DestPod and TaskID: the destination master the import runs on, and
+	// the engine's task ID for it.
+	// +optional
+	DestPod string `json:"destPod,omitempty"`
+	// +optional
+	TaskID string `json:"taskID,omitempty"`
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
 }
 
 // KividbClusterStatus defines the observed state of a KividbCluster.

@@ -168,3 +168,88 @@ func (s *server) handleClusterFailover(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, agentapi.OKResponse{OK: true})
 }
+
+// handleClusterMigrationImport starts CLUSTER MIGRATION IMPORT on this
+// node, the destination master, and answers the task ID.
+func (s *server) handleClusterMigrationImport(w http.ResponseWriter, r *http.Request) {
+	var req agentapi.ClusterSlotsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.Ranges) == 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("no ranges"))
+		return
+	}
+	args := []string{"CLUSTER", "MIGRATION", "IMPORT"}
+	for _, rg := range req.Ranges {
+		if rg[0] < 0 || rg[1] < rg[0] || rg[1] >= agentapi.TotalSlots {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("bad range %d-%d", rg[0], rg[1]))
+			return
+		}
+		args = append(args, strconv.Itoa(rg[0]), strconv.Itoa(rg[1]))
+	}
+	c, err := s.dial()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	defer c.Close()
+	reply, err := c.Do(args...)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("CLUSTER MIGRATION IMPORT: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, agentapi.ClusterImportResponse{TaskID: reply.Str})
+}
+
+// handleClusterMigrationStatus reports one task of CLUSTER MIGRATION
+// STATUS. The engine keeps tasks in memory: after a restart it has none.
+func (s *server) handleClusterMigrationStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if err := nodeIDArg(id); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("task %w", err))
+		return
+	}
+	c, err := s.dial()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	defer c.Close()
+	reply, err := c.Do("CLUSTER", "MIGRATION", "STATUS", "ID", id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("CLUSTER MIGRATION STATUS: %w", err))
+		return
+	}
+	for _, t := range reply.Array {
+		task := parseMigrationTask(t)
+		if task.ID == id {
+			writeJSON(w, http.StatusOK, task)
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, fmt.Errorf("no migration task %s on this node", id))
+}
+
+// parseMigrationTask reads one task: a map, which RESP2 sends as a flat
+// array of keys and values.
+func parseMigrationTask(t *respclient.Reply) agentapi.ClusterMigrationTask {
+	var out agentapi.ClusterMigrationTask
+	for i := 0; i+1 < len(t.Array); i += 2 {
+		v := t.Array[i+1]
+		switch t.Array[i].Str {
+		case "id":
+			out.ID = v.Str
+		case "slots":
+			out.Slots = v.Str
+		case "state":
+			out.State = v.Str
+		case "last_error":
+			out.LastError = v.Str
+		case "retries":
+			out.Retries = v.Int
+		}
+	}
+	return out
+}

@@ -62,6 +62,14 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   `objectKey` is the manifest. The agent has `/backup/manifest`, and
   `/backup` takes a run and shard. Restoring a sharded cluster is not
   supported yet.
+- **Changing a sharded cluster's shard count.** Edit `spec.shards` and
+  the operator adds shards, or drains and removes them, moving only the
+  slots it has to: one move at a time, each an atomic `CLUSTER MIGRATION
+  IMPORT` on the destination master (no `ASK` for clients). Phase
+  `Rebalancing`, with the plan, the move under way and the last error in
+  `status.cluster.rebalance`. `status.cluster.shards` is the count the
+  slots are spread over. Removed shards' PVCs are kept. The agent has
+  `/cluster/migration/import` and `/cluster/migration/status`.
 - **Sharded clusters form and look after themselves.** The operator
   introduces the nodes (`CLUSTER MEET`), assigns the slots evenly across the
   shards once every pod is up, puts each shard's replicas behind its

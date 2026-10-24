@@ -176,3 +176,31 @@ type ClusterNodeRequest struct {
 type ClusterAnnounceRequest struct {
 	Hostname string `json:"hostname"`
 }
+
+// Slot migration (CLUSTER MIGRATION, atomic: clients see no ASK).
+//
+//	POST /cluster/migration/import  -> body ClusterSlotsRequest -> 200 ClusterImportResponse
+//	                                   (on the destination master; every range from one source)
+//	GET  /cluster/migration/status?id=<task> -> 200 ClusterMigrationTask | 404 (no such task)
+
+// ClusterImportResponse is the engine's task ID for an import.
+type ClusterImportResponse struct {
+	TaskID string `json:"taskID"`
+}
+
+// Migration task states.
+const (
+	MigrationInProgress = "in_progress"
+	MigrationCompleted  = "completed"
+	MigrationFailed     = "failed"
+	MigrationCanceled   = "canceled"
+)
+
+// ClusterMigrationTask is one task of CLUSTER MIGRATION STATUS.
+type ClusterMigrationTask struct {
+	ID        string `json:"id"`
+	Slots     string `json:"slots,omitempty"`
+	State     string `json:"state"`
+	LastError string `json:"lastError,omitempty"`
+	Retries   int64  `json:"retries,omitempty"`
+}

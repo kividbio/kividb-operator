@@ -213,6 +213,57 @@ func (in *ClusterModeStatus) DeepCopyInto(out *ClusterModeStatus) {
 		out.StaleNodeIDs = make([]string, len(in.StaleNodeIDs))
 		copy(out.StaleNodeIDs, in.StaleNodeIDs)
 	}
+	if in.Rebalance != nil {
+		out.Rebalance = in.Rebalance.DeepCopy()
+	}
+}
+
+func (in *RebalanceStatus) DeepCopyInto(out *RebalanceStatus) {
+	*out = *in
+	if in.StartTime != nil {
+		out.StartTime = in.StartTime.DeepCopy()
+	}
+	if in.Current != nil {
+		out.Current = in.Current.DeepCopy()
+	}
+	if in.Pending != nil {
+		out.Pending = make([]SlotMove, len(in.Pending))
+		for i := range in.Pending {
+			in.Pending[i].DeepCopyInto(&out.Pending[i])
+		}
+	}
+	if in.LastErrorTime != nil {
+		out.LastErrorTime = in.LastErrorTime.DeepCopy()
+	}
+}
+
+func (in *RebalanceStatus) DeepCopy() *RebalanceStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(RebalanceStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *SlotMove) DeepCopyInto(out *SlotMove) {
+	*out = *in
+	if in.Slots != nil {
+		out.Slots = make([]string, len(in.Slots))
+		copy(out.Slots, in.Slots)
+	}
+	if in.StartTime != nil {
+		out.StartTime = in.StartTime.DeepCopy()
+	}
+}
+
+func (in *SlotMove) DeepCopy() *SlotMove {
+	if in == nil {
+		return nil
+	}
+	out := new(SlotMove)
+	in.DeepCopyInto(out)
+	return out
 }
 
 func (in *ClusterModeStatus) DeepCopy() *ClusterModeStatus {
