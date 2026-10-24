@@ -294,6 +294,13 @@ func (r *KividbClusterReconciler) reconcileRebalance(ctx context.Context, c *kiv
 		return true
 	}
 	id, err := r.Agent.ClusterMigrationImport(ctx, dest.ip(), ranges)
+	if err != nil && strings.Contains(err.Error(), "already in progress") {
+		// This move is under way already: started by a pass that read the
+		// cluster before this one's status had landed. It ends with the
+		// slots moved, and the next plan goes on from there.
+		log.V(1).Info("rebalance: the move is already under way", "from", m.FromShard, "to", m.ToShard)
+		return true
+	}
 	if err != nil {
 		now := metav1.Now()
 		rb.LastError, rb.LastErrorTime = fmt.Sprintf("starting to move %d slots from shard %d to %d: %v", m.SlotCount, m.FromShard, m.ToShard, err), &now
