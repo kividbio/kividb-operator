@@ -7,7 +7,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 log "=== e2e prereqs ==="
-require kubectl helm minikube docker redis-cli
+log "cluster driver: ${CLUSTER_DRIVER}"
+
+if [[ "${CLUSTER_DRIVER}" == "kind" ]]; then
+  require kubectl helm kind docker redis-cli
+else
+  require kubectl helm minikube docker redis-cli
+fi
 
 ARCH="$(uname -m)"
 OS="$(uname -s)"
@@ -15,14 +21,20 @@ log "host arch=${ARCH} os=${OS}"
 log "kubectl: $(kubectl version --client -o yaml 2>/dev/null | awk '/gitVersion/{print $2; exit}' || kubectl version --client --short 2>/dev/null || true)"
 log "helm:    $(helm version --short 2>/dev/null || true)"
 log "docker:  $(docker version --format '{{.Client.Version}}' 2>/dev/null || true)"
-log "minikube:$(minikube version --short 2>/dev/null || true)"
 
-if ! minikube status >/dev/null 2>&1; then
-  die "minikube is not running — start with: minikube start --cpus=4 --memory=6144"
+if [[ "${CLUSTER_DRIVER}" == "kind" ]]; then
+  log "kind:    $(kind version 2>/dev/null || true)"
+  if ! kubectl cluster-info >/dev/null 2>&1; then
+    die "kind cluster is not reachable — create one with: kind create cluster"
+  fi
+else
+  log "minikube:$(minikube version --short 2>/dev/null || true)"
+  if ! minikube status >/dev/null 2>&1; then
+    die "minikube is not running — start with: minikube start --cpus=4 --memory=6144"
+  fi
+  # Align kubectl with the minikube context.
+  minikube update-context >/dev/null 2>&1 || true
 fi
-
-# Align kubectl with the minikube context.
-minikube update-context >/dev/null 2>&1 || true
 CTX="$(kubectl config current-context 2>/dev/null || true)"
 log "kubectl context: ${CTX:-<none>}"
 

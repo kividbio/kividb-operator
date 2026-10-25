@@ -54,6 +54,8 @@ MINIO_MC_IMAGE="${MINIO_MC_IMAGE:-bitnamilegacy/minio-client:latest}"
 
 STRICT_TLS="${STRICT_TLS:-0}"
 LOAD_IMAGES="${LOAD_IMAGES:-0}"
+CLUSTER_DRIVER="${CLUSTER_DRIVER:-minikube}"
+KIND_CLUSTER="${KIND_CLUSTER:-}"
 
 RESULTS_DIR="${RESULTS_DIR:-${E2E_DIR}/results}"
 
@@ -93,6 +95,37 @@ require() {
   done
   if [[ "${missing}" -ne 0 ]]; then
     die "install the missing command(s) and re-run"
+  fi
+}
+
+resolve_kind_cluster() {
+  if [[ -n "${KIND_CLUSTER:-}" ]]; then
+    echo "${KIND_CLUSTER}"
+    return
+  fi
+  local ctx
+  ctx="$(kubectl config current-context 2>/dev/null || true)"
+  if [[ "${ctx}" =~ ^kind-(.+) ]]; then
+    echo "${BASH_REMATCH[1]}"
+    return
+  fi
+  echo "kind"
+}
+
+# load_image_to_cluster IMAGE
+# Loads a local docker image into minikube or kind depending on CLUSTER_DRIVER.
+load_image_to_cluster() {
+  local img="$1"
+  if [[ "${CLUSTER_DRIVER}" == "kind" ]]; then
+    require kind
+    local cluster_name
+    cluster_name="$(resolve_kind_cluster)"
+    log "kind load docker-image ${img} --name ${cluster_name}"
+    kind load docker-image "${img}" --name "${cluster_name}"
+  else
+    require minikube
+    log "minikube image load ${img}"
+    minikube image load "${img}"
   fi
 }
 

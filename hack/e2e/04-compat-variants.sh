@@ -20,14 +20,13 @@ require kubectl redis-cli openssl
 
 ensure_ns "${E2E_KIVIDB_NS}"
 
-# Pull engine images into minikube when requested (variants may not be cached).
+# Pull engine images into cluster when requested (variants may not be cached).
 if [[ "${LOAD_IMAGES}" == "1" ]]; then
-  require minikube
   for v in standard tls lua full; do
     img="$(kividb_image_for_variant "${v}")"
     log "docker pull ${img}"
     docker pull "${img}" || warn "failed to pull ${img}"
-    minikube image load "${img}" || warn "failed to load ${img} into minikube"
+    load_image_to_cluster "${img}" || warn "failed to load ${img} into cluster"
   done
 fi
 
