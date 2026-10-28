@@ -38,7 +38,7 @@ All fields below are under `spec:` unless stated otherwise.
 | `agentImage` | string | the operator's bundled agent image | Override only if you build your own agent image. |
 | `exporterImage` | string | `oliver006/redis_exporter:v1.66.0` | Only used when `monitoring.enabled: true`. See [`monitoring`](#monitoring). |
 | `port` | int32 | `6380` | RESP port. Also written into the rendered `kividb.conf` as `port`. |
-| `terminationGracePeriodSeconds` | int64 | `60` | kividb snapshots on SIGTERM; keep this comfortably above your data size's `SAVE` time. |
+| `terminationGracePeriodSeconds` | int64 | `60` | kividb snapshots on SIGTERM; keep this comfortably above your data size's `SAVE` time. A stopping master first uses up to a third of it (5 to 30 s) to hand its role to a replica, see [Switchovers](#switchovers-and-stopping-a-master). |
 
 ### Image and variant
 
@@ -66,12 +66,14 @@ The operator performs these rollouts itself (the StatefulSet uses the
 `OnDelete` update strategy): replicas first, the master last, and the
 next pod is only replaced once every pod is Ready and every replica shows
 `synced: true` in `status.pods`. When only the master is left, its role
-is first handed to an in-sync replica (a `Switchover` event; expect about
-a second of failed writes) and the old master is replaced afterwards. A pod that is unready and still on the
+is first handed to an in-sync replica with a lossless switchover (a
+`Switchover` event, see [Switchovers](#switchovers-and-stopping-a-master))
+and the old master is replaced afterwards, as a replica. A pod that is unready and still on the
 old template is replaced without waiting, so a change that fixes a
 crash-looping pod is not held up by that pod. Changes to a `KividbAclConfig` are
 applied without a restart unless the `default` user's password changed —
-see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#acl--authentication-errors-noauth-wrongpass).
+see [Changing the default user's password](#changing-the-default-users-password)
+and [TROUBLESHOOTING.md](TROUBLESHOOTING.md#acl--authentication-errors-noauth-wrongpass).
 
 `variant` is a **separate, informational** field — it tells the operator
 which kind of build `image` is (`standard`, `tls`, `lua`, or `full`
@@ -272,7 +274,125 @@ to call the agent's `/promote` and `/replicaof` endpoints yourself, or
 patch the `kividb.io/role` pod label and expect the controller to leave it
 alone). Lowering `unhealthyThresholdSeconds` makes failover more
 aggressive at the cost of being more sensitive to transient blips (a slow
-`BGSAVE`, a brief network hiccup).
+`BGSAVE`, a brief network hiccup). Keep it below about 75 s: the kividb
+container's liveness probe restarts an engine that has answered nothing
+for about 90 s, and a hung master should be failed over before that, not
+come back as the master (see [Liveness](#liveness)).
+
+**What a failover can lose.** Replication is asynchronous: a master
+acknowledges a write before its replicas have it. When a master crashes
+or its pod is force-deleted, the writes it acknowledged in its last moments
+and had not yet streamed are lost with it, and a master that is cut off
+(not dead) goes on acknowledging writes on the connections it still has
+until it is demoted -- in the AKS test, 150 ms after the promotion, 120
+writes. The operator does not fence it. `min-replicas-to-write` /
+`min-replicas-max-lag` narrow this window: a master refuses writes
+(`NOREPLICAS`) unless that many replicas acknowledged within the lag. The
+operator does not set them in a replicated cluster (it does in a sharded
+one, through `spec.cluster.minReplicasToWrite`, default 0), because the
+trade-off is availability: with `min-replicas-to-write 1`, a cluster with
+one replica stops taking writes whenever that replica restarts -- every
+rolling update -- and a master cut off from its replicas stops at once
+instead of after the lag. Set them in a [`KividbConfig`](#kividbconfig)
+if refusing writes is preferable to losing them; the lag bounds the loss
+to about that many seconds, it does not remove it.
+
+**When the master restarts behind its replicas.** A master that restarts
+-- crashed, OOM-killed, deleted while it could not hand over -- comes back
+from its last snapshot, which may be older than its last acknowledged
+writes, while its replicas still hold them. If the replicas resynced from
+it, those writes would be gone from every copy. The operator recognises
+it (the master's offset is below the one it last recorded for it, and a
+replica that was in sync is ahead) and fails over to the replica holding
+the most instead; the restarted pod becomes its replica
+(`MasterRestartedBehind` and `Failover` Events). It works when the master
+pod is recreated, as its replicas then follow its old address until the
+operator points them anywhere. When only the container restarts, in
+place, with the same address, the replicas reconnect to it on their own
+within a second and the engine resyncs them before the operator can act:
+that case needs the engine to refuse such a resync (a replica asking to
+continue a stream from further than the master has it).
+
+### Switchovers and stopping a master
+
+A **switchover** moves the master role from a live master to a replica.
+The operator does one when a rollout or a `KividbDbOps` restart reaches
+the master, when the master's pod is being deleted (by hand, a node drain,
+an eviction), when a pod has the `kividb.io/step-down: "true"`
+annotation, and when the cluster has the annotation
+`kividb.io/switchover-to: <pod>` (the GUI's promote action sets it; the
+operator removes it once that pod is the master, or drops it with a
+`SwitchoverRequestDropped` Warning if there is no such pod):
+
+```sh
+kubectl annotate kividbcluster my-cluster kividb.io/switchover-to=my-cluster-2
+```
+
+It loses no acknowledged write:
+
+1. The master stops acknowledging writes: `CLIENT PAUSE <ms> WRITE`.
+   Clients' writes wait (reads go on); the pause has a 10 s timeout of its
+   own.
+2. The operator waits until the replica has applied everything the master
+   has (`ROLE` on both: equal offsets, the master's no longer moving, the
+   replica's link up), for at most **5 s**.
+3. The replica is promoted, the old master becomes its replica, the master
+   label (and with it the `<cluster>-master` Service) moves to the new
+   master -- onto it before it comes off the old one, so the Service always
+   has an endpoint -- and the other replicas follow the new master,
+   continuing from where they were.
+4. The old master's clients are disconnected so they reconnect through
+   the Service, and the pause ends. A write that was waiting on the old
+   master gets an error (`READONLY`, or a closed connection), never an
+   acknowledgement, and a client that retries reaches the new master.
+
+Writes wait for as long as the replica takes to catch up: milliseconds
+for a replica in sync. If it has not caught up in 5 s, nothing changes:
+the pause ends, the old master stays the master, a `SwitchoverAborted`
+Warning says why, and the next attempt waits 30 s. A replica is a
+candidate only when Ready and `synced`: following the master with
+`master_link_status:up`, having heard from it in the last 20 s, and at
+most 1 MiB behind. The most caught-up candidate is chosen, or the one
+`kividb.io/switchover-to` names. On an engine before kividb 1.1, which has
+no `CLIENT PAUSE ... WRITE`, the operator switches over without the pause
+and says so (`SwitchoverWithoutPause` Warning): writes acknowledged by the
+old master during the handover can be lost there.
+
+**Stopping a master.** Both containers of every pod have a `preStop`
+hook, the agent's `GET /prestop`. On a master with replicas attached it
+waits until the role has moved -- the operator sees the pod being deleted
+and switches over at once -- for at most a third of
+`terminationGracePeriodSeconds`, between 5 and 30 s (20 s by default); then
+the engine stops, as a replica, and saves. On anything else it returns at
+once. A `PodDisruptionBudget` named after the cluster (`maxUnavailable:
+1`) keeps a drain from evicting two of its pods at once, as each shard's
+does in a sharded cluster. While the old master's pod is terminating it
+is no longer an endpoint of the master Service; new connections fail for
+the moment it takes the operator to move the label (well under a second
+once it has seen the deletion). `kubectl delete --force --grace-period=0`
+skips all of this: that is a crash, see above.
+
+### Liveness
+
+The kividb container's liveness probe is the agent's `GET /livez`, which
+sends `PING` to the engine and passes on **any** reply within 3 s --
+`LOADING`, `BUSY` and `NOAUTH` included. Before 0.7.0 it was a TCP check,
+which a deadlocked engine passes for ever: the kernel accepts the
+connection, and nothing answers. The probe runs every 10 s with a 5 s
+timeout and restarts the container after 9 failures in a row, about 90 s
+of no answer at all:
+
+- long enough for a slow engine -- under load, loading a full sync,
+  running a long script or a save -- since a reply of any kind passes;
+- longer than readiness (15 s) plus the failover threshold (30 s), so a
+  hung master is failed over first and comes back as a replica;
+- and the agent, which proxies the probe, restarts within that time if it
+  is the one that failed.
+
+Until the engine has answered once, a startup probe on the same endpoint
+stands in (every 10 s, up to 30 minutes), for an engine that loads a large
+dataset before it listens. Both need the 0.7.0 agent image: an older
+agent has no `/livez`, and the probe would fail.
 
 ### Sharded clusters: `shards`
 
@@ -352,7 +472,14 @@ spec:
   changes), puts a pod that came back empty behind its shard's master, and,
   for a pod that rejoined with a new node ID because its volume was lost,
   forgets the old ID on every node (`status.cluster.staleNodeIDs` while it
-  does). It never forgets a node that owns slots.
+  does). It never forgets a node that owns slots, nor one that belongs to a
+  pod that exists, even when that pod is down, hung or its agent does not
+  answer: a node is that pod's by the node ID the pod last reported
+  (`status.pods[].nodeID`, kept while it cannot be asked), its IP or the
+  name it announces. Only a pod that answers with a *different* node ID
+  has its old one forgotten. A failed node that is no pod's at all (a
+  replica removed by lowering `replicas`, or a forgotten node an old
+  volume brought back) is forgotten once it has been so for 2 minutes.
 - **Status.** `status.shards[]` (each shard's master, its slots, its pods),
   `status.cluster` (`cluster_state`, slots assigned and failed, known
   nodes), and each pod's shard and node ID. `Running` when every slot is
@@ -365,10 +492,23 @@ spec:
   master is never restarted while it is the master: its most caught-up
   replica takes over first with `CLUSTER FAILOVER`, which the engine runs
   without losing a write, and the old master is restarted as a replica
-  (a `ShardSwitchover` Event, not a `ShardFailover`). A shard with
+  (a `ShardSwitchover` Event, not a `ShardFailover`). The same happens
+  when a shard master's pod is deleted (by hand, a drain, an eviction):
+  its `preStop` hook holds the engine while the replica takes over (see
+  [Stopping a master](#switchovers-and-stopping-a-master)). A shard with
   `replicas: 0` has no one to hand over to: its master restarts in place,
   and its slots are down until it is back. A pod that has been unready
   for 30 s on an old template is replaced straight away.
+  - **A force-killed master that is back within the node timeout** (5 s
+    by default) keeps its slots: the engine never marked it failed, so no
+    replica took over. It comes back from its last snapshot, and its
+    replicas resync from it, dropping the writes they held that it lost
+    (3 in the AKS test). The engine decides this in cluster mode; the
+    operator does not hold a restarted master back, since delaying every
+    master's start until its replicas fail over would also promote a
+    replica holding less than the master's snapshot whenever both restart
+    together (a cold restart). Kept as it is until the engine refuses such
+    a resync.
   - **The handover pauses the shard's writes.** During `CLUSTER
     FAILOVER` the master holds its clients' writes until the replica has
     caught up and won its election: on engine 1.2 for up to 10 s. If the
@@ -645,6 +785,33 @@ spec:
   still run `PING`/`INFO`/`REPLICAOF`/backups after you turn on auth.
 - Referenced the same way as `KividbConfig`: create once, point any
   number of `KividbCluster`s at it via `spec.aclConfigRef`.
+
+### Changing the default user's password
+
+The pods read the default user's password at startup (the agent, the
+exporter and, in a sharded cluster, `masterauth`), so a change, a new
+password or its removal, restarts them one at a time. So that neither a
+client nor a replica is refused meanwhile, both passwords are accepted
+until every pod runs with the new one:
+
+1. Before any pod restarts, the pods still on the previous password are
+   given the new one live: `ACL SETUSER default #<hash>` adds it next to
+   the old one; for a removal, `ACL SETUSER default nopass`. Each is
+   annotated `kividb.io/auth-widened: <generation>`. If one cannot be
+   (`PasswordOverlapFailed` Warning), the rollout waits.
+2. Pods started during the rollout get an ACL file that accepts both
+   passwords (or none, when either side has none: a user without a
+   password accepts any).
+3. When every pod runs with the new password, the ACL file is rendered
+   with it alone and every pod reloads it (`PasswordChanged` Event); the
+   previous password stops working only then, as soon as the pods have the
+   updated file (the kubelet takes up to a minute or two to refresh a
+   Secret volume).
+
+Clients can therefore move to the new password at any time after the
+operator has seen the change (it reconciles every 10 s). Setting a
+password on a cluster that had none keeps it open until the rollout is
+over. If the rollout cannot finish, the previous password stays valid.
 
 > **Live-tested caveat:** kividb currently accepts and correctly reports
 > (via `ACL GETUSER`) negative `commandRules` entries like `-flushall`,
