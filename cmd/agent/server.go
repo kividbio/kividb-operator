@@ -188,6 +188,19 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 		}
 	}
 
+	if info, err := c.Info("replication"); err == nil {
+		fields := respclient.ParseInfo(info)
+		if out.Role == agentapi.RoleReplica {
+			if v, err := strconv.ParseInt(fields["master_last_io_seconds_ago"], 10, 64); err == nil {
+				out.MasterLastIOSeconds = &v
+			}
+		}
+		if out.Role == agentapi.RoleMaster {
+			if v, err := strconv.ParseInt(fields["connected_slaves"], 10, 64); err == nil {
+				out.ConnectedReplicas = &v
+			}
+		}
+	}
 	if lastSave, err := c.LastSave(); err == nil {
 		out.LastSaveUnix = lastSave
 	}

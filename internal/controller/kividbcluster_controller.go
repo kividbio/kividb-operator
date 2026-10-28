@@ -50,6 +50,10 @@ type KividbClusterReconciler struct {
 	// ("<ns>/<cluster>/<shard>" -> *shardHandover).
 	failovers sync.Map
 
+	// switchovers: when the last replicated-mode switchover of a cluster
+	// ("<ns>/<cluster>" -> time.Time) was aborted, so the next one waits.
+	switchovers sync.Map
+
 	// clock is time.Now, unless a test sets it.
 	clock func() time.Time
 }
@@ -196,8 +200,11 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	r.reconcileAclReload(ctx, &c, podList.Items, aclContent, generations)
-	r.reconcileStepDown(ctx, &c, podList.Items, statuses, masterPod)
-	r.reconcileRollout(ctx, &c, podList.Items, statuses, masterPod)
+	// One change of roles per pass: a pod is replaced only on a pass that
+	// did not just move the master role (statuses are from before it).
+	if r.reconcileHandover(ctx, &c, podList.Items, statuses, masterPod) == "" {
+		r.reconcileRollout(ctx, &c, podList.Items, statuses, masterPod)
+	}
 
 	if statusErr := r.updateStatus(ctx, &c, statuses, masterPod, previousMasterPod, failoverHappened, err); statusErr != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", statusErr)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,71 @@ import (
 type fakeAgents struct {
 	status map[string]*agentapi.StatusResponse
 	calls  []string
+
+	// paused: the pods whose writes CLIENT PAUSE holds.
+	paused map[string]bool
+	// catchUp: how many ROLE answers a replica takes to reach its master's
+	// offset (it reports its own status offset until then); -1 never.
+	catchUp map[string]int
+	// noPause: the engine refuses CLIENT PAUSE ... WRITE (before 1.1).
+	noPause bool
+	// failReplicaOf: /replicaof fails on these pods.
+	failReplicaOf map[string]bool
+}
+
+// execReply answers /exec the way kividb would, for the commands the
+// operator sends: ROLE, CLIENT PAUSE / UNPAUSE / KILL, ACL SETUSER, PING.
+func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []string) agentapi.ExecResponse {
+	ok := agentapi.ExecResponse{Type: "status", Str: "OK"}
+	cmd := strings.ToUpper(strings.Join(args, " "))
+	if cmd != "ROLE" {
+		f.calls = append(f.calls, "exec "+ip+" "+strings.Join(args, " "))
+	}
+	switch {
+	case cmd == "ROLE":
+		if st.Role == agentapi.RoleMaster {
+			return agentapi.ExecResponse{Type: "array", Array: []agentapi.ExecResponse{
+				{Type: "bulk", Str: "master"}, {Type: "integer", Int: st.ReplicationOffset}, {Type: "array"},
+			}}
+		}
+		offset := st.ReplicationOffset
+		if m := f.byIP(st.MasterHost); m != nil {
+			switch n := f.catchUp[ip]; {
+			case n == 0:
+				offset = max(offset, m.ReplicationOffset)
+			case n > 0:
+				f.catchUp[ip] = n - 1
+			}
+		}
+		state := "connected"
+		if st.MasterLinkUp != nil && !*st.MasterLinkUp {
+			state = "connect"
+		}
+		return agentapi.ExecResponse{Type: "array", Array: []agentapi.ExecResponse{
+			{Type: "bulk", Str: "slave"}, {Type: "bulk", Str: st.MasterHost}, {Type: "integer", Int: int64(st.MasterPort)},
+			{Type: "bulk", Str: state}, {Type: "integer", Int: offset},
+		}}
+	case strings.HasPrefix(cmd, "CLIENT PAUSE"):
+		if f.noPause {
+			return agentapi.ExecResponse{Type: "error", Str: "ERR syntax error"}
+		}
+		if f.paused == nil {
+			f.paused = map[string]bool{}
+		}
+		f.paused[ip] = true
+	case cmd == "CLIENT UNPAUSE":
+		delete(f.paused, ip)
+	case cmd == "PING":
+		return agentapi.ExecResponse{Type: "status", Str: "PONG"}
+	}
+	return ok
+}
+
+func (f *fakeAgents) byIP(ip string) *agentapi.StatusResponse {
+	if ip == "" {
+		return nil
+	}
+	return f.status[ip]
 }
 
 func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -52,7 +118,17 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 		f.calls = append(f.calls, fmt.Sprintf("replicaof %s -> %s", ip, r.Host))
+		if f.failReplicaOf[ip] {
+			b, _ := json.Marshal(agentapi.ErrorResponse{Error: "connection reset"})
+			return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
+		}
 		st.Role, st.MasterHost, st.MasterPort = agentapi.RoleReplica, r.Host, r.Port
+	case "/exec":
+		var r agentapi.ExecRequest
+		if err := json.NewDecoder(req.Body).Decode(&r); err != nil {
+			return nil, err
+		}
+		body = f.execReply(ip, st, r.Args)
 	}
 	b, _ := json.Marshal(body)
 	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil

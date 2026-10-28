@@ -450,38 +450,26 @@ func (s *server) handleAPIPromote(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, map[string]string{"requested": body.Pod})
 		return
 	}
-	// A switchover is two steps here and the operator does the rest: make
-	// the target a master, then turn the current master into its replica.
-	// The operator sees its labeled master replicating from another healthy
-	// master, adopts that pod (moving the role label, and with it the
-	// master Service) and re-points the remaining replicas. Doing only
-	// this much keeps a half-finished switchover recoverable: if the
-	// second step fails the operator still has a healthy labeled master
-	// and simply turns the target back into its replica.
-	var current *corev1.Pod
-	for i := range pods.Items {
-		if pods.Items[i].Labels["kividb.io/role"] == "master" {
-			current = &pods.Items[i]
-			break
-		}
+	// The operator does the switchover (it holds the master's writes until
+	// the target has applied every one of them, then promotes it); this
+	// asks for it, on the cluster, and the view shows when the role moved.
+	// Promoting the target here directly, as before, lost the writes that
+	// reached the old master between the two steps.
+	patch := client.MergeFrom(c.DeepCopy())
+	if c.Annotations == nil {
+		c.Annotations = map[string]string{}
 	}
-	if current == nil || current.Status.PodIP == "" {
-		writeJSONError(w, http.StatusConflict, fmt.Errorf("cluster %s has no current master to switch over from; the operator will elect one", name))
+	c.Annotations[switchoverToAnnotation] = body.Pod
+	if err := s.ctrlClient.Patch(r.Context(), c, patch); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if _, err := postAgentJSON(r.Context(), target.Status.PodIP, "/promote", nil); err != nil {
-		writeJSONError(w, http.StatusBadGateway, err)
-		return
-	}
-	if _, err := postAgentJSON(r.Context(), current.Status.PodIP, "/replicaof", agentapi.ReplicaOfRequest{
-		Host: target.Status.PodIP,
-		Port: portOrDefault(c.Spec.Port),
-	}); err != nil {
-		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("pointing %s at new master: %w", current.Name, err))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"promoted": body.Pod})
+	writeJSON(w, http.StatusAccepted, map[string]string{"requested": body.Pod})
 }
+
+// switchoverToAnnotation asks the operator for a switchover to a pod
+// (internal/controller.SwitchoverToAnnotation).
+const switchoverToAnnotation = "kividb.io/switchover-to"
 
 func (s *server) handleAPISnapshot(w http.ResponseWriter, r *http.Request) {
 	namespace := r.PathValue("namespace")

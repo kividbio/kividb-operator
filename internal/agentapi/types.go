@@ -36,7 +36,15 @@ type StatusResponse struct {
 	// MasterLinkUp: on a replica, whether its link to the master is up
 	// (ROLE's state is "connected"). Absent on a master, and from agents
 	// before 0.7.0.
-	MasterLinkUp      *bool  `json:"masterLinkUp,omitempty"`
+	MasterLinkUp *bool `json:"masterLinkUp,omitempty"`
+	// MasterLastIOSeconds: on a replica, seconds since anything arrived
+	// from its master (INFO replication master_last_io_seconds_ago; -1
+	// while the link is down). Absent on a master and from agents before
+	// 0.7.0.
+	MasterLastIOSeconds *int64 `json:"masterLastIOSeconds,omitempty"`
+	// ConnectedReplicas: on a master, how many replicas are attached
+	// (connected_slaves). Absent from agents before 0.7.0.
+	ConnectedReplicas *int64 `json:"connectedReplicas,omitempty"`
 	MasterHost        string `json:"masterHost,omitempty"`
 	MasterPort        int32  `json:"masterPort,omitempty"`
 	ReplicationOffset int64  `json:"replicationOffset"`
