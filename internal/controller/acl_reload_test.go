@@ -28,7 +28,7 @@ func TestBumpAuthGenerations(t *testing.T) {
 	if first.auth != "1" || first.acl != "1" {
 		t.Fatalf("first call: %+v, want both generations at 1", first)
 	}
-	if again := bumpAuthGenerations(c, secret, "acl v1", "pw1", "tok"); again != first {
+	if again := bumpAuthGenerations(c, secret, "acl v1", "pw1", "tok"); again.auth != first.auth || again.acl != first.acl {
 		t.Fatalf("unchanged input moved the generations: %+v", again)
 	}
 	if got := bumpAuthGenerations(c, secret, "acl v2", "pw1", "tok"); got.auth != "1" || got.acl != "2" {

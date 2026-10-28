@@ -71,11 +71,14 @@ listing the dashboard is still one `List` of `KividbCluster`s.
   error, and the snapshots.
 - **Events & operations**: the cluster's Events, and its `KividbDbOps`.
 
-**Promote** switches the master to the chosen pod: the GUI promotes it and
-makes the current master its replica, and the operator then moves the
-`kividb.io/role` label (and so the master Service) and re-points the other
-replicas. Writes that reach the old master in the moment between those two
-steps are not carried over.
+**Promote** switches the master to the chosen pod: the GUI asks the
+operator for a switchover (the `kividb.io/switchover-to` annotation on the
+cluster), which holds writes on the current master until the chosen pod has
+applied every one of them, then promotes it, makes the old master its
+replica and moves the `kividb.io/role` label (and so the master Service).
+Nothing acknowledged is lost. A pod that is not a replica in sync is not
+promoted; the view shows when the role has moved. See
+[CONFIGURATION.md](CONFIGURATION.md#switchovers-and-stopping-a-master).
 
 **A sharded cluster** (`spec.shards`) gets its own Overview:
 

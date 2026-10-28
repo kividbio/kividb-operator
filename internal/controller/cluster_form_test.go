@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
@@ -41,6 +42,9 @@ type fakeNode struct {
 	slots                    [][2]int
 	offset                   int64
 	linkDown                 bool // a replica whose link to its master is down
+	// hung: the engine accepts connections and answers nothing, so its
+	// agent cannot report; the others mark it failed.
+	hung bool
 }
 
 func newFakeEngine() *fakeEngine {
@@ -76,6 +80,9 @@ func (e *fakeEngine) status(n *fakeNode) agentapi.ClusterStatusResponse {
 		flags := "master"
 		if o.master != "" {
 			flags = "slave"
+		}
+		if o.hung && id != n.id {
+			flags += ",fail"
 		}
 		ip := n.seen[id]
 		if id == n.id {
@@ -115,6 +122,9 @@ func (e *fakeEngine) RoundTrip(req *http.Request) (*http.Response, error) {
 	n := e.nodes[e.byIP[ip]]
 	if n == nil {
 		return nil, fmt.Errorf("no node at %s", ip)
+	}
+	if n.hung {
+		return nil, fmt.Errorf("agent %s: kividb does not answer", ip)
 	}
 	if !agentapi.TokenMatches(req, "tok") {
 		return reply(http.StatusUnauthorized, nil), nil
@@ -576,5 +586,55 @@ func TestFailoverAfterTheMasterWentDown(t *testing.T) {
 	h.pass()
 	if h.c.Status.Shards[0].MasterPod != "s-0-1" || h.c.Status.LastFailoverTime == nil || !strings.Contains(events(h.r), "ShardFailover") {
 		t.Fatalf("failover not recorded: %+v, %v", h.c.Status.Shards[0], h.c.Status.LastFailoverTime)
+	}
+}
+
+// B2a: two replicas whose engine hung -- their pods exist, their agents
+// cannot say which node they are, the other nodes mark them failed -- are
+// still those pods' nodes, and are never forgotten: the pods come back
+// with them once restarted.
+func TestHungNodesOfExistingPodsAreNotForgotten(t *testing.T) {
+	h := newFormingHarness(t, 2, 2)
+	for i := 0; i < 4; i++ {
+		h.pass()
+	}
+	now := time.Now()
+	h.r.clock = func() time.Time { return now }
+	h.node("s-1-1").hung = true
+	h.node("s-0-2").hung = true
+	h.engine.calls = nil
+	for i := 0; i < 3; i++ {
+		h.pass()
+		now = now.Add(orphanNodeGrace)
+	}
+	// Even with the node IDs gone from the status (an older operator did
+	// not keep them), the pods' addresses still claim their nodes.
+	for i := range h.c.Status.Pods {
+		h.c.Status.Pods[i].NodeID = ""
+	}
+	for i := 0; i < 3; i++ {
+		h.pass()
+		now = now.Add(orphanNodeGrace)
+	}
+	for _, call := range h.engine.calls {
+		if strings.HasPrefix(call, "/cluster/forget") {
+			t.Fatalf("forgot a node of an existing pod: %v", h.engine.calls)
+		}
+	}
+}
+
+// The node IDs of pods whose agents do not answer stay in the status.
+func TestStatusKeepsTheNodeIDOfAnUnreachablePod(t *testing.T) {
+	h := newFormingHarness(t, 1, 1)
+	for i := 0; i < 4; i++ {
+		h.pass()
+	}
+	id := h.node("s-0-1").id
+	h.node("s-0-1").hung = true
+	h.pass()
+	for _, ps := range h.c.Status.Pods {
+		if ps.Name == "s-0-1" && ps.NodeID != id {
+			t.Fatalf("status of the unreachable pod: %+v, want node ID %s", ps, id)
+		}
 	}
 }

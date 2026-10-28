@@ -36,6 +36,16 @@ func TestReplicaSynced(t *testing.T) {
 	hostUnknown.MasterHost, hostUnknown.MasterPort = "", 0
 	hostUnknownLoading := replica(0, 0)
 	hostUnknownLoading.MasterHost, hostUnknownLoading.MasterPort = "", 0
+	up, down := true, false
+	linkDown := replica(37_973_147, 10) // A4b: offset frozen, link failing every second
+	linkDown.MasterLinkUp = &down
+	linkUp := replica(500, 10)
+	linkUp.MasterLinkUp = &up
+	silence := func(s int64) *agentapi.StatusResponse {
+		r := replica(500, 10)
+		r.MasterLinkUp, r.MasterLastIOSeconds = &up, &s
+		return r
+	}
 
 	tests := []struct {
 		name            string
@@ -46,6 +56,13 @@ func TestReplicaSynced(t *testing.T) {
 		{"caught up", masterAt(500, 10), replica(500, 10), false, true},
 		{"slightly behind under load", masterAt(5_000_000, 10), replica(4_900_000, 10), false, true},
 		{"far behind", masterAt(50_000_000, 10), replica(1_000, 10), false, false},
+		{"2 MiB behind: no longer in sync", masterAt(5_000_000, 10), replica(5_000_000-2<<20, 10), true, false},
+		{"link down, offset 541 KB behind (A4b)", masterAt(38_514_000, 10), linkDown, true, false},
+		{"link up", masterAt(500, 10), linkUp, false, true},
+		{"heard from the master 3 s ago", masterAt(500, 10), silence(3), false, true},
+		{"nothing from the master for a minute", masterAt(500, 10), silence(60), true, false},
+		{"link down by master_last_io_seconds_ago -1", masterAt(500, 10), silence(-1), true, false},
+		{"master unreachable: its link is down too, the last verdict holds", nil, linkDown, true, true},
 		{"still loading the snapshot: offset stays 0", masterAt(30_758, 948_398), replica(0, 0), true, false},
 		{"replicating from a different master", masterAt(500, 10), elsewhere, true, false},
 		{"agent unreachable", masterAt(500, 10), nil, true, false},
@@ -324,9 +341,16 @@ func TestReconcileRollout(t *testing.T) {
 			var wantCalls []string
 			if tt.wantPromoted != "" {
 				wantCalls = []string{
+					"exec " + ips[master] + " CLIENT PAUSE 10000 WRITE",
 					"promote " + ips[tt.wantPromoted],
 					fmt.Sprintf("replicaof %s -> %s", ips[master], ips[tt.wantPromoted]),
 				}
+				for _, p := range tt.pods {
+					if p.name != master && p.name != tt.wantPromoted {
+						wantCalls = append(wantCalls, fmt.Sprintf("replicaof %s -> %s", ips[p.name], ips[tt.wantPromoted]))
+					}
+				}
+				wantCalls = append(wantCalls, "exec "+ips[master]+" CLIENT KILL TYPE normal", "exec "+ips[master]+" CLIENT UNPAUSE")
 				var promoted, demoted corev1.Pod
 				_ = r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: tt.wantPromoted}, &promoted)
 				_ = r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: master}, &demoted)

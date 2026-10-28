@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
@@ -310,33 +312,17 @@ func (r *KividbClusterReconciler) reconcileClusterTopology(ctx context.Context, 
 			}
 		}
 	}
-	// Any other node no pod is, which owns nothing and is failed: a node
-	// forgotten while some pod was away, and brought back by it (from its
-	// volume). The node IDs last seen on each pod count as the cluster's
-	// own, so a pod that is merely down is never taken for one.
-	current := map[string]bool{}
-	for _, p := range pods {
-		if p.status != nil {
-			current[p.status.MyID] = true
-		}
-	}
-	for _, ps := range c.Status.Pods {
-		if ps.NodeID != "" {
-			current[ps.NodeID] = true
-		}
-	}
-	if len(current) > 0 {
-		for _, q := range pods {
-			if q.status == nil {
-				continue
-			}
-			for _, n := range q.status.Nodes {
-				if !current[n.ID] && !stale[n.ID] && n.Failed() && n.SlotCount() == 0 {
-					log.Info("a node that is none of the pods is still known; forgetting it", "node", n.ID, "on", q.pod.Name)
-					stale[n.ID] = true
-				}
-			}
-		}
+	// Any other node that is none of the pods, owns nothing and is failed:
+	// a pod removed by scaling the replicas down, or a node forgotten while
+	// some pod was away and brought back by it (from its volume). Never a
+	// node that belongs to a pod that exists -- one whose engine hangs, or
+	// whose agent does not answer, is still that pod's node, and comes back
+	// with it: such a node is recognised by the ID last seen on the pod, or
+	// by the pod's address or announced name. And only once it has been so
+	// for orphanNodeGrace, not on one pass's view.
+	for id := range r.orphanNodes(c, pods, v, stale) {
+		log.Info("a node that is none of the pods is still known; forgetting it", "node", id)
+		stale[id] = true
 	}
 
 	// A pod that did not answer may still know an ID, and would gossip it
@@ -369,6 +355,76 @@ func (r *KividbClusterReconciler) reconcileClusterTopology(ctx context.Context, 
 	c.Status.Cluster.StaleNodeIDs = still
 
 	return acted, errors.Join(errs...)
+}
+
+// orphanNodeGrace is how long a node must have been known, failed and
+// none of the pods before it is forgotten.
+const orphanNodeGrace = 2 * time.Minute
+
+// orphanNodes returns the nodes some pod knows that belong to no pod that
+// exists, own no slots, are failed, and have been all of that for
+// orphanNodeGrace (tracked in r.orphans; an operator restart starts the
+// wait again). Nodes already in stale are left out.
+//
+// A node belongs to a pod by the node ID the pod reports, or last reported
+// (status.pods[].nodeID, kept while its agent does not answer), or by its
+// address: the pod's IP, or the name it announces. So a pod that is down,
+// hung or unreachable never loses its node to this. Its node is forgotten
+// only by the rule for a pod that came back as a different node (step 5),
+// which needs the pod itself to answer with its new ID.
+func (r *KividbClusterReconciler) orphanNodes(c *kividbv1alpha1.KividbCluster, pods []*shardPod, v clusterView, stale map[string]bool) map[string]bool {
+	owned := map[string]bool{}
+	addrs := map[string]bool{}
+	for _, p := range pods {
+		if p.status != nil {
+			owned[p.status.MyID] = true
+		}
+		if ip := p.ip(); ip != "" {
+			addrs[ip] = true
+		}
+		addrs[announceName(c, p)] = true
+	}
+	for _, ps := range c.Status.Pods {
+		if ps.NodeID != "" {
+			owned[ps.NodeID] = true
+		}
+	}
+	// The address a user exposed a pod through is what it announces then.
+	for _, p := range pods {
+		if p.status != nil && p.status.Hostname != "" {
+			addrs[p.status.Hostname] = true
+		}
+	}
+
+	now := r.now()
+	prefix := handoverKey(c, -1) + "/"
+	seen := map[string]bool{}
+	out := map[string]bool{}
+	if v.anchor != nil {
+		for _, q := range pods {
+			if q.status == nil {
+				continue
+			}
+			for _, n := range q.status.Nodes {
+				if owned[n.ID] || stale[n.ID] || seen[n.ID] || !n.Failed() || n.SlotCount() > 0 || addrs[n.IP] || (n.Hostname != "" && addrs[n.Hostname]) {
+					continue
+				}
+				seen[n.ID] = true
+				at, _ := r.orphans.LoadOrStore(prefix+n.ID, now)
+				if now.Sub(at.(time.Time)) >= orphanNodeGrace {
+					out[n.ID] = true
+				}
+			}
+		}
+	}
+	// Forget the waits of nodes that are no longer orphans.
+	r.orphans.Range(func(k, _ any) bool {
+		if key := k.(string); strings.HasPrefix(key, prefix) && !seen[strings.TrimPrefix(key, prefix)] {
+			r.orphans.Delete(key)
+		}
+		return true
+	})
+	return out
 }
 
 // roleOf is the replication role a pod's node reports.
@@ -405,11 +461,17 @@ func shardedStatus(c *kividbv1alpha1.KividbCluster, pods []*shardPod) (kividbv1a
 		shards[i].Index = int32(i)
 	}
 
+	// A pod whose agent does not answer keeps the node ID it last
+	// reported: the node is still that pod's (see orphanNodes).
+	lastNodeID := map[string]string{}
+	for _, ps := range c.Status.Pods {
+		lastNodeID[ps.Name] = ps.NodeID
+	}
 	c.Status.Pods = c.Status.Pods[:0]
 	ready := 0
 	for _, p := range pods {
 		shard := p.shard
-		st := kividbv1alpha1.KividbPodStatus{Name: p.pod.Name, Role: roleOf(p), Ready: p.ready, Shard: &shard}
+		st := kividbv1alpha1.KividbPodStatus{Name: p.pod.Name, Role: roleOf(p), Ready: p.ready, Shard: &shard, NodeID: lastNodeID[p.pod.Name]}
 		if p.status != nil {
 			st.NodeID = p.status.MyID
 			st.ReplicationOffset = p.status.ReplicationOffset
@@ -513,7 +575,7 @@ func (r *KividbClusterReconciler) noteShardFailovers(c *kividbv1alpha1.KividbClu
 	}
 	planned := map[string]bool{}
 	for _, p := range pods {
-		planned[p.pod.Name] = p.pod.Annotations[StepDownAnnotation] == "true"
+		planned[p.pod.Name] = p.pod.Annotations[StepDownAnnotation] == "true" || p.pod.DeletionTimestamp != nil
 	}
 	for _, s := range c.Status.Shards {
 		// A shard owning no slots (one just added) has nothing to fail over.

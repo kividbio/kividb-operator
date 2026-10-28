@@ -248,3 +248,31 @@ func TestDbOpsMasterOfAShard(t *testing.T) {
 		t.Fatalf("restartPending: %q", got)
 	}
 }
+
+// A shard master being deleted (kubectl delete, a drain) hands its slots
+// to a replica in sync first, as a step-down would; its preStop hook holds
+// the engine meanwhile. Not reported as a failover: it was asked for.
+func TestDeletedShardMasterHandsOver(t *testing.T) {
+	h := formedForRollout(t, 2, 1)
+	ctx := context.Background()
+	var pod corev1.Pod
+	_ = h.r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "s-1-0"}, &pod)
+	pod.Finalizers = []string{"test/hold"}
+	if err := h.r.Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.r.Delete(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	observed := h.r.observeShardedPods(ctx, h.c, h.pods())
+	if !h.r.reconcileShardStepDown(ctx, h.c, observed) {
+		t.Fatal("no CLUSTER FAILOVER asked for")
+	}
+	if len(h.node("s-1-1").slots) != 1 || h.node("s-1-0").master != nodeID("s-1-1") {
+		t.Fatal("shard 1 did not fail over to s-1-1")
+	}
+	h.pass()
+	if h.c.Status.LastFailoverTime != nil {
+		t.Fatal("the asked-for handover was counted as a failover")
+	}
+}

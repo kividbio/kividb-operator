@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,71 @@ import (
 type fakeAgents struct {
 	status map[string]*agentapi.StatusResponse
 	calls  []string
+
+	// paused: the pods whose writes CLIENT PAUSE holds.
+	paused map[string]bool
+	// catchUp: how many ROLE answers a replica takes to reach its master's
+	// offset (it reports its own status offset until then); -1 never.
+	catchUp map[string]int
+	// noPause: the engine refuses CLIENT PAUSE ... WRITE (before 1.1).
+	noPause bool
+	// failReplicaOf: /replicaof fails on these pods.
+	failReplicaOf map[string]bool
+}
+
+// execReply answers /exec the way kividb would, for the commands the
+// operator sends: ROLE, CLIENT PAUSE / UNPAUSE / KILL, ACL SETUSER, PING.
+func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []string) agentapi.ExecResponse {
+	ok := agentapi.ExecResponse{Type: "status", Str: "OK"}
+	cmd := strings.ToUpper(strings.Join(args, " "))
+	if cmd != "ROLE" {
+		f.calls = append(f.calls, "exec "+ip+" "+strings.Join(args, " "))
+	}
+	switch {
+	case cmd == "ROLE":
+		if st.Role == agentapi.RoleMaster {
+			return agentapi.ExecResponse{Type: "array", Array: []agentapi.ExecResponse{
+				{Type: "bulk", Str: "master"}, {Type: "integer", Int: st.ReplicationOffset}, {Type: "array"},
+			}}
+		}
+		offset := st.ReplicationOffset
+		if m := f.byIP(st.MasterHost); m != nil {
+			switch n := f.catchUp[ip]; {
+			case n == 0:
+				offset = max(offset, m.ReplicationOffset)
+			case n > 0:
+				f.catchUp[ip] = n - 1
+			}
+		}
+		state := "connected"
+		if st.MasterLinkUp != nil && !*st.MasterLinkUp {
+			state = "connect"
+		}
+		return agentapi.ExecResponse{Type: "array", Array: []agentapi.ExecResponse{
+			{Type: "bulk", Str: "slave"}, {Type: "bulk", Str: st.MasterHost}, {Type: "integer", Int: int64(st.MasterPort)},
+			{Type: "bulk", Str: state}, {Type: "integer", Int: offset},
+		}}
+	case strings.HasPrefix(cmd, "CLIENT PAUSE"):
+		if f.noPause {
+			return agentapi.ExecResponse{Type: "error", Str: "ERR syntax error"}
+		}
+		if f.paused == nil {
+			f.paused = map[string]bool{}
+		}
+		f.paused[ip] = true
+	case cmd == "CLIENT UNPAUSE":
+		delete(f.paused, ip)
+	case cmd == "PING":
+		return agentapi.ExecResponse{Type: "status", Str: "PONG"}
+	}
+	return ok
+}
+
+func (f *fakeAgents) byIP(ip string) *agentapi.StatusResponse {
+	if ip == "" {
+		return nil
+	}
+	return f.status[ip]
 }
 
 func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -52,7 +118,17 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 		f.calls = append(f.calls, fmt.Sprintf("replicaof %s -> %s", ip, r.Host))
+		if f.failReplicaOf[ip] {
+			b, _ := json.Marshal(agentapi.ErrorResponse{Error: "connection reset"})
+			return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
+		}
 		st.Role, st.MasterHost, st.MasterPort = agentapi.RoleReplica, r.Host, r.Port
+	case "/exec":
+		var r agentapi.ExecRequest
+		if err := json.NewDecoder(req.Body).Decode(&r); err != nil {
+			return nil, err
+		}
+		body = f.execReply(ip, st, r.Args)
 	}
 	b, _ := json.Marshal(body)
 	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
@@ -307,5 +383,67 @@ func TestReconcileRoles_NoFailoverBeforeThreshold(t *testing.T) {
 	h.assertLabels(map[string]string{"c1-0": "master", "c1-1": "replica"})
 	if len(h.agents.calls) != 0 {
 		t.Errorf("unexpected agent calls: %v", h.agents.calls)
+	}
+}
+
+// The master pod was deleted and came back (a new IP) as the master, from
+// a snapshot older than its last writes. Its replicas, still following its
+// old address, hold those writes: one of them takes over, and the
+// restarted pod becomes its replica, rather than every replica being
+// resynced from the older data (A2a: 92 acknowledged writes lost).
+func TestReconcileRoles_MasterRestartedBehindItsReplicas(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.9", ready: true, agent: master(700)},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1000)},
+		testPod{name: "c1-2", ip: "10.0.0.3", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 990)},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: false, Synced: true, ReplicationOffset: 1000},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
+		{Name: "c1-2", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 990},
+	}
+	if m, failover := h.reconcile(); m != "c1-1" || !failover {
+		t.Fatalf("master=%q failover=%v, want a failover to c1-1", m, failover)
+	}
+	h.assertLabels(map[string]string{"c1-0": "replica", "c1-1": "master", "c1-2": "replica"})
+	h.assertRole("10.0.0.9", agentapi.RoleReplica, "10.0.0.2")
+	h.assertRole("10.0.0.3", agentapi.RoleReplica, "10.0.0.2")
+}
+
+// A master whose offset has only grown is left alone, even when a replica
+// read a moment later reports more (it applied writes in between).
+func TestReconcileRoles_MasterAheadOfItsLastOffsetIsLeftAlone(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "master", ready: true, agent: master(1200)},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1300)},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 1000},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
+	}
+	if m, failover := h.reconcile(); m != "c1-0" || failover {
+		t.Fatalf("master=%q failover=%v, want c1-0 and no failover", m, failover)
+	}
+	if len(h.agents.calls) != 0 {
+		t.Fatalf("unexpected agent calls: %v", h.agents.calls)
+	}
+}
+
+// While the master cannot be asked, its last offset and key count stay in
+// the status: they are what recognises it coming back behind.
+func TestReconcileRoles_UnreachablePodKeepsItsLastOffset(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "master", unreadyFor: 5 * time.Second},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1000)},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 1000, Keys: 42},
+	}
+	statuses, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.list())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := statuses[0]; s.Name != "c1-0" || s.ReplicationOffset != 1000 || s.Keys != 42 {
+		t.Fatalf("status of the unreachable master: %+v", s)
 	}
 }

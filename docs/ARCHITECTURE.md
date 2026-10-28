@@ -147,8 +147,13 @@ does, in order:
    backup CronJob, and reconcile the cluster's `KividbSnapshot` records
    (next-next section).
 7. List the cluster's pods and run **role reconciliation** (next section).
-8. Write `status` (phase, masterPod, per-pod role/ready/offset, conditions).
-9. Requeue after 10 seconds — this periodic tick, plus a Pod-watch that
+8. Move the master role if something asks for it (the master pod is being
+   deleted, a step-down, a `kividb.io/switchover-to` request: see
+   [Planned switchovers](#planned-switchovers)); otherwise, during a
+   password change, make the pods still on the previous password accept
+   the new one, then move one outdated pod onto the current template.
+9. Write `status` (phase, masterPod, per-pod role/ready/offset, conditions).
+10. Requeue after 10 seconds — this periodic tick, plus a Pod-watch that
    maps any pod's readiness change back to its owning `KividbCluster` via
    the `kividb.io/cluster` label (`mapPodToCluster`), is what makes
    failover detection happen continuously rather than only when someone
@@ -169,7 +174,17 @@ does, in order:
    or its `Ready` condition has been `False` for at least
    `spec.failover.unhealthyThresholdSeconds` (default 30s), or its agent
    reports a role other than master, a failover is triggered (unless
-   `spec.failover.enabled: false`).
+   `spec.failover.enabled: false`). So is one for a master that **came
+   back behind its replicas**: its replication offset is below the one the
+   status last recorded for it as the master (a master's offset never goes
+   down while it runs, so it restarted from an older snapshot), and a
+   replica that was in sync holds more. Letting the replicas resync from
+   it would drop, on every copy, the writes it acknowledged after that
+   snapshot; the replica holding the most is promoted instead and the
+   restarted pod becomes its replica (`MasterRestartedBehind` Event). The
+   status keeps a pod's last offset and key count while it cannot be asked,
+   which is what makes this, and the empty-replica check below, work across
+   the pod's restart.
 5. **Election**: among the remaining ready pods, pick the one with the
    highest `replicationOffset` (most caught-up); ties break on pod name
    for determinism. Call `POST /promote` on it, move the
@@ -200,6 +215,51 @@ sequenceDiagram
     Ctrl->>Others: POST /replicaof {host: New's IP, port}
     Note over Ctrl: master/replica Services now resolve to New automatically
 ```
+
+### Planned switchovers
+
+A failover is for a master that is gone. When the master is alive and the
+role is to move anyway -- a rollout or `KividbDbOps` restart has reached
+it, its pod is being deleted (by hand, a drain, an eviction), a
+step-down or a `kividb.io/switchover-to` request (the GUI's promote) --
+`switchover()` in `internal/controller/switchover.go` moves it without
+losing an acknowledged write. kividb answers `FAILOVER` with "not
+supported", so the operator runs the steps Redis's `FAILOVER` does:
+
+1. `CLIENT PAUSE <ms> WRITE` on the old master (through the agent's
+   `/exec`): it acknowledges no write from here on; reads go on. The pause
+   has its own timeout (10 s), so an operator that dies half-way leaves a
+   master that resumes by itself.
+2. Poll `ROLE` on both until the old master's offset stays put and the
+   target's applied offset has reached it, with its link `connected` --
+   at most 5 s. Otherwise: `CLIENT UNPAUSE`, a `SwitchoverAborted`
+   Warning, the old master stays the master, and the next attempt waits
+   30 s (not when the master pod is being deleted).
+3. `POST /promote` on the target. It keeps the old master's replication ID
+   and offset (as its second ID), so the other replicas continue from it
+   with a partial resync.
+4. `POST /replicaof` on the old master; if that fails the target is made
+   a replica again, the pause lifted, and the old master carries on.
+5. The `kividb.io/role=master` label goes onto the target, *then* comes off
+   the old master: the master Service always has an endpoint, and the one
+   it gains takes writes.
+6. The other replicas are pointed at the target; the old master's clients
+   are disconnected (`CLIENT KILL TYPE normal`), so they reconnect through
+   the Service instead of getting `READONLY` from a replica; `CLIENT
+   UNPAUSE`.
+
+A rollout replaces the old master only on a later pass, once it is a
+replica. A switchover target must be Ready, `synced` and following the
+master with its link up; `synced` itself needs `master_link_status:up`,
+something heard from the master within 20 s and a lag under 1 MiB.
+
+For a master pod that is being deleted, both containers have a `preStop`
+hook, the agent's `GET /prestop`: while kividb is a master with replicas
+attached it waits -- for at most a third of the grace period, 5 to 30 s
+-- until the role has moved, so the engine is stopped as a replica. The
+operator sees the pod's deletion (a Pod event) and switches over at once.
+A `PodDisruptionBudget` (`maxUnavailable: 1`) keeps a drain from taking two
+pods at once.
 
 No component other than the controller ever decides who is master —
 there is no gossip, no Sentinel-style quorum, no Raft. This is a

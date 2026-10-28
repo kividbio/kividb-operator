@@ -44,6 +44,9 @@ func (s *server) routes() http.Handler {
 	// from INFO, nothing that changes or reveals the data.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.HandleFunc("GET /livez", s.handleLivez)
+	// The preStop hook: it only ever waits, bounded by PreStopTimeout.
+	mux.HandleFunc("GET /prestop", s.handlePreStop)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	// Token required: these change the server, or (/exec) run any command.
 	mux.HandleFunc("GET /status", s.withToken(s.handleStatus))
@@ -188,6 +191,19 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 		}
 	}
 
+	if info, err := c.Info("replication"); err == nil {
+		fields := respclient.ParseInfo(info)
+		if out.Role == agentapi.RoleReplica {
+			if v, err := strconv.ParseInt(fields["master_last_io_seconds_ago"], 10, 64); err == nil {
+				out.MasterLastIOSeconds = &v
+			}
+		}
+		if out.Role == agentapi.RoleMaster {
+			if v, err := strconv.ParseInt(fields["connected_slaves"], 10, 64); err == nil {
+				out.ConnectedReplicas = &v
+			}
+		}
+	}
 	if lastSave, err := c.LastSave(); err == nil {
 		out.LastSaveUnix = lastSave
 	}

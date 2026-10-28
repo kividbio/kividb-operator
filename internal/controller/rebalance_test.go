@@ -335,11 +335,20 @@ func TestStaleViewsArePutRight(t *testing.T) {
 	ghost := strings.Repeat("9", 40)
 	replica.seen[ghost] = "10.9.9.8"
 	h.engine.calls = nil
+	now := time.Now()
+	h.r.clock = func() time.Time { return now }
 	h.pass()
 	h.pass()
 	if replica.seen[nodeID("s-0-0")] != "10.0.0.1" {
 		t.Fatalf("s-0-1 still has its master at %s; calls %v", replica.seen[nodeID("s-0-0")], h.engine.calls)
 	}
+	// Forgotten only once it has been none of the pods for a while.
+	if _, still := replica.seen[ghost]; !still {
+		t.Fatalf("the gone node was forgotten at once; calls %v", h.engine.calls)
+	}
+	now = now.Add(orphanNodeGrace)
+	h.pass()
+	h.pass()
 	if _, still := replica.seen[ghost]; still {
 		t.Fatalf("the gone node is still known; calls %v", h.engine.calls)
 	}

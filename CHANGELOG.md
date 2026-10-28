@@ -165,6 +165,85 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 
 ### Fixed
 
+Found by an end-to-end test on AKS (replicated: 1 master + 2 replicas
+under 800 writes/s; sharded: 3 × (1 + 2)), which checked every
+acknowledged write afterwards.
+
+- **A planned switchover lost the writes acknowledged during it** (also in
+  0.6.0 and earlier). A rollout, a `KividbDbOps` restart, a password or
+  config change, or the GUI's promote moved the master role by relabelling
+  the old master, promoting the replica and repointing the old master,
+  with nothing to stop the old master acknowledging writes in between, nor
+  any wait for the replica to have the writes it had already acknowledged;
+  and the old master was deleted on the next pass. Each switchover in the
+  test lost the writes of that second: 19, 25, 23 and 64. Now the old
+  master's writes are held (`CLIENT PAUSE ... WRITE`) until the replica has
+  applied everything up to the master's offset, at most 5 s, and only then
+  is the replica promoted, the old master made its replica, the label
+  moved and the pause lifted; if the replica does not catch up, the pause
+  is lifted and the old master stays (`SwitchoverAborted`). The label goes
+  onto the new master before it comes off the old one: the master Service
+  was without an endpoint for about 1.5 s (connection refused), it no
+  longer is. The old master's clients are disconnected, so they reconnect
+  to the new master rather than get `READONLY`. The GUI's promote now asks
+  the operator for this (the `kividb.io/switchover-to` annotation on the
+  cluster) instead of promoting the pod itself.
+- **A replica whose link to the master was down counted as in sync, and
+  was promoted** (also in 0.6.0). In a replicated cluster "in sync" looked
+  only at the offset, allowing 8 MiB of lag -- minutes of writes at a
+  modest rate -- so a restarted replica that could not authenticate to its
+  master, its offset frozen, was taken as in sync, and a switchover
+  promoted it 541 KB behind: 13,455 and 13,919 acknowledged writes lost.
+  In sync now needs `master_link_status:up`, something heard from the
+  master in the last 20 s, and at most 1 MiB of lag (the agent reports the
+  link and `master_last_io_seconds_ago`); a switchover target must also be
+  following the master with its link up, and catch up exactly.
+- **Removing the password broke replication during the rollout** (also in
+  0.6.0): the restarted pods had no password while the old master still
+  required one, so their replication links stayed down -- what made the
+  13,455 writes above. And **a new password was refused until the master
+  was restarted** (11 s of authentication errors in the test): the master
+  kept the old one until it was replaced. Now the pods still on the
+  previous password are given the new credential live (`ACL SETUSER
+  default #<hash>`, or `nopass` for a removal) before any pod restarts,
+  pods started during the rollout accept both, and the previous password is
+  dropped, by an ACL reload on every pod, once every pod runs with the new
+  one. See [CONFIGURATION.md](docs/CONFIGURATION.md#changing-the-default-users-password).
+- **Deleting, draining or evicting the master pod lost writes and took the
+  cluster down for about 14 s** (also in 0.6.0). Nothing handed the role
+  over: the pod came back as the master from its shutdown snapshot, and the
+  replicas, which held every acknowledged write, were resynced from it (92
+  lost). Now both containers have a `preStop` hook (the agent's `/prestop`)
+  that holds a master with replicas attached -- for at most a third of the
+  grace period, 5 to 30 s -- while the operator, seeing the pod's deletion,
+  does the switchover above; the engine then stops as a replica. The same
+  holds for a shard master, which hands over with `CLUSTER FAILOVER`. A
+  replicated cluster now has a PodDisruptionBudget (`maxUnavailable: 1`),
+  as each shard has.
+- **A master that restarted behind its replicas had them resync from its
+  older data** (also in 0.6.0). When the master comes back with a lower
+  replication offset than the operator last recorded for it while a
+  replica that was in sync holds more, that replica is promoted instead,
+  and the restarted pod becomes its replica (`MasterRestartedBehind`). The
+  status keeps a pod's last offset and key count while it cannot be asked.
+  An in-place container restart, which keeps the pod's address, is still
+  resynced by the engine before the operator can act.
+- **A hung engine was never restarted** (also in 0.6.0). The kividb
+  container's liveness probe was a TCP check, which a deadlocked engine
+  passes: it accepts connections and answers nothing. It is now the
+  agent's `/livez`, which passes on any reply to `PING` (`LOADING` and
+  `BUSY` too) and fails after about 90 s of none, after the failover of a
+  hung master; a startup probe gives an engine up to 30 minutes to load
+  its data first. Needs the 0.7.0 agent image.
+- **The operator forgot nodes of sharded pods that were only unresponsive.**
+  A pod whose agent did not answer lost its node ID from the status at
+  once, and its node, marked failed by the others and owning no slots, was
+  then taken for "a node that is none of the pods" and forgotten
+  (`CLUSTER FORGET`) on every node; the pod could only rejoin once the
+  forget ban expired. The status now keeps such a pod's node ID, a node is
+  also recognised as a pod's by its address and announced name, and a node
+  that is no pod's is forgotten only after 2 minutes. A node of an existing
+  pod is forgotten only when that pod answers with a new node ID.
 - **`/readyz`, `/status` and `/metrics` failed while a password was being
   removed** on engine 1.2 (also in 0.6.0). The agent logged in with
   `AUTH <password>`, which engine 1.2 refuses while the `default` user has

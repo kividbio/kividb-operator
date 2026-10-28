@@ -727,7 +727,7 @@
             ? " It is shard " + shardOfPod(pod) + "'s master: a replica takes over once the node timeout passes, and writes in that moment can be lost. To move the role first, promote the replica."
             : ""
           : detail && pod === detail.masterPod
-          ? " It is the master: the operator fails over to a replica first if one is ready."
+          ? " It is the master: before it stops, the operator hands the role to a replica in sync, holding writes for the moment it takes the replica to catch up, so nothing acknowledged is lost."
           : ""),
       confirmText: "Restart pod",
     }).then(function (ok) {
@@ -744,7 +744,9 @@
           // up. Look again once it has had time to finish.
           setTimeout(refresh, 3000);
           setTimeout(refresh, 8000);
-          return "Asked " + target + " to take over its shard; the view shows when it has";
+          return sharded()
+            ? "Asked " + target + " to take over its shard; the view shows when it has"
+            : "Asked the operator to make " + target + " the master; the view shows when it is";
         }
         return "Promoted " + target + " to master";
       });
@@ -754,7 +756,7 @@
         title: "Promote " + pod + "?",
         message: sharded()
           ? "It takes over shard " + shardOfPod(pod) + " with CLUSTER FAILOVER: the shard's master pauses writes until it has caught up, so nothing is lost, and becomes its replica."
-          : "It becomes the master and the current master becomes its replica. Writes that reach the old master in the moment between the two steps are not carried over.",
+          : "The operator holds writes on the current master until " + pod + " has applied every one of them, then makes it the master and the current master its replica: nothing acknowledged is lost. A replica that is not in sync is not promoted.",
         confirmText: "Promote",
       }).then(function (ok) {
         if (ok) go(pod);

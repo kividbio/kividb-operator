@@ -7,9 +7,17 @@
 // (Authorization: Bearer <token>, see SetToken); without it they answer
 // 401, and an agent with no token configured answers them 503.
 //
-//	GET  /healthz       -> 200 if the agent process itself is up (liveness).
+//	GET  /healthz       -> 200 if the agent process itself is up (the agent
+//	                       container's liveness).
 //	GET  /readyz        -> 200 if a RESP PING against local kividb succeeds,
 //	                       503 otherwise (readiness; gates Service membership).
+//	GET  /livez         -> 200 if local kividb answers anything at all within a
+//	                       few seconds (the kividb container's liveness: a hung
+//	                       engine accepts TCP connections and answers nothing).
+//	GET  /prestop       -> blocks while local kividb is a master with replicas
+//	                       attached, so the operator can hand the role over
+//	                       before the engine is stopped (both containers'
+//	                       preStop hook; see PreStopTimeoutEnv).
 //	GET  /metrics       -> Prometheus text exposition format
 //	GET  /status      * -> 200 StatusResponse
 //	POST /promote     * -> 200 OKResponse | 500 ErrorResponse (REPLICAOF NO ONE)
@@ -36,7 +44,15 @@ type StatusResponse struct {
 	// MasterLinkUp: on a replica, whether its link to the master is up
 	// (ROLE's state is "connected"). Absent on a master, and from agents
 	// before 0.7.0.
-	MasterLinkUp      *bool  `json:"masterLinkUp,omitempty"`
+	MasterLinkUp *bool `json:"masterLinkUp,omitempty"`
+	// MasterLastIOSeconds: on a replica, seconds since anything arrived
+	// from its master (INFO replication master_last_io_seconds_ago; -1
+	// while the link is down). Absent on a master and from agents before
+	// 0.7.0.
+	MasterLastIOSeconds *int64 `json:"masterLastIOSeconds,omitempty"`
+	// ConnectedReplicas: on a master, how many replicas are attached
+	// (connected_slaves). Absent from agents before 0.7.0.
+	ConnectedReplicas *int64 `json:"connectedReplicas,omitempty"`
 	MasterHost        string `json:"masterHost,omitempty"`
 	MasterPort        int32  `json:"masterPort,omitempty"`
 	ReplicationOffset int64  `json:"replicationOffset"`
@@ -48,6 +64,11 @@ type StatusResponse struct {
 	KeyCount      int64 `json:"keyCount"`
 	KeyCountKnown bool  `json:"keyCountKnown,omitempty"`
 }
+
+// PreStopTimeoutEnv names the agent's environment variable holding how
+// many seconds GET /prestop waits, at most, for the master role to move
+// away before it lets the engine stop.
+const PreStopTimeoutEnv = "PRESTOP_TIMEOUT_SECONDS"
 
 // AclReloadRequest is the optional body of POST /acl/reload.
 type AclReloadRequest struct {

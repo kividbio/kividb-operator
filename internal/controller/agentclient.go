@@ -216,6 +216,19 @@ func (a *AgentClient) ReplicaOf(ctx context.Context, podIP, masterHost string, m
 	return a.postAction(ctx, podIP, "/replicaof", agentapi.ReplicaOfRequest{Host: masterHost, Port: masterPort})
 }
 
+// Exec runs one command on the pod's kividb (POST /exec). An error reply
+// from kividb is returned as an error too, with the reply.
+func (a *AgentClient) Exec(ctx context.Context, podIP string, args ...string) (*agentapi.ExecResponse, error) {
+	var out agentapi.ExecResponse
+	if err := a.postJSON(ctx, podIP, "/exec", agentapi.ExecRequest{Args: args}, &out); err != nil {
+		return nil, err
+	}
+	if out.Type == "error" {
+		return &out, fmt.Errorf("%s: %s", args[0], out.Str)
+	}
+	return &out, nil
+}
+
 // AclReload asks the pod's kividb to re-read its ACL file, but only if the
 // file mounted in that pod already hashes to fileHash. It returns
 // reloaded=false with no error when it does not yet (the agent's 409), so

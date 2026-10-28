@@ -128,7 +128,9 @@ func (r *KividbClusterReconciler) reconcileShardStepDown(ctx context.Context, c 
 	acted := false
 	pending := map[int32]*shardPod{}
 	for _, p := range pods {
-		if p.pod.Annotations[StepDownAnnotation] != "true" || p.pod.DeletionTimestamp != nil || v.masters[p.shard] != p {
+		// A master being deleted hands over too: its preStop hook holds
+		// the engine meanwhile (see the agent's /prestop).
+		if (p.pod.Annotations[StepDownAnnotation] != "true" && p.pod.DeletionTimestamp == nil) || v.masters[p.shard] != p {
 			continue
 		}
 		pending[p.shard] = p
