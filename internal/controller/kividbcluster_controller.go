@@ -50,6 +50,10 @@ type KividbClusterReconciler struct {
 	// ("<ns>/<cluster>/<shard>" -> *shardHandover).
 	failovers sync.Map
 
+	// orphans: since when a node of a sharded cluster has been none of its
+	// pods ("<ns>/<cluster>/-1/<node ID>" -> time.Time), see orphanNodes.
+	orphans sync.Map
+
 	// switchovers: when the last replicated-mode switchover of a cluster
 	// ("<ns>/<cluster>" -> time.Time) was aborted, so the next one waits.
 	switchovers sync.Map
