@@ -166,6 +166,9 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg, rollout); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
 	}
+	if err := r.applyPDB(ctx, &c, desiredPDB(&c)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling disruption budget: %w", err)
+	}
 	if err := r.reconcileBackupCronJob(ctx, &c, snapCfg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling backup cronjob: %w", err)
 	}

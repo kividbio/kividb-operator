@@ -513,7 +513,7 @@ func (r *KividbClusterReconciler) noteShardFailovers(c *kividbv1alpha1.KividbClu
 	}
 	planned := map[string]bool{}
 	for _, p := range pods {
-		planned[p.pod.Name] = p.pod.Annotations[StepDownAnnotation] == "true"
+		planned[p.pod.Name] = p.pod.Annotations[StepDownAnnotation] == "true" || p.pod.DeletionTimestamp != nil
 	}
 	for _, s := range c.Status.Shards {
 		// A shard owning no slots (one just added) has nothing to fail over.

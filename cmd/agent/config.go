@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/kividbio/kividb-operator/internal/agentapi"
 )
@@ -24,6 +25,10 @@ type agentConfig struct {
 	// AgentToken (AGENT_TOKEN, from the cluster's auth Secret) is required
 	// as a bearer token on every endpoint but the probes and /metrics.
 	AgentToken string
+	// PreStopTimeout (PRESTOP_TIMEOUT_SECONDS) bounds how long GET
+	// /prestop holds a stopping master for the operator to hand its role
+	// over.
+	PreStopTimeout time.Duration
 
 	S3Endpoint       string
 	S3Bucket         string
@@ -48,6 +53,8 @@ func loadConfig() agentConfig {
 		PodIP:        os.Getenv("POD_IP"),
 		AclFile:      os.Getenv("ACL_FILE"),
 		AgentToken:   os.Getenv(agentapi.TokenEnv),
+
+		PreStopTimeout: time.Duration(getEnvInt(agentapi.PreStopTimeoutEnv, 20)) * time.Second,
 
 		S3Endpoint:       os.Getenv("S3_ENDPOINT"),
 		S3Bucket:         os.Getenv("S3_BUCKET"),

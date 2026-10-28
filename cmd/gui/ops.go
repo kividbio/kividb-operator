@@ -379,8 +379,9 @@ func (s *server) handleAPIRestartPod(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("pod %s is not part of cluster %s", podName, name))
 		return
 	}
-	grace := int64(10)
-	if err := s.clientset.CoreV1().Pods(namespace).Delete(r.Context(), podName, metav1.DeleteOptions{GracePeriodSeconds: &grace}); err != nil {
+	// The pod's own grace period: a master's preStop hook uses part of it
+	// to hand the master role over, and kividb the rest to save.
+	if err := s.clientset.CoreV1().Pods(namespace).Delete(r.Context(), podName, metav1.DeleteOptions{}); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}

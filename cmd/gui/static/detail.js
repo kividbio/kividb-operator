@@ -727,7 +727,7 @@
             ? " It is shard " + shardOfPod(pod) + "'s master: a replica takes over once the node timeout passes, and writes in that moment can be lost. To move the role first, promote the replica."
             : ""
           : detail && pod === detail.masterPod
-          ? " It is the master: the operator fails over to a replica first if one is ready."
+          ? " It is the master: before it stops, the operator hands the role to a replica in sync, holding writes for the moment it takes the replica to catch up, so nothing acknowledged is lost."
           : ""),
       confirmText: "Restart pod",
     }).then(function (ok) {

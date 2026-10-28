@@ -8,6 +8,7 @@ import (
 	"github.com/kividbio/kividb-operator/internal/agentapi"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -72,6 +73,43 @@ func gracePeriod(c *kividbv1alpha1.KividbCluster) *int64 {
 	return &def
 }
 
+// preStopHold is how many seconds a stopping master's preStop hook waits,
+// at most, for the operator to hand its role to a replica: a third of the
+// grace period, between 5 and 30 s. The rest of the grace period is the
+// engine's, for its snapshot on shutdown. A handover takes well under the
+// switchover's own bound (switchoverCatchUpTimeout, 5 s), and starts as
+// soon as the operator sees the pod's deletion.
+func preStopHold(c *kividbv1alpha1.KividbCluster) int64 {
+	hold := *gracePeriod(c) / 3
+	return min(max(hold, 5), 30)
+}
+
+// preStopHook is both containers' preStop hook: the agent's /prestop,
+// which returns at once unless kividb is a master with replicas attached
+// (see cmd/agent/probes.go).
+func preStopHook() *corev1.Lifecycle {
+	return &corev1.Lifecycle{
+		PreStop: &corev1.LifecycleHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: "/prestop", Port: intstr.FromInt(AgentPort)},
+		},
+	}
+}
+
+// desiredPDB keeps a node drain, or any other eviction, from taking more
+// than one pod of a replicated cluster at a time, as each shard's budget
+// does in a sharded cluster. An evicted master still hands its role over
+// before it stops (see reconcileHandover).
+func desiredPDB(c *kividbv1alpha1.KividbCluster) *policyv1.PodDisruptionBudget {
+	one := intstr.FromInt32(1)
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: statefulSetName(c), Namespace: c.Namespace, Labels: commonLabels(c)},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MaxUnavailable: &one,
+			Selector:       &metav1.LabelSelector{MatchLabels: selectorLabels(c)},
+		},
+	}
+}
+
 // defaultAntiAffinity spreads pods of the same cluster across nodes on a
 // best-effort basis when the user hasn't set their own Affinity. This is a
 // *preferred* rule (not required) so single-node dev/test clusters still
@@ -126,6 +164,7 @@ func agentEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbA
 			},
 		},
 		agentTokenEnv(c),
+		{Name: agentapi.PreStopTimeoutEnv, Value: strconv.FormatInt(preStopHold(c), 10)},
 	}
 
 	if ref := defaultUserPasswordRef(aclConfig); ref != nil {
@@ -320,6 +359,7 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 			PeriodSeconds:       10,
 			FailureThreshold:    6,
 		},
+		Lifecycle: preStopHook(),
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromInt(AgentPort)},
@@ -351,6 +391,10 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       10,
 		},
+		// The kubelet stops both containers at once: the agent waits too,
+		// so it is there to answer the kividb container's hook and the
+		// operator while the master role moves.
+		Lifecycle: preStopHook(),
 	}
 
 	// The readiness probe on the kividb container itself intentionally

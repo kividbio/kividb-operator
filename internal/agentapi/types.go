@@ -10,6 +10,10 @@
 //	GET  /healthz       -> 200 if the agent process itself is up (liveness).
 //	GET  /readyz        -> 200 if a RESP PING against local kividb succeeds,
 //	                       503 otherwise (readiness; gates Service membership).
+//	GET  /prestop       -> blocks while local kividb is a master with replicas
+//	                       attached, so the operator can hand the role over
+//	                       before the engine is stopped (both containers'
+//	                       preStop hook; see PreStopTimeoutEnv).
 //	GET  /metrics       -> Prometheus text exposition format
 //	GET  /status      * -> 200 StatusResponse
 //	POST /promote     * -> 200 OKResponse | 500 ErrorResponse (REPLICAOF NO ONE)
@@ -56,6 +60,11 @@ type StatusResponse struct {
 	KeyCount      int64 `json:"keyCount"`
 	KeyCountKnown bool  `json:"keyCountKnown,omitempty"`
 }
+
+// PreStopTimeoutEnv names the agent's environment variable holding how
+// many seconds GET /prestop waits, at most, for the master role to move
+// away before it lets the engine stop.
+const PreStopTimeoutEnv = "PRESTOP_TIMEOUT_SECONDS"
 
 // AclReloadRequest is the optional body of POST /acl/reload.
 type AclReloadRequest struct {
