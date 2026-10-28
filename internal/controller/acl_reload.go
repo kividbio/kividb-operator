@@ -2,8 +2,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"strconv"
 	"strings"
 
@@ -14,12 +12,18 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// configHash fingerprints the rendered kividb.conf, which holds no
-// credentials (the ACL file and passwords live elsewhere).
+// configHash fingerprints the rendered kividb.conf for the pod template,
+// so that a change rolls the pods. A sharded cluster's file holds secrets
+// (masterauth, the cluster bus secret), and the pod template is readable
+// by anyone who can read the pod: salted and slow, as the ACL file is
+// fingerprinted, never a plain hash of it.
 func configHash(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
+	return agentapi.Fingerprint(s, configFingerprintSalt)
 }
+
+// configFingerprintSalt separates the config's fingerprints from the other
+// uses of agentapi.Fingerprint.
+const configFingerprintSalt = "kividb-operator/kividb-conf"
 
 // aclFileFingerprint fingerprints the rendered ACL file the same way the
 // agent fingerprints the file mounted in its pod.

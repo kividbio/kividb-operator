@@ -45,10 +45,12 @@ func (r *KividbClusterReconciler) observeShardedPods(ctx context.Context, c *kiv
 	for i := range pods {
 		p := &pods[i]
 		sp := &shardPod{pod: p, ready: isPodReady(p)}
-		if s, err := strconv.Atoi(p.Labels[ShardLabel]); err == nil {
+		// Parsed as 32-bit numbers: a label or name that does not fit is
+		// not one of ours, rather than one wrapped round to another shard.
+		if s, err := strconv.ParseInt(p.Labels[ShardLabel], 10, 32); err == nil {
 			sp.shard = int32(s)
 		}
-		if n, err := strconv.Atoi(p.Name[len(shardStatefulSetName(c, sp.shard))+1:]); err == nil {
+		if n, err := strconv.ParseInt(p.Name[len(shardStatefulSetName(c, sp.shard))+1:], 10, 32); err == nil {
 			sp.index = int32(n)
 		}
 		out = append(out, sp)
