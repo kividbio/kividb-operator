@@ -96,7 +96,11 @@ steps are not carried over.
   - **+ Shard** and **− Shard** change `spec.shards`.
   - **+/− Replica** changes the replicas of every shard.
   - **Promote** a replica: it takes over its shard with `CLUSTER
-    FAILOVER`, and no acknowledged write is lost.
+    FAILOVER`, and no acknowledged write is lost. The GUI reports the
+    request, not the result: the engine may give the failover up (from
+    1.2, when the replica has not caught up and won its election within
+    5 s; the master then carries on), so watch the shard's master in the
+    view, which refreshes a few seconds later.
   - **Take snapshot** starts a backup run of every shard: a Job from the
     backup CronJob.
 - **Services**: the cluster's, the replicas', each shard's and each
