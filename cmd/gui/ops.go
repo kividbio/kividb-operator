@@ -439,11 +439,15 @@ func (s *server) handleAPIPromote(w http.ResponseWriter, r *http.Request) {
 	if c.Spec.Shards != nil {
 		// The engine fails over within the shard: CLUSTER FAILOVER on the
 		// replica, which its master hands over to without losing a write.
+		// Its OK only means the failover has started: from engine 1.2 the
+		// replica gives it up when it has not caught up and won its
+		// election within 5 s, and the master carries on. So this reports
+		// a request, and the view shows whether the role moved.
 		if _, err := postAgentJSON(r.Context(), target.Status.PodIP, "/cluster/failover", nil); err != nil {
 			writeJSONError(w, http.StatusBadGateway, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"promoted": body.Pod})
+		writeJSON(w, http.StatusAccepted, map[string]string{"requested": body.Pod})
 		return
 	}
 	// A switchover is two steps here and the operator does the rest: make

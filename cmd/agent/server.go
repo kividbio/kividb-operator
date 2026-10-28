@@ -283,10 +283,20 @@ func (s *server) handleReplicaOf(w http.ResponseWriter, r *http.Request) {
 // operator does not know which engine version an image is: older engines
 // reject the flag at startup, whereas CONFIG SET of a parameter they do not
 // have is just an error reply, ignored here.
+//
+// masteruser is set to "default" too, so the replica logs in with AUTH
+// default <password>: from engine 1.2 (kividbio/kividb#135) the
+// single-argument AUTH <password> a replica sends without masteruser is
+// refused while the master's default user has no password, as during a
+// password removal that has reached the master but not yet this pod's
+// Secret. Engines 1.1.x and 1.2 take masteruser with CONFIG SET; each
+// parameter is set on its own, so an engine without one still gets the
+// other.
 func (s *server) setMasterAuth(c *respclient.Client) {
 	if s.cfg.AuthPassword == "" {
 		return
 	}
+	_, _ = c.Do("CONFIG", "SET", "masteruser", "default")
 	_, _ = c.Do("CONFIG", "SET", "masterauth", s.cfg.AuthPassword)
 }
 

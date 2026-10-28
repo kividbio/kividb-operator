@@ -90,6 +90,15 @@ spec:
                       type: integer
                       minimum: 1
                       description: min-replicas-max-lag. Defaults to 10.
+                    replicaValidityFactor:
+                      type: integer
+                      minimum: 0
+                      description: >-
+                        cluster-replica-validity-factor: a replica cut off from
+                        its master for longer than nodeTimeoutMs times this
+                        does not stand for election. 0 lets every replica
+                        stand. Unset leaves the engine's default, 10. Needs
+                        engine 1.2 or later.
                     busSecretRef:
                       type: object
                       description: The cluster-bus-secret. Generated into <cluster>-bus when unset.

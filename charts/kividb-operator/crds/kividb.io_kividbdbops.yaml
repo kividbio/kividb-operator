@@ -104,6 +104,9 @@ spec:
                       type: string
                     currentPodUID:
                       type: string
+                    handoverStartTime:
+                      type: string
+                      format: date-time
                 conditions:
                   type: array
                   x-kubernetes-list-type: map

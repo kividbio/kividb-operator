@@ -738,7 +738,16 @@
   function promote(pod) {
     var m = masterLive();
     var go = function (target) {
-      act(KV.sendJSON("POST", base() + "/promote", { pod: target }), "Promoted " + target + " to master");
+      act(KV.sendJSON("POST", base() + "/promote", { pod: target }), function (j) {
+        if (j && j.requested) {
+          // A CLUSTER FAILOVER was asked for; the engine may still give it
+          // up. Look again once it has had time to finish.
+          setTimeout(refresh, 3000);
+          setTimeout(refresh, 8000);
+          return "Asked " + target + " to take over its shard; the view shows when it has";
+        }
+        return "Promoted " + target + " to master";
+      });
     };
     if (pod) {
       KV.dialog({

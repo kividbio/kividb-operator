@@ -18,6 +18,13 @@ import (
 
 const dbOpsRequeue = 5 * time.Second
 
+// dbOpsHandoverTimeout is how long the op waits for a master to hand its
+// role over before it fails. The cluster controller asks a shard's
+// replica for a CLUSTER FAILOVER up to maxFailoverAttempts times,
+// failoverRetry apart; this leaves room for those and for the replica to
+// get in sync first.
+const dbOpsHandoverTimeout = 5 * time.Minute
+
 // KividbDbOpsReconciler executes declarative database operations
 // (currently: InPlace rolling restart) against a KividbCluster.
 type KividbDbOpsReconciler struct {
@@ -137,6 +144,14 @@ func (r *KividbDbOpsReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// in a sharded cluster, a CLUSTER FAILOVER within the shard; this only
 	// asks for it and waits.
 	if isMasterPod(&cluster, next) && hasSyncedReplica(&cluster, next) {
+		if st.HandoverStartTime == nil {
+			now := metav1.Now()
+			st.HandoverStartTime = &now
+		}
+		if waited := time.Since(st.HandoverStartTime.Time); waited > dbOpsHandoverTimeout {
+			r.withdrawStepDown(ctx, p)
+			return r.fail(ctx, &op, handoverTimeoutMessage(&cluster, next))
+		}
 		if p.Annotations[StepDownAnnotation] != "true" {
 			patch := client.MergeFrom(p.DeepCopy())
 			if p.Annotations == nil {
@@ -152,6 +167,7 @@ func (r *KividbDbOpsReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: dbOpsRequeue}, nil
 	}
 
+	st.HandoverStartTime = nil
 	log.Info("deleting pod for restart", "pod", next, "cluster", cluster.Name)
 	if err := r.Delete(ctx, p); err != nil && !apierrors.IsNotFound(err) {
 		return r.fail(ctx, &op, fmt.Sprintf("deleting %s: %v", next, err))
@@ -172,6 +188,29 @@ func (r *KividbDbOpsReconciler) fail(ctx context.Context, op *kividbv1alpha1.Kiv
 	op.Status.Message = msg
 	op.Status.CompletionTime = &now
 	return ctrl.Result{}, r.Status().Update(ctx, op)
+}
+
+// handoverTimeoutMessage is why the op failed when master did not hand
+// its role over in time.
+func handoverTimeoutMessage(cluster *kividbv1alpha1.KividbCluster, master string) string {
+	msg := fmt.Sprintf("%s did not hand over the master role within %s, so it was not restarted", master, dbOpsHandoverTimeout)
+	if isSharded(cluster) {
+		return msg + fmt.Sprintf("; see the ShardSwitchover condition and events of KividbCluster %s, and the replica's log: from engine 1.2 a replica gives a manual failover up (\"Manual failover abandoned\") when it has not caught up and won its election within 5 s", cluster.Name)
+	}
+	return msg + fmt.Sprintf("; see the events of KividbCluster %s", cluster.Name)
+}
+
+// withdrawStepDown removes the step-down request the op set on p, so the
+// cluster controller stops trying to hand its role over.
+func (r *KividbDbOpsReconciler) withdrawStepDown(ctx context.Context, p *corev1.Pod) {
+	if p.Annotations[StepDownAnnotation] != "true" {
+		return
+	}
+	patch := client.MergeFrom(p.DeepCopy())
+	delete(p.Annotations, StepDownAnnotation)
+	if err := r.Patch(ctx, p, patch); err != nil && !apierrors.IsNotFound(err) {
+		logf.FromContext(ctx).Error(err, "removing step-down annotation", "pod", p.Name)
+	}
 }
 
 func (r *KividbDbOpsReconciler) SetupWithManager(mgr ctrl.Manager) error {

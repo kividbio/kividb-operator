@@ -34,7 +34,9 @@ const (
 	podNameLabel = "statefulset.kubernetes.io/pod-name"
 
 	// maxShardedNodes caps shards × (replicas + 1) until larger clusters
-	// are tested (kividbio/kividb#112).
+	// are tested. Engines before 1.2 opened a new cluster bus connection
+	// for every heartbeat, N × (N - 1) a second (kividbio/kividb#112);
+	// 1.2 keeps one per peer, but nothing larger has been tested yet.
 	maxShardedNodes = 24
 
 	// maxShardedNameLen leaves room for -<shard>-<n>, -<shard>-headless and
@@ -106,9 +108,16 @@ func validateSharded(c *kividbv1alpha1.KividbCluster) error {
 }
 
 // operatorOwnedClusterDirective reports whether a KividbConfig directive is
-// one the operator sets itself on a sharded cluster.
+// one the operator sets itself on a sharded cluster (or, for
+// cluster-replica-validity-factor, through spec.cluster). The
+// cluster-slot-migration-* settings are left to the user: the operator
+// does not set them, and the engine applies them to the next migration's
+// handoff (kividbio/kividb#111).
 func operatorOwnedClusterDirective(key string) bool {
 	k := strings.ToLower(strings.TrimSpace(key))
+	if strings.HasPrefix(k, "cluster-slot-migration-") {
+		return false
+	}
 	if strings.HasPrefix(k, "cluster-") || strings.HasPrefix(k, "min-replicas-") || strings.HasPrefix(k, "min-slaves-") {
 		return true
 	}
@@ -155,6 +164,11 @@ func clusterDirectives(c *kividbv1alpha1.KividbCluster, secrets clusterSecrets) 
 		"cluster-preferred-endpoint-type": "hostname",
 		"min-replicas-to-write":           strconv.Itoa(int(minReplicas)),
 		"min-replicas-max-lag":            strconv.Itoa(int(maxLag)),
+	}
+	// Only when set: engines before 1.2 do not know the directive and stop
+	// at startup on it.
+	if spec.ReplicaValidityFactor != nil {
+		d["cluster-replica-validity-factor"] = strconv.Itoa(int(*spec.ReplicaValidityFactor))
 	}
 	if secrets.busSecret != "" {
 		d["cluster-bus-secret"] = secrets.busSecret
@@ -455,6 +469,11 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 		setCondition(&c.Status.Conditions, *cond)
 	} else {
 		removeCondition(&c.Status.Conditions, "ExternallyAccessible")
+	}
+	if cond := r.switchoverCondition(c); cond != nil {
+		setCondition(&c.Status.Conditions, *cond)
+	} else {
+		removeCondition(&c.Status.Conditions, "ShardSwitchover")
 	}
 	phase, err := r.updateShardedStatus(ctx, c, observed, topoErr)
 	if err != nil {

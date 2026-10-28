@@ -29,7 +29,10 @@ type fakeEngine struct {
 
 	tasks      map[string]string // migration task ID -> state
 	failImport bool              // the next import fails
-	moved      int               // slots moved by imports
+	// abandonFailovers: CLUSTER FAILOVER says OK and nothing moves, as
+	// when the replica gives a manual failover up (engine 1.2).
+	abandonFailovers bool
+	moved            int // slots moved by imports
 }
 
 type fakeNode struct {
@@ -174,6 +177,9 @@ func (e *fakeEngine) RoundTrip(req *http.Request) (*http.Response, error) {
 		old := e.nodes[n.master]
 		if old == nil {
 			return reply(http.StatusInternalServerError, agentapi.ErrorResponse{Error: "You should send CLUSTER FAILOVER to a replica"}), nil
+		}
+		if e.abandonFailovers {
+			break
 		}
 		n.slots, old.slots = old.slots, nil
 		for _, o := range e.nodes {

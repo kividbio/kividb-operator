@@ -42,7 +42,10 @@ type exposure struct {
 }
 
 // announceHost checks that addr can be announced: a hostname or an IPv4
-// address, on the cluster's client port.
+// address, on the cluster's client port. A node announces one port to
+// clients and peers alike (kividbio/kividb#110). Engine 1.2 has
+// cluster-announce-client-port, a port for clients only, which would allow
+// another one here; the operator does not set it yet.
 func announceHost(addr string, clientPort int32) (string, error) {
 	host, port := addr, ""
 	if h, p, err := net.SplitHostPort(addr); err == nil {

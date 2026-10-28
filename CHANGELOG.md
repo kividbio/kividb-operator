@@ -11,6 +11,27 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 needs a token. Anything that called an agent through those Services, other
 than the operator's own backup Jobs, has to change. The pods roll once.
 
+**Read before upgrading: 0.7.0 targets kividb engine 1.2.0.**
+
+- **A cluster without `spec.image` gets an engine upgrade** to the new
+  default image, as a rolling restart: replicas first, masters last, each
+  master only after an in-sync replica has taken over. Pin `spec.image`
+  to stay on 1.1.x for now.
+- **No going back to 1.1.x** once a 1.2 pod has saved a snapshot that
+  holds a time series with compaction rules: 1.1.x cannot read it. Take
+  a backup before the upgrade if you may need to downgrade.
+- **During the rollout, 1.1.x replicas of a 1.2 master log errors.** A 1.2
+  master sends a transaction, and a script that writes more than once, to
+  its replicas between `MULTI` and `EXEC`; a 1.1.x replica still applies
+  every write, but logs `Replicated command error (non-fatal): ERR unknown
+  command 'MULTI'` (and `'EXEC'`) for each, until it is upgraded too.
+- **A `KividbConfig` directive the engine refuses stops the server.** 1.2
+  accepts Redis's own settings with a warning and applies some it used to
+  ignore, but a name that is neither KiviDB's nor Redis's, or a bad value,
+  is still fatal. A rolling change stalls safely after the first pod; a new
+  cluster or a cold restart has every pod down. See
+  [CONFIGURATION.md](docs/CONFIGURATION.md#references-to-other-crds).
+
 ### Security
 
 - **The agent's API needs a token.** In 0.6.0 any client that could reach
@@ -30,7 +51,27 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 
 ### Added
 
-- **`spec.shards`**: sharded clusters in kividb's cluster mode, one
+- **`spec.cluster.replicaValidityFactor`**: `cluster-replica-validity-factor`,
+  which engine 1.2 enforces: a replica whose link to its master has been
+  down for longer than `nodeTimeoutMs × replicaValidityFactor` does not
+  stand for election. Unset, the operator writes nothing and the engine's
+  default, 10, applies (with the default 5 s node timeout, a replica cut
+  off for more than about a minute does not take over); `0` lets every
+  replica stand. Needs engine 1.2: older engines do not start with the
+  directive. A `KividbConfig` may not set it.
+- **Handovers that do not happen are reported.** Engine 1.2 pauses a
+  shard master's writes for up to 10 s during `CLUSTER FAILOVER`, and the
+  replica gives the failover up after 5 s (`Manual failover abandoned`).
+  The `ShardSwitchover` Event now marks only the first request of a
+  handover; a `Warning` `ShardSwitchoverAbandoned` follows when the master
+  has not moved 15 s after a request. The operator asks at most 5 times
+  in a row (then again after 10 minutes), and the `ShardSwitchover`
+  condition shows the shard, the pods and the attempt while a handover is
+  pending (`InProgress`, `Retrying`, `Stalled`).
+- **A `KividbDbOps` restart no longer waits forever for a master to hand
+  over.** After 5 minutes it fails, says where to look, and withdraws its
+  step-down request. `status.restart.handoverStartTime` records when it
+  started waiting.
   StatefulSet per shard (`<cluster>-<shard>`), a PodDisruptionBudget per
   shard, and ClusterIP Services only: one per pod, one per shard,
   `<cluster>-replicas`, `<cluster>` for the whole cluster, and a headless
@@ -102,9 +143,37 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   refused (the cluster's `Ready` condition says why). Cluster mode would
   fight the operator's own failover; sharded clusters come as
   `spec.shards`.
+- In a sharded cluster, a `KividbConfig` may set the slot migration
+  settings, `cluster-slot-migration-handoff-max-lag-bytes` and
+  `cluster-slot-migration-write-pause-timeout` (applied at runtime since
+  engine kividbio/kividb#111). Every other `cluster-*` directive is still
+  the operator's.
+- **The console's Promote of a shard replica reports a request**, not a
+  promotion: `CLUSTER FAILOVER` answering `OK` only means the failover
+  started. The endpoint answers `202 {"requested": pod}` and the page
+  refreshes a few seconds later to show whether the role moved.
+- The docs say what engine 1.2 fixes: a failed import's keys are deleted
+  at restart (#108), `cluster-announce-client-port` exists but is not used
+  yet (#110), heartbeats keep one connection per peer though the 24-node
+  cap stays (#112), replicas resync in part after a restart since 1.0.5
+  and after a failover since 1.2 (#109), elections favour the most
+  caught-up replica (#107), and certificates can be reloaded with `CONFIG
+  SET`, not used yet. `KIVIDB_ENGINE_ISSUES.md` is marked frozen at 1.0.5,
+  with a table of the later engine issues and the version that fixes each.
+- The e2e harness documents `KIVIDB_IMAGE_BASE=ghcr.io/kividbio/kividb`
+  for engine release candidates, which are on GHCR only.
 
 ### Fixed
 
+- **`/readyz`, `/status` and `/metrics` failed while a password was being
+  removed** on engine 1.2 (also in 0.6.0). The agent logged in with
+  `AUTH <password>`, which engine 1.2 refuses while the `default` user has
+  no password (kividbio/kividb#135), as when the password is gone from the
+  server and a pod still has the old Secret. The agent now always sends
+  `AUTH default <password>`, which every engine takes; it sets
+  `masteruser default` with `masterauth`, so replicas log in to their
+  master the same way; and the exporter gets `REDIS_USER=default`. The
+  new exporter variable rolls the pods of clusters with a password.
 - The chart's ServiceMonitor scraped each pod twice, through the headless
   Service and through its master or replica Service. It selects the
   headless Service only (`kividb.io/service: headless`).

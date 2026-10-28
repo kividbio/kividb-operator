@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -25,9 +27,69 @@ import (
 // to, and its master is restarted in place: its slots are down until it
 // is back.
 
-// failoverRetry is how long a CLUSTER FAILOVER the operator asked for is
-// given before it is asked for again.
-const failoverRetry = 20 * time.Second
+// A handover can fail: from engine 1.2 the master pauses its writes for up
+// to 10 s, and the replica gives the failover up if it has not caught up
+// and won its election within 5 s ("Manual failover abandoned" in its
+// log); the master then goes on as before. The operator asks again, a few
+// times, and says so.
+const (
+	// failoverRetry is how long a CLUSTER FAILOVER the operator asked for
+	// is given before it is asked for again.
+	failoverRetry = 20 * time.Second
+	// failoverAbandonedAfter is how long after a request a master that is
+	// still the master is reported (a Warning event): well past the
+	// engine's own 5 s.
+	failoverAbandonedAfter = 15 * time.Second
+	// maxFailoverAttempts is how many times in a row a shard's master is
+	// asked to hand over before the operator stops asking...
+	maxFailoverAttempts = 5
+	// ...for this long; then it starts again.
+	failoverGiveUpCooldown = 10 * time.Minute
+)
+
+// shardHandover is the state of one shard's handover, in
+// KividbClusterReconciler.failovers.
+type shardHandover struct {
+	master   string    // the pod asked to step down
+	attempts int       // CLUSTER FAILOVERs asked for in this round
+	last     time.Time // when the last one was asked for
+	warned   bool      // the last one has been reported as abandoned
+	target   string    // the replica last asked to take over
+}
+
+// handoverStep says what to do about a pending handover at now: ask for a
+// CLUSTER FAILOVER (again), and whether to report the last one as
+// abandoned. It starts a new round of attempts once a spent one has
+// cooled down.
+func (h *shardHandover) step(now time.Time) (ask, warn bool) {
+	since := now.Sub(h.last)
+	warn = h.attempts > 0 && !h.warned && since >= failoverAbandonedAfter
+	switch {
+	case h.attempts >= maxFailoverAttempts:
+		if since < failoverGiveUpCooldown {
+			return false, warn
+		}
+		h.attempts = 0
+		return true, warn
+	case h.attempts > 0 && since < failoverRetry:
+		return false, warn
+	}
+	return true, warn
+}
+
+// exhausted reports whether the operator has stopped asking for now.
+func (h *shardHandover) exhausted() bool { return h.attempts >= maxFailoverAttempts }
+
+func handoverKey(c *kividbv1alpha1.KividbCluster, shard int32) string {
+	return fmt.Sprintf("%s/%s/%d", c.Namespace, c.Name, shard)
+}
+
+func (r *KividbClusterReconciler) now() time.Time {
+	if r.clock != nil {
+		return r.clock()
+	}
+	return time.Now()
+}
 
 // shardSynced reports whether replica p follows its shard's master m and
 // has caught up with it (the same rule as replicaSynced).
@@ -64,9 +126,42 @@ func (r *KividbClusterReconciler) reconcileShardStepDown(ctx context.Context, c 
 	log := logf.FromContext(ctx)
 	v := buildView(c, pods)
 	acted := false
+	pending := map[int32]*shardPod{}
 	for _, p := range pods {
 		if p.pod.Annotations[StepDownAnnotation] != "true" || p.pod.DeletionTimestamp != nil || v.masters[p.shard] != p {
 			continue
+		}
+		pending[p.shard] = p
+	}
+	// A handover is over once its shard's master is no longer asked to
+	// step down (it has, or the request was withdrawn).
+	for s := int32(0); s < shardCount(c); s++ {
+		key := handoverKey(c, s)
+		if at, ok := r.failovers.Load(key); ok && (pending[s] == nil || at.(*shardHandover).master != pending[s].pod.Name) {
+			r.failovers.Delete(key)
+		}
+	}
+	for _, p := range pods {
+		if pending[p.shard] != p {
+			continue
+		}
+		key := handoverKey(c, p.shard)
+		at, _ := r.failovers.LoadOrStore(key, &shardHandover{master: p.pod.Name})
+		h := at.(*shardHandover)
+		now := r.now()
+		ask, warn := h.step(now)
+		if warn {
+			h.warned = true
+			next := "asking again"
+			if h.exhausted() {
+				next = fmt.Sprintf("gave up after %d attempts; asking again in %s", maxFailoverAttempts, failoverGiveUpCooldown)
+			}
+			r.event(c, corev1.EventTypeWarning, "ShardSwitchoverAbandoned",
+				"shard %d: %s is still the master %s after %s was asked to take over (attempt %d of %d); the engine gives a manual failover up when the replica has not caught up and won its election within 5 s (\"Manual failover abandoned\" in its log); %s",
+				p.shard, p.pod.Name, now.Sub(h.last).Round(time.Second), h.target, h.attempts, maxFailoverAttempts, next)
+		}
+		if !ask {
+			continue // the engine is still on it, or the operator has stopped asking for now
 		}
 		var best *shardPod
 		for _, q := range pods {
@@ -78,19 +173,58 @@ func (r *KividbClusterReconciler) reconcileShardStepDown(ctx context.Context, c 
 			log.V(1).Info("step-down requested, but no replica of the shard is in sync yet", "pod", p.pod.Name)
 			continue
 		}
-		key := fmt.Sprintf("%s/%s/%d", c.Namespace, c.Name, p.shard)
-		if at, ok := r.failovers.Load(key); ok && time.Since(at.(time.Time)) < failoverRetry {
-			continue // the engine is still on it
-		}
 		if err := r.Agent.ClusterFailover(ctx, best.ip()); err != nil {
 			log.Error(err, "asking for CLUSTER FAILOVER", "pod", best.pod.Name)
 			continue
 		}
-		r.failovers.Store(key, time.Now())
-		r.event(c, corev1.EventTypeNormal, "ShardSwitchover", "shard %d: asked %s to take over from %s (CLUSTER FAILOVER)", p.shard, best.pod.Name, p.pod.Name)
+		first := h.attempts == 0 && h.last.IsZero()
+		h.attempts++
+		h.last, h.warned, h.target = now, false, best.pod.Name
+		if first {
+			r.event(c, corev1.EventTypeNormal, "ShardSwitchover", "shard %d: asked %s to take over from %s (CLUSTER FAILOVER)", p.shard, best.pod.Name, p.pod.Name)
+		} else {
+			log.Info("asking for CLUSTER FAILOVER again", "shard", p.shard, "master", p.pod.Name, "replica", best.pod.Name, "attempt", h.attempts)
+		}
 		acted = true
 	}
 	return acted
+}
+
+// switchoverCondition reports the shards whose master has been asked to
+// hand over and has not yet: the ShardSwitchover condition, nil when
+// there are none.
+func (r *KividbClusterReconciler) switchoverCondition(c *kividbv1alpha1.KividbCluster) *metav1.Condition {
+	var lines []string
+	reason := "InProgress"
+	for s := int32(0); s < shardCount(c); s++ {
+		at, ok := r.failovers.Load(handoverKey(c, s))
+		if !ok {
+			continue
+		}
+		h := at.(*shardHandover)
+		switch {
+		case h.attempts == 0 && h.last.IsZero():
+			lines = append(lines, fmt.Sprintf("shard %d: %s waits for a replica in sync to hand over to", s, h.master))
+		case h.exhausted():
+			reason = "Stalled"
+			lines = append(lines, fmt.Sprintf("shard %d: %s did not hand over in %d attempts (CLUSTER FAILOVER to %s); asking again %s after the last", s, h.master, h.attempts, h.target, failoverGiveUpCooldown))
+		default:
+			if h.attempts > 1 && reason == "InProgress" {
+				reason = "Retrying"
+			}
+			lines = append(lines, fmt.Sprintf("shard %d: %s handing over to %s (attempt %d of %d)", s, h.master, h.target, h.attempts, maxFailoverAttempts))
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return &metav1.Condition{
+		Type:               "ShardSwitchover",
+		Status:             metav1.ConditionTrue,
+		Reason:             reason,
+		Message:            strings.Join(lines, "; "),
+		ObservedGeneration: c.Generation,
+	}
 }
 
 // clearShardStepDowns removes the step-down request from a pod that is no

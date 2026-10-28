@@ -89,6 +89,12 @@ type DbOpsRestartStatus struct {
 	// UID has taken its place.
 	// +optional
 	CurrentPodUID string `json:"currentPodUID,omitempty"`
+
+	// HandoverStartTime is when the op asked the master it restarts next
+	// to hand its role over. The op fails if the master has not handed
+	// over within a few minutes.
+	// +optional
+	HandoverStartTime *metav1.Time `json:"handoverStartTime,omitempty"`
 }
 
 // KividbDbOpsStatus reports operation progress.

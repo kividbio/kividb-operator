@@ -191,8 +191,9 @@ type FailoverSpec struct {
 }
 
 // ClusterModeSpec tunes kividb's cluster mode, for a KividbCluster with
-// spec.shards. The operator owns every cluster-* directive: these are the
-// ones a user may choose.
+// spec.shards. The operator owns the cluster-* directives (except the
+// cluster-slot-migration-* ones, which a KividbConfig may set): these are
+// the ones a user may choose.
 type ClusterModeSpec struct {
 	// NodeTimeoutMs is cluster-node-timeout: how long a node may go
 	// unanswered before the others suspect it, and so roughly how long a
@@ -218,6 +219,19 @@ type ClusterModeSpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MinReplicasMaxLagSeconds *int32 `json:"minReplicasMaxLagSeconds,omitempty"`
+
+	// ReplicaValidityFactor is cluster-replica-validity-factor: a replica
+	// whose link to its master has been down for longer than
+	// NodeTimeoutMs × ReplicaValidityFactor (plus the replication ping
+	// period) does not stand for election when the master fails, as its
+	// data may be too old. 0 lets every replica stand, however stale.
+	// Unset leaves the engine's default, 10: with the default node timeout
+	// of 5 s, a replica cut off for more than about a minute does not take
+	// over. Needs engine 1.2 or later: older engines do not know the
+	// directive and do not start with it.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ReplicaValidityFactor *int32 `json:"replicaValidityFactor,omitempty"`
 
 	// BusSecretRef names the cluster-bus-secret: the nodes prove they know
 	// it before the cluster bus accepts them. When unset the operator

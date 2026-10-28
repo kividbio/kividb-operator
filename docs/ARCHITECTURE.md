@@ -271,10 +271,16 @@ see [ROADMAP.md](ROADMAP.md)).
 
 ## What this operator deliberately does not do
 
-- No partial resync / backlog reuse on reconnect — every failover or
-  replica restart triggers kividb's `FULLRESYNC` path (this is a kividb
-  protocol limitation, not an operator one, as of the version this was
-  built against).
+- No replication tuning of its own: whether a replica resyncs in full or
+  in part is the engine's business. Since engine 1.0.5 a restarted replica
+  continues from the replication ID and offset of its own dataset (a
+  partial resync, no dataset transfer). Since 1.2 a promoted replica keeps
+  the old master's stream as its second ID, so after a failover (the
+  engine's in a sharded cluster, `REPLICAOF NO ONE` from the operator in a
+  replicated one) the other replicas continue from its backlog instead of
+  resyncing in full (kividbio/kividb#109); on 1.1.x and earlier every
+  failover sends them the whole dataset again. A replica that had read
+  further than the new master still resyncs in full.
 - No multi-region / cross-cluster replication.
 - No online storage expansion automation (`spec.storage.size` changes
   after creation are not currently propagated — see TROUBLESHOOTING.md).

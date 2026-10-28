@@ -171,6 +171,10 @@ func (in *ClusterModeSpec) DeepCopyInto(out *ClusterModeSpec) {
 		out.MinReplicasMaxLagSeconds = new(int32)
 		*out.MinReplicasMaxLagSeconds = *in.MinReplicasMaxLagSeconds
 	}
+	if in.ReplicaValidityFactor != nil {
+		out.ReplicaValidityFactor = new(int32)
+		*out.ReplicaValidityFactor = *in.ReplicaValidityFactor
+	}
 	if in.BusSecretRef != nil {
 		out.BusSecretRef = new(SecretKeyRef)
 		*out.BusSecretRef = *in.BusSecretRef
@@ -886,6 +890,9 @@ func (in *DbOpsRestartStatus) DeepCopyInto(out *DbOpsRestartStatus) {
 	if in.PendingPods != nil {
 		out.PendingPods = make([]string, len(in.PendingPods))
 		copy(out.PendingPods, in.PendingPods)
+	}
+	if in.HandoverStartTime != nil {
+		out.HandoverStartTime = in.HandoverStartTime.DeepCopy()
 	}
 }
 

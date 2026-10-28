@@ -193,6 +193,11 @@ func exporterEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.Kivi
 		{Name: "REDIS_EXPORTER_WEB_LISTEN_ADDRESS", Value: fmt.Sprintf(":%d", ExporterPort)},
 	}
 	if ref := defaultUserPasswordRef(aclConfig); ref != nil {
+		// REDIS_USER makes the exporter log in with AUTH default <password>
+		// rather than AUTH <password>, which engine 1.2 refuses while the
+		// default user has no password (kividbio/kividb#135), as during a
+		// password removal that this pod's Secret has not caught up with.
+		env = append(env, corev1.EnvVar{Name: "REDIS_USER", Value: "default"})
 		env = append(env, corev1.EnvVar{
 			Name: "REDIS_PASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
@@ -279,14 +284,16 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 		if tlsPort == 0 {
 			tlsPort = 6443
 		}
-		// kividb's --configfile parser does not currently apply tls-port /
-		// tls-cert-file / tls-key-file / tls-ca-cert-file directives (a
-		// confirmed upstream gap, verified against a live v1.0.2-tls
-		// container: the config file is accepted and the process starts,
-		// but no TLS listener comes up) -- the identical settings work when
-		// passed as CLI flags, so they're passed here in addition to
-		// writing them into kividb.conf (which still documents them for
-		// anyone reading the rendered ConfigMap directly).
+		// The TLS settings go both into kividb.conf and on the command
+		// line. Engines from 1.1.0 read tls-port / tls-cert-file /
+		// tls-key-file / tls-ca-cert-file from the config file; older ones
+		// did not apply them from there (on v1.0.2-tls the file was
+		// accepted and no TLS listener came up), while the same settings
+		// as flags work on every version, so the flags stay until those
+		// engines are no longer supported. Engine 1.2 also reloads the
+		// certificate files with CONFIG SET, without a restart
+		// (kividbio/kividb#156); the operator does not use that yet, so a
+		// renewed certificate takes effect when the pod restarts.
 		kividbArgs = append(kividbArgs,
 			"--tls-port", strconv.Itoa(int(tlsPort)),
 			"--tls-cert-file", TLSDir+"/tls.crt",

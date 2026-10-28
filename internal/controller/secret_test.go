@@ -121,3 +121,34 @@ func TestRenderACLFile(t *testing.T) {
 		}
 	})
 }
+
+func TestExporterEnvLogsInAsDefaultUser(t *testing.T) {
+	t.Parallel()
+	c := &kividbv1alpha1.KividbCluster{}
+	envOf := func(acl *kividbv1alpha1.KividbAclConfig) map[string]string {
+		out := map[string]string{}
+		for _, e := range exporterEnv(c, acl) {
+			out[e.Name] = e.Value
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+				out[e.Name] = "secret:" + e.ValueFrom.SecretKeyRef.Name + "/" + e.ValueFrom.SecretKeyRef.Key
+			}
+		}
+		return out
+	}
+
+	withPass := &kividbv1alpha1.KividbAclConfig{Spec: kividbv1alpha1.KividbAclConfigSpec{
+		RequirePassSecretRef: &kividbv1alpha1.SecretKeyRef{Name: "pw", Key: "password"},
+	}}
+	env := envOf(withPass)
+	if env["REDIS_USER"] != "default" || env["REDIS_PASSWORD"] != "secret:pw/password" {
+		t.Fatalf("with a password: REDIS_USER=%q REDIS_PASSWORD=%q, want default and the Secret", env["REDIS_USER"], env["REDIS_PASSWORD"])
+	}
+
+	env = envOf(nil)
+	if _, ok := env["REDIS_USER"]; ok {
+		t.Fatalf("without a password REDIS_USER is set: %q", env["REDIS_USER"])
+	}
+	if _, ok := env["REDIS_PASSWORD"]; ok {
+		t.Fatal("without a password REDIS_PASSWORD is set")
+	}
+}
