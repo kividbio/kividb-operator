@@ -26,6 +26,23 @@ import (
 // so baking a replicaof directive into the config file would fight the
 // controller on every pod restart.
 func renderKividbConf(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) string {
+	return renderKividbConfWith(c, kdbConfig, clusterSecrets{})
+}
+
+// clusterSecrets are the secret values a sharded cluster's config needs.
+// They are why the rendered config is a Secret, not a ConfigMap.
+type clusterSecrets struct {
+	// busSecret is cluster-bus-secret.
+	busSecret string
+	// masterAuth is the default user's password, for masterauth: in
+	// cluster mode replicas connect to their master on their own (after a
+	// failover too), not through the agent's /replicaof.
+	masterAuth string
+}
+
+// renderKividbConfWith is renderKividbConf with the secrets a sharded
+// cluster's config needs.
+func renderKividbConfWith(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, secrets clusterSecrets) string {
 	directives := map[string]string{}
 	if kdbConfig != nil {
 		for k, v := range kdbConfig.Spec.Directives {
@@ -51,6 +68,12 @@ func renderKividbConf(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1
 	// Every engine version accepts the directive.
 	if !hasDirective(directives, "bind") && !hasDirective(directives, "protected-mode") {
 		directives["bind"] = "0.0.0.0"
+	}
+
+	if isSharded(c) {
+		for k, v := range clusterDirectives(c, secrets) {
+			directives[k] = v
+		}
 	}
 
 	if tls := kividbTLSSpec(kdbConfig); tls != nil && tls.Enabled {
@@ -103,15 +126,19 @@ func kividbTLSSpec(kdbConfig *kividbv1alpha1.KividbConfig) *kividbv1alpha1.Kivid
 	return kdbConfig.Spec.TLS
 }
 
-func desiredConfigMap(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) *corev1.ConfigMap {
-	return &corev1.ConfigMap{
+// desiredConfigSecret holds the rendered kividb.conf. A Secret, not a
+// ConfigMap: a sharded cluster's config carries the bus secret and
+// masterauth.
+func desiredConfigSecret(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, secrets clusterSecrets) *corev1.Secret {
+	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      configMapName(c),
+			Name:      configSecretName(c),
 			Namespace: c.Namespace,
 			Labels:    commonLabels(c),
 		},
-		Data: map[string]string{
-			ConfigFileName: renderKividbConf(c, kdbConfig),
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			ConfigFileName: renderKividbConfWith(c, kdbConfig, secrets),
 		},
 	}
 }

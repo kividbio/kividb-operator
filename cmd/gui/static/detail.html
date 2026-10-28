@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KiviDB Cluster</title>
 <link rel="icon" type="image/png" href="/static/kividb-logo.png">
-<link rel="stylesheet" href="/static/style.css?v=060">
-<script src="/static/common.js?v=060"></script>
+<link rel="stylesheet" href="/static/style.css?v=070">
+<script src="/static/common.js?v=070"></script>
 </head>
 <body data-page="detail">
 <header class="topbar">
@@ -32,6 +32,8 @@
       <span id="variant-chip" class="chip hidden"></span>
     </div>
     <div class="actions">
+      <button type="button" id="btn-shard-down" class="btn-secondary hidden" data-write title="Remove a shard">− Shard</button>
+      <button type="button" id="btn-shard-up" class="btn-secondary hidden" data-write title="Add a shard">+ Shard</button>
       <button type="button" id="btn-scale-down" class="btn-secondary" data-write title="Remove a replica">− Replica</button>
       <button type="button" id="btn-scale-up" class="btn-secondary" data-write title="Add a replica">+ Replica</button>
       <button type="button" id="btn-promote" class="btn-secondary" data-write>Promote replica</button>
@@ -42,11 +44,11 @@
   </div>
 
   <section class="tiles" aria-label="Summary">
-    <div class="tile"><div class="label">Master</div><div class="value sm" id="w-master">–</div><div class="sub" id="w-failover">–</div></div>
+    <div class="tile"><div class="label" id="w-master-label">Master</div><div class="value sm" id="w-master">–</div><div class="sub" id="w-failover">–</div></div>
     <div class="tile"><div class="label">Pods ready</div><div class="value" id="w-pods">–</div><div class="sub" id="w-replicas">–</div></div>
     <div class="tile"><div class="label">Commands / s</div><div class="value" id="w-ops">–</div><div class="sub">all pods</div></div>
     <div class="tile"><div class="label">Memory</div><div class="value" id="w-mem">–</div><div class="sub">all pods</div></div>
-    <div class="tile"><div class="label">Keys</div><div class="value" id="w-keys">–</div><div class="sub">on the master</div></div>
+    <div class="tile"><div class="label">Keys</div><div class="value" id="w-keys">–</div><div class="sub" id="w-keys-sub">on the master</div></div>
     <div class="tile"><div class="label">Clients</div><div class="value" id="w-clients">–</div><div class="sub" id="w-age">–</div></div>
   </section>
 
@@ -61,7 +63,7 @@
 
   <section class="tab-panel" id="panel-overview">
     <div class="card">
-      <div class="card-head"><h2>Topology</h2><span class="muted" style="font-size:.8rem">Replication lag is how far each replica's offset is behind the master's.</span></div>
+      <div class="card-head"><h2 id="topo-title">Topology</h2><span class="muted" id="topo-note" style="font-size:.8rem">Replication lag is how far each replica's offset is behind the master's.</span></div>
       <div id="topology" class="topology"><span class="muted">loading&hellip;</span></div>
     </div>
 
@@ -192,6 +194,6 @@
   <span class="muted">kividb-operator console. Refreshes every 10 s. Secrets never reach the browser.</span>
 </footer>
 
-<script src="/static/detail.js?v=060"></script>
+<script src="/static/detail.js?v=070"></script>
 </body>
 </html>

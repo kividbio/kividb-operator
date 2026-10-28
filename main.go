@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"time"
@@ -13,6 +14,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -39,6 +41,9 @@ func main() {
 	var defaultAgentImage string
 	flag.StringVar(&defaultAgentImage, "default-agent-image", "",
 		"Agent sidecar image for KividbClusters that do not set spec.agentImage (default: "+controller.DefaultAgentImage+").")
+	var agentTokenSecret string
+	flag.StringVar(&agentTokenSecret, "agent-token-secret", controller.DefaultAgentTokenSecret,
+		"Secret, in the operator's namespace (POD_NAMESPACE), holding the agent token; created with a random token if missing.")
 
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
@@ -59,10 +64,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The agent token, read (or made) before the manager starts: every
+	// call to an agent needs it. The manager's own client reads from a
+	// cache that is not running yet, so this uses a direct one.
+	namespace := os.Getenv("POD_NAMESPACE")
+	if namespace == "" {
+		namespace = "kividb-operator-system"
+	}
+	direct, err := client.New(mgr.GetConfig(), client.Options{Scheme: scheme})
+	if err != nil {
+		ctrl.Log.Error(err, "unable to build a Kubernetes client")
+		os.Exit(1)
+	}
+	agentToken, err := controller.EnsureAgentToken(context.Background(), direct, namespace, agentTokenSecret)
+	if err != nil {
+		ctrl.Log.Error(err, "unable to read or create the agent token")
+		os.Exit(1)
+	}
+
 	reconciler := &controller.KividbClusterReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Agent:    controller.NewAgentClient(agentTimeout),
+		Agent:    controller.NewAgentClient(agentTimeout, agentToken),
 		Recorder: mgr.GetEventRecorderFor("kividb-operator"),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {

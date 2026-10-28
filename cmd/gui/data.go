@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,14 @@ func clusterLabelSelector(clusterName string) string {
 const (
 	appNameLabel = "app.kubernetes.io/name"
 	appNameValue = "kividb"
+
+	// shardLabel and serviceKindLabel mirror internal/controller's
+	// ShardLabel and ServiceKindLabel.
+	shardLabel       = "kividb.io/shard"
+	serviceKindLabel = "kividb.io/service"
+
+	// maxShardedNodes mirrors the operator's limit on shards × (replicas+1).
+	maxShardedNodes = 24
 )
 
 // isClusterPod is clusterLabelSelector for a pod already in hand.
@@ -105,13 +114,59 @@ func summarizeCluster(c *kividbv1alpha1.KividbCluster) ClusterSummary {
 		Version:           imageTag(image),
 		Variant:           variant,
 		Replicas:          c.Spec.Replicas,
-		DesiredPods:       c.Spec.Replicas + 1,
+		Shards:            specShards(c),
+		SlotsAssigned:     clusterSlots(c),
+		ClusterState:      clusterState(c),
+		Rebalancing:       c.Status.Cluster != nil && c.Status.Cluster.Rebalance != nil,
+		DesiredPods:       desiredPods(c),
 		ReadyPods:         ready,
 		TotalPods:         len(c.Status.Pods),
 		BackupEnabled:     c.Spec.SnapshotConfigRef != nil,
 		CreationTimestamp: created,
 		Age:               humanizeAge(time.Since(created)),
 	}
+}
+
+// desiredPods is the number of pods the cluster should have: the master and
+// its replicas, in each shard of a sharded cluster.
+func desiredPods(c *kividbv1alpha1.KividbCluster) int32 {
+	per := c.Spec.Replicas + 1
+	if c.Spec.Shards != nil {
+		// While shards are removed, theirs too: they run until drained.
+		return shardStatefulSetCount(c) * per
+	}
+	return per
+}
+
+func specShards(c *kividbv1alpha1.KividbCluster) int32 {
+	if c.Spec.Shards == nil {
+		return 0
+	}
+	return *c.Spec.Shards
+}
+
+func clusterSlots(c *kividbv1alpha1.KividbCluster) int32 {
+	if c.Status.Cluster == nil {
+		return 0
+	}
+	return c.Status.Cluster.SlotsAssigned
+}
+
+func clusterState(c *kividbv1alpha1.KividbCluster) string {
+	if c.Status.Cluster == nil {
+		return ""
+	}
+	return c.Status.Cluster.State
+}
+
+// shardStatefulSetCount is how many shard StatefulSets a sharded cluster
+// has: spec.shards, or more while shards are being removed.
+func shardStatefulSetCount(c *kividbv1alpha1.KividbCluster) int32 {
+	n := specShards(c)
+	if c.Status.Cluster != nil && c.Status.Cluster.Rebalance != nil {
+		n = max(n, c.Status.Cluster.Rebalance.From, c.Status.Cluster.Rebalance.To)
+	}
+	return n
 }
 
 // imageTag is an image reference's tag ("v1.1.2-lua" of
@@ -175,6 +230,8 @@ func getClusterDetail(ctx context.Context, ctrlClient client.Client, clientset k
 		MasterServiceType:  string(c.Spec.Services.Master.Type),
 		ReplicaServiceType: string(c.Spec.Services.Replicas.Type),
 		ObservedGeneration: c.Status.ObservedGeneration,
+		Cluster:            c.Status.Cluster,
+		ShardStatus:        c.Status.Shards,
 	}
 	if c.Spec.ConfigRef != nil {
 		det.ConfigRef = c.Spec.ConfigRef.Name
@@ -226,6 +283,8 @@ func getClusterDetail(ctx context.Context, ctrlClient client.Client, clientset k
 			Role:              string(p.Role),
 			Ready:             p.Ready,
 			ReplicationOffset: p.ReplicationOffset,
+			Shard:             p.Shard,
+			NodeID:            p.NodeID,
 		})
 		podByName[p.Name] = len(det.Pods) - 1
 	}
@@ -235,8 +294,13 @@ func getClusterDetail(ctx context.Context, ctrlClient client.Client, clientset k
 	}
 
 	enrichPods(ctx, clientset, namespace, name, det, podByName)
-	det.StatefulSet = fetchStatefulSetView(ctx, clientset, namespace, statefulSetName(name))
-	det.Services = fetchServiceViews(ctx, clientset, namespace, name)
+	if c.Spec.Shards != nil {
+		det.StatefulSet = fetchShardStatefulSetsView(ctx, clientset, namespace, name, shardStatefulSetCount(&c))
+		det.Services = fetchShardedServiceViews(ctx, clientset, namespace, name)
+	} else {
+		det.StatefulSet = fetchStatefulSetView(ctx, clientset, namespace, statefulSetName(name))
+		det.Services = fetchServiceViews(ctx, clientset, namespace, name)
+	}
 	if c.Spec.SnapshotConfigRef != nil {
 		det.CronJob = fetchCronJobView(ctx, clientset, namespace, backupCronJobName(name))
 	}
@@ -269,6 +333,12 @@ func enrichPods(ctx context.Context, clientset kubernetes.Interface, namespace, 
 			idx = len(det.Pods) - 1
 			podByName[p.Name] = idx
 		}
+		if det.Pods[idx].Shard == nil {
+			if s, err := strconv.Atoi(p.Labels[shardLabel]); err == nil {
+				shard := int32(s)
+				det.Pods[idx].Shard = &shard
+			}
+		}
 		det.Pods[idx].Phase = string(p.Status.Phase)
 		det.Pods[idx].PodIP = p.Status.PodIP
 		det.Pods[idx].NodeName = p.Spec.NodeName
@@ -293,6 +363,56 @@ func fetchStatefulSetView(ctx context.Context, clientset kubernetes.Interface, n
 		CurrentReplicas: sts.Status.CurrentReplicas,
 		UpdatedReplicas: sts.Status.UpdatedReplicas,
 	}
+}
+
+// fetchShardStatefulSetsView adds up a sharded cluster's StatefulSets,
+// <cluster>-<shard>.
+func fetchShardStatefulSetsView(ctx context.Context, clientset kubernetes.Interface, namespace, clusterName string, shards int32) *StatefulSetView {
+	var sum *StatefulSetView
+	for s := int32(0); s < shards; s++ {
+		v := fetchStatefulSetView(ctx, clientset, namespace, fmt.Sprintf("%s-%d", clusterName, s))
+		if v == nil {
+			continue
+		}
+		if sum == nil {
+			sum = &StatefulSetView{}
+		}
+		sum.DesiredReplicas += v.DesiredReplicas
+		sum.ReadyReplicas += v.ReadyReplicas
+		sum.CurrentReplicas += v.CurrentReplicas
+		sum.UpdatedReplicas += v.UpdatedReplicas
+	}
+	return sum
+}
+
+// fetchShardedServiceViews lists a sharded cluster's Services: the whole
+// cluster's, the replicas', each shard's and each shard's headless one.
+// The one per pod is left out (there are as many as pods), as are the
+// Services users make for access from outside.
+func fetchShardedServiceViews(ctx context.Context, clientset kubernetes.Interface, namespace, clusterName string) []ServiceView {
+	list, err := clientset.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s,%s,%s!=pod", kividbv1alpha1.ClusterLabel, clusterName, serviceKindLabel, serviceKindLabel),
+	})
+	if err != nil {
+		return nil
+	}
+	order := map[string]int{"cluster": 0, "replicas": 1, "shard": 2, "headless": 3}
+	var views []ServiceView
+	for i := range list.Items {
+		svc := &list.Items[i]
+		sv := ServiceView{Name: svc.Name, Kind: svc.Labels[serviceKindLabel], Type: string(svc.Spec.Type), ClusterIP: svc.Spec.ClusterIP}
+		for _, p := range svc.Spec.Ports {
+			sv.Ports = append(sv.Ports, p.Port)
+		}
+		views = append(views, sv)
+	}
+	sort.Slice(views, func(i, j int) bool {
+		if order[views[i].Kind] != order[views[j].Kind] {
+			return order[views[i].Kind] < order[views[j].Kind]
+		}
+		return views[i].Name < views[j].Name
+	})
+	return views
 }
 
 func fetchServiceViews(ctx context.Context, clientset kubernetes.Interface, namespace, clusterName string) []ServiceView {
@@ -371,6 +491,7 @@ func fetchSnapshots(ctx context.Context, ctrlClient client.Client, namespace, cl
 			SizeBytes:  s.Status.SizeBytes,
 			DurationMs: s.Status.DurationMs,
 			Error:      s.Status.Error,
+			Shards:     s.Status.Shards,
 		}
 		if s.Status.StartTime != nil {
 			t := s.Status.StartTime.Time

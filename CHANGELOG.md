@@ -6,6 +6,109 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+**Read before upgrading:** the agent's port (8081) is no longer on the
+`<cluster>-master` and `<cluster>-replicas` Services, and the agent's API
+needs a token. Anything that called an agent through those Services, other
+than the operator's own backup Jobs, has to change. The pods roll once.
+
+### Security
+
+- **The agent's API needs a token.** In 0.6.0 any client that could reach
+  port 8081 of a kividb pod could promote it, repoint its replication, or
+  run any command through `/exec`; and the port was on the master and
+  replica Services, which can be LoadBalancers. Now every endpoint but
+  `/healthz`, `/readyz` and `/metrics` requires `Authorization: Bearer
+  <token>`, and an agent without a token refuses them. The operator keeps
+  the token in a Secret in its namespace (created with a random value at
+  its first start; `--agent-token-secret`, the chart's
+  `<release>-agent-token`) and copies it into each cluster's auth Secret.
+  The operator, the backup Jobs and the GUI send it; the GUI reads it from
+  the Secret mounted as a file. A new token rolls the pods, as a new
+  password does.
+- **The agent port is on the headless Service only**, not on the master
+  and replica Services.
+
+### Added
+
+- **`spec.shards`**: sharded clusters in kividb's cluster mode, one
+  StatefulSet per shard (`<cluster>-<shard>`), a PodDisruptionBudget per
+  shard, and ClusterIP Services only: one per pod, one per shard,
+  `<cluster>-replicas`, `<cluster>` for the whole cluster, and a headless
+  Service per shard. `spec.cluster` sets the node timeout, full coverage,
+  `min-replicas-to-write` and the bus secret (generated when unset). The
+  operator owns every cluster-mode directive. A cluster is sharded or not
+  from its creation; up to 24 nodes for now.
+- **Access to a sharded cluster from outside Kubernetes.** Expose each pod
+  with a Service of your own (a LoadBalancer, a NodePort) labelled
+  `kividb.io/announce: "true"`, and the pod's node announces that
+  Service's address (its load-balancer address, or the
+  `kividb.io/announce-address` annotation) instead of its DNS name, so
+  cluster clients outside follow `MOVED` to an address they can reach.
+  The operator only reads these Services. The `ExternallyAccessible`
+  condition says whether every pod is exposed (`PartiallyExposed` when
+  only some are) and what is wrong with a Service that cannot be used.
+- **Rolling restarts of sharded clusters**, for a template change or a
+  `KividbDbOps` restart: one pod at a time across the cluster, replicas
+  first, and each shard's master only after its most caught-up replica
+  has taken over with `CLUSTER FAILOVER`. The agent has a
+  `/cluster/failover` endpoint, and reports whether a replica's link to
+  its master is up; `status.pods[].synced` is set for sharded clusters.
+- **Backups of sharded clusters.** A run backs up every shard at once,
+  each from a pod with the configured role, under
+  `<cluster>/<run>/shard-<i>-<pod>.tar.gz`. A `manifest.json` names each
+  shard's object, source, master node ID and slots, and is written only
+  when every shard succeeded. Retention counts complete runs and prunes
+  whole runs. `KividbSnapshot.status.shards[]` lists the shards, and
+  `objectKey` is the manifest. The agent has `/backup/manifest`, and
+  `/backup` takes a run and shard. Restoring a sharded cluster is not
+  supported yet.
+- **Changing a sharded cluster's shard count.** Edit `spec.shards` and
+  the operator adds shards, or drains and removes them, moving only the
+  slots it has to: one move at a time, each an atomic `CLUSTER MIGRATION
+  IMPORT` on the destination master (no `ASK` for clients). Phase
+  `Rebalancing`, with the plan, the move under way and the last error in
+  `status.cluster.rebalance`. `status.cluster.shards` is the count the
+  slots are spread over. Removed shards' PVCs are deleted once their
+  slots have all moved out. The agent has
+  `/cluster/migration/import` and `/cluster/migration/status`.
+- **The console shows sharded clusters.**
+  - **Shards:** one card per shard, with its slots, master and replicas, and each replica's lag against its own shard's master.
+  - **Slot map:** the slots coloured by shard; the ones moving are striped.
+  - **Rebalance:** progress while the shard count changes.
+  - **Tiles:** slots and `cluster_state`.
+  - **Actions:** **+/− Shard**. **Promote** runs `CLUSTER FAILOVER` on the replica. **Take snapshot** starts a backup run of every shard, as a Job from the backup CronJob, so the GUI's ClusterRole gains `create` on `jobs`.
+- **Sharded clusters form and look after themselves.** The operator
+  introduces the nodes (`CLUSTER MEET`), assigns the slots evenly across the
+  shards once every pod is up, puts each shard's replicas behind its
+  master, and has every node announce its pod's DNS name. Failover is the
+  engine's: the operator reports it and moves the role labels, and never
+  promotes in cluster mode. It re-introduces nodes after IP changes (a
+  cold restart), and forgets the old ID of a pod that rejoined with a new
+  one, never a node that owns slots. The agent gains `/cluster/status`,
+  `/meet`, `/addslots`, `/replicate`, `/forget` and `/announce`, all behind
+  the agent token.
+
+### Changed
+
+- **The rendered `kividb.conf` is a Secret** (`<cluster>-config`), not a
+  ConfigMap, for every cluster: a sharded cluster's carries the bus secret
+  and `masterauth`. The old ConfigMap is removed once no pod mounts it;
+  the pods move to the Secret as they roll.
+- The operator's ClusterRole adds PodDisruptionBudgets.
+- The backup Job finds the pod to back up by asking every pod's agent for
+  its role, through the headless Service's per-pod names, instead of going
+  through the master or replica Service.
+- A `KividbConfig` that sets `cluster-enabled` to anything but `no` is
+  refused (the cluster's `Ready` condition says why). Cluster mode would
+  fight the operator's own failover; sharded clusters come as
+  `spec.shards`.
+
+### Fixed
+
+- The chart's ServiceMonitor scraped each pod twice, through the headless
+  Service and through its master or replica Service. It selects the
+  headless Service only (`kividb.io/service: headless`).
+
 ## [0.6.0] - 2026-10-24
 
 A new management GUI. The default engine stays kividb **1.1.2**.

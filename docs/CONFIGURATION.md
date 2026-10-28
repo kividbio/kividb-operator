@@ -29,7 +29,8 @@ All fields below are under `spec:` unless stated otherwise.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `replicas` | int32 | `2` | Replica pods **in addition to** the single master. Total pods = `replicas + 1`. |
+| `shards` | int32 | unset | Makes the cluster **sharded**: that many shards in kividb's cluster mode. See [Sharded clusters](#sharded-clusters-shards). Set or left unset only when the cluster is created. |
+| `replicas` | int32 | `2` | Replica pods **in addition to** each master: beside the single master (total pods = `replicas + 1`), or in each shard (total = `shards × (replicas + 1)`). |
 | `image` | string | `docker.io/kividb/kividb:v1.1.2` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.1.2` or `docker.io/kividb/kividb:v1.1.2-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
 | `variant` | string | `standard` | One of `standard`, `tls`, `lua`, `full`. See [Image and variant](#image-and-variant) — informational only, does not affect which image gets pulled. |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
@@ -191,6 +192,14 @@ spec:
     limits: {cpu: "100m", memory: "128Mi"}
 ```
 
+**Set a memory request and limit for `kividb`, and `maxmemory` below the
+limit** (in a `KividbConfig`). Without them the scheduler cannot tell how
+much a pod needs, and pods packed onto one node can drive it out of
+memory together. A node's out-of-memory killer then picks a kividb, most
+likely the one using the most. Leave headroom above `maxmemory` for a full
+resync, a backup, and in a sharded cluster a slot move, which each hold
+extra copies for a while.
+
 ### `services` — master and replica exposure
 
 ```yaml
@@ -213,8 +222,11 @@ Service (`<cluster>-replicas`) load-balances reads across all replicas.
 There's also always a headless Service (`<cluster>-headless`, not
 configurable) backing the StatefulSet's stable pod DNS names.
 
-All three carry the kividb port and the agent port (8081), and, when the
-cluster's `KividbConfig` enables TLS, the TLS port as well (named `tls`).
+The master and replica Services carry the kividb port and, when the
+cluster's `KividbConfig` enables TLS, the TLS port (named `tls`). Only the
+headless Service also carries the agent port (8081): the agent's API,
+which needs the agent token, is never on a Service that clients or the
+outside reach.
 
 ### `monitoring`
 
@@ -256,6 +268,160 @@ patch the `kividb.io/role` pod label and expect the controller to leave it
 alone). Lowering `unhealthyThresholdSeconds` makes failover more
 aggressive at the cost of being more sensitive to transient blips (a slow
 `BGSAVE`, a brief network hiccup).
+
+### Sharded clusters: `shards`
+
+With `spec.shards`, kividb runs in its cluster mode: the 16,384 hash slots
+are spread over the shards, each a master and `replicas` replicas, and
+clients use any Redis Cluster client.
+
+```yaml
+spec:
+  shards: 3
+  replicas: 1          # per shard: 6 pods
+  storage: {size: 20Gi}
+  cluster:
+    nodeTimeoutMs: 5000          # cluster-node-timeout
+    requireFullCoverage: true    # cluster-require-full-coverage
+    minReplicasToWrite: 0        # min-replicas-to-write
+    minReplicasMaxLagSeconds: 10 # min-replicas-max-lag
+    # busSecretRef: {name: my-bus, key: secret}   # generated into <cluster>-bus when unset
+```
+
+- **Fixed at creation.** A cluster is sharded, or not, for good:
+  `spec.shards` cannot be added to or removed from an existing cluster.
+  Its value can change: see "Changing the shard count" below.
+- **At most 24 nodes** (`shards × (replicas + 1)`) for now, and a name of
+  at most 40 characters.
+- **Workloads.** One StatefulSet per shard, `<cluster>-<shard>`, whose pods
+  are `<cluster>-<shard>-<n>`, and a PodDisruptionBudget per shard
+  (`maxUnavailable: 1`). Pods prefer other nodes than their shard's other
+  pods, then than the cluster's.
+- **Configuration.** The operator sets every cluster-mode directive
+  (`cluster-*`, `min-replicas-*`, `masteruser`/`masterauth`, `replicaof`,
+  `tls-cluster`); a `KividbConfig` that sets one is refused. The bus
+  secret is always on.
+- **Forming the cluster.** Once every pod is ready, the operator
+  introduces the nodes to each other (`CLUSTER MEET`), gives each shard's
+  `-0` pod an even share of the slots, and has the shard's other pods
+  `CLUSTER REPLICATE` it. Each node announces its pod's DNS name to clients
+  (`cluster-announce-hostname`).
+- **Failover is kividb's.** When a master fails, the engine promotes one of
+  its replicas; the operator does not promote anything in cluster mode. It
+  reports the move (`status.shards[].masterPod`, `lastFailoverTime`, a
+  `ShardFailover` Event) and moves the `kividb.io/role` label, so
+  `<cluster>-replicas` follows.
+- **Looking after it.** Every few seconds the operator re-introduces a node
+  the others have at an old address (after a cold restart, every pod's IP
+  changes), puts a pod that came back empty behind its shard's master, and,
+  for a pod that rejoined with a new node ID because its volume was lost,
+  forgets the old ID on every node (`status.cluster.staleNodeIDs` while it
+  does). It never forgets a node that owns slots.
+- **Status.** `status.shards[]` (each shard's master, its slots, its pods),
+  `status.cluster` (`cluster_state`, slots assigned and failed, known
+  nodes), and each pod's shard and node ID. `Running` when every slot is
+  served and every pod is ready; `Degraded` when the cluster serves but a
+  pod is down, or `cluster_state` is `fail`.
+- **Restarts.** A change to the pod template (image, resources, config,
+  a new password) and a `KividbDbOps` restart replace the pods one at a
+  time across the whole cluster, replicas first, and only while every
+  slot is served and every other pod is ready and in sync. A shard's
+  master is never restarted while it is the master: its most caught-up
+  replica takes over first with `CLUSTER FAILOVER`, which the engine runs
+  without losing a write, and the old master is restarted as a replica
+  (a `ShardSwitchover` Event, not a `ShardFailover`). A shard with
+  `replicas: 0` has no one to hand over to: its master restarts in place,
+  and its slots are down until it is back. A pod that has been unready
+  for 30 s on an old template is replaced straight away.
+- **Changing the shard count.** Edit `spec.shards` on a running cluster
+  and the operator moves slots until they are spread evenly over the new
+  count (phase `Rebalancing`, progress in `status.cluster.rebalance`):
+  - **Adding shards:** the new shards' StatefulSets come up and join, the
+    new pods sort into a master and replicas, and each existing shard
+    gives the new ones its share. Going from 3 to 4 shards moves 4,096
+    slots, a quarter, and nothing else.
+  - **Removing shards:** the shards past the new count give all their
+    slots to the others; then their StatefulSets, their volumes
+    (PersistentVolumeClaims) and their nodes go. The volumes hold none of
+    the cluster's data by then, only the nodes' identity and their view of
+    the cluster, which would confuse a shard added later on them.
+  - **How slots move:** one move at a time, each a `CLUSTER MIGRATION
+    IMPORT` on the destination master. The engine copies the slots' keys,
+    streams the writes made meanwhile, pauses writes for an instant and
+    hands the slots over; clients never see an `ASK`. The source keeps
+    serving the slots until then.
+  - **Failures:** a move that fails leaves the slots with the source,
+    and is tried again after 30 s (`status.cluster.rebalance.lastError`,
+    a `SlotMoveFailed` Event). If the destination restarts during a move,
+    the keys it had received stay on it (kividbio/kividb#108).
+  - **Meanwhile:** rolling restarts wait until the change is done; a
+    stuck pod is still replaced. Moves wait for every pod to be ready and
+    the cluster to serve every slot. A change can be changed again half
+    way: the shards of both counts are kept until the slots are where the
+    last one says.
+- **Not yet:** `bootstrapFromSnapshot`.
+
+**Services**, all ClusterIP; the operator never creates a load balancer:
+
+| Service | Selects | For |
+|---|---|---|
+| `<cluster>` | every pod | a seed address for cluster clients |
+| `<cluster>-shard-<i>` | shard `i`'s pods | one shard |
+| `<cluster>-replicas` | every replica | reads from replicas |
+| `<pod>` (one per pod) | that pod (`statefulset.kubernetes.io/pod-name`) | a stable address per node |
+| `<cluster>-<i>-headless` | shard `i`'s pods, not-ready included | each pod's DNS name, `<pod>.<cluster>-<i>-headless.<ns>.svc`; the only one with the agent port |
+
+#### Access from outside Kubernetes
+
+A cluster client connects to one address, then follows `MOVED` to the
+address each node announces: by default the pod's DNS name, which only
+resolves inside Kubernetes. To reach the cluster from outside, expose
+**every pod** with a Service of your own and label it
+`kividb.io/announce: "true"`; the node then announces that Service's
+address instead.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache-0-0-public
+  labels:
+    kividb.io/announce: "true"
+spec:
+  type: LoadBalancer
+  selector:
+    statefulset.kubernetes.io/pod-name: cache-0-0
+  ports:
+    - port: 6380        # must be the cluster's client port
+      targetPort: 6380
+```
+
+- **The address** is the load balancer's (`status.loadBalancer.ingress`,
+  hostname first), or the `kividb.io/announce-address` annotation
+  (`host` or `host:port`) for a Service without one of its own: a
+  NodePort behind an address you know, an ingress controller's TCP route.
+- **The port must be the client port.** A node announces one port, to
+  clients and to the other nodes alike
+  ([kividbio/kividb#110](https://github.com/kividbio/kividb/issues/110)),
+  so a Service that serves another port, or an annotation that names one,
+  is refused.
+- **Hostnames and IPv4 addresses** only.
+- **Everyone sees the outside address,** clients inside Kubernetes too,
+  since a node announces one address. Inside clients then go through the
+  load balancer. If you restrict it with `loadBalancerSourceRanges`, allow
+  the pod network as well: kube-proxy applies the ranges to traffic from
+  inside the cluster too, and inside clients would time out.
+- **The operator never creates, changes or deletes these Services.** It
+  reads them, and reconciles when one changes. Deleting one puts the
+  pod's DNS name back.
+- **Condition `ExternallyAccessible`**, once any pod is exposed:
+
+  | Reason | Status | Means |
+  |---|---|---|
+  | `AllPodsExposed` | True | every pod announces an outside address |
+  | `PartiallyExposed` | False | some pods are not exposed: outside clients are sent to every node and cannot reach those |
+  | `WaitingForAddress` | False | a Service has no load-balancer address yet |
+  | `AnnounceServiceProblem` | False | a Service serves the wrong port, its address cannot be announced, or two Services expose one pod |
 
 ### `podAnnotations` / `podLabels`
 
@@ -304,7 +470,6 @@ spec:
     threads: "4"
     aof: "yes"
     loglevel: "notice"
-    cluster-enabled: "no"
     notify-keyspace-events: "Ex"
     slowlog-log-slower-than: "10000"
   tls:
@@ -492,6 +657,11 @@ status:
   durationMs: 37211
   error: ""                      # populated only when phase is Failed
 ```
+
+For a sharded cluster, `objectKey` is the run's `manifest.json` and
+`status.shards[]` lists each shard's `index`, `sourcePod`, `sizeBytes`
+and, on failure, `error`. See
+[BACKUP_RESTORE.md](BACKUP_RESTORE.md#sharded-clusters).
 
 You don't create these — the operator creates exactly one per backup Job
 run, named after the owning `KividbSnapshotConfig` and timestamp. List a

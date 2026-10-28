@@ -34,7 +34,7 @@ func TestDesiredBackupCronJob(t *testing.T) {
 		}
 	})
 
-	t.Run("backup URL points at master service by default", func(t *testing.T) {
+	t.Run("the Job asks every pod's agent, by its headless name, for the master", func(t *testing.T) {
 		t.Parallel()
 		snap := &kividbv1alpha1.KividbSnapshotConfig{
 			ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
@@ -43,15 +43,21 @@ func TestDesiredBackupCronJob(t *testing.T) {
 				// Source unset → master
 			},
 		}
-		cj := desiredBackupCronJob(cluster, snap)
-		args := cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Args
-		wantURL := fmt.Sprintf("http://demo-master.prod.svc:%d/backup", AgentPort)
-		if !containsArgPair(args, "--url", wantURL) {
-			t.Fatalf("expected --url %s in args %v", wantURL, args)
+		c := cluster.DeepCopy()
+		c.Spec.Replicas = 2
+		cj := desiredBackupCronJob(c, snap)
+		container := cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0]
+		wantTargets := fmt.Sprintf("demo-0.demo-headless.prod.svc:%[1]d,demo-1.demo-headless.prod.svc:%[1]d,demo-2.demo-headless.prod.svc:%[1]d", AgentPort)
+		if !containsArgPair(container.Args, "--targets", wantTargets) || !containsArgPair(container.Args, "--role", "master") {
+			t.Fatalf("args %v, want --targets %s --role master", container.Args, wantTargets)
+		}
+		if len(container.Env) != 1 || container.Env[0].Name != "AGENT_TOKEN" ||
+			container.Env[0].ValueFrom.SecretKeyRef.Name != "demo-auth" || container.Env[0].ValueFrom.SecretKeyRef.Key != "agent-token" {
+			t.Fatalf("env %+v, want AGENT_TOKEN from demo-auth/agent-token", container.Env)
 		}
 	})
 
-	t.Run("replica source uses replicas service", func(t *testing.T) {
+	t.Run("replica source asks for a replica", func(t *testing.T) {
 		t.Parallel()
 		snap := &kividbv1alpha1.KividbSnapshotConfig{
 			ObjectMeta: metav1.ObjectMeta{Name: "hourly"},
@@ -62,9 +68,8 @@ func TestDesiredBackupCronJob(t *testing.T) {
 		}
 		cj := desiredBackupCronJob(cluster, snap)
 		args := cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Args
-		wantURL := fmt.Sprintf("http://demo-replicas.prod.svc:%d/backup", AgentPort)
-		if !containsArgPair(args, "--url", wantURL) {
-			t.Fatalf("expected --url %s in args %v", wantURL, args)
+		if !containsArgPair(args, "--role", "replica") {
+			t.Fatalf("expected --role replica in args %v", args)
 		}
 	})
 
@@ -117,8 +122,8 @@ func TestDesiredBackupCronJob(t *testing.T) {
 		cj := desiredBackupCronJob(cluster, snap)
 		args := cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Args
 		joined := strings.Join(args, " ")
-		if !strings.Contains(joined, "demo-master.prod.svc") {
-			t.Fatalf("expected master service in args: %v", args)
+		if !strings.Contains(joined, "--role master") || strings.Contains(joined, "demo-master") {
+			t.Fatalf("expected --role master, and no master Service, in args: %v", args)
 		}
 	})
 }

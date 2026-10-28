@@ -16,6 +16,10 @@ const (
 	// AgentPortName is the container port name for AgentPort.
 	AgentPortName = "agent"
 
+	// ServiceKindLabel tells the operator's Services apart; the chart's
+	// ServiceMonitor selects ServiceKindLabel=headless.
+	ServiceKindLabel = "kividb.io/service"
+
 	// KividbPortName is the container port name for the RESP port.
 	KividbPortName = "kividb"
 
@@ -25,7 +29,7 @@ const (
 	// workingDir is set to DataDir and the PVC is mounted here.
 	DataDir = "/data"
 
-	// ConfigDir is where the rendered kividb.conf ConfigMap is mounted.
+	// ConfigDir is where the rendered kividb.conf Secret is mounted.
 	ConfigDir = "/etc/kividb"
 
 	// ConfigFileName is the rendered config file's name within ConfigDir.
@@ -119,7 +123,7 @@ func statefulSetName(c *kividbv1alpha1.KividbCluster) string     { return c.Name
 func headlessServiceName(c *kividbv1alpha1.KividbCluster) string { return c.Name + "-headless" }
 func masterServiceName(c *kividbv1alpha1.KividbCluster) string   { return c.Name + "-master" }
 func replicaServiceName(c *kividbv1alpha1.KividbCluster) string  { return c.Name + "-replicas" }
-func configMapName(c *kividbv1alpha1.KividbCluster) string       { return c.Name + "-config" }
+func configSecretName(c *kividbv1alpha1.KividbCluster) string    { return c.Name + "-config" }
 func secretName(c *kividbv1alpha1.KividbCluster) string          { return c.Name + "-auth" }
 func backupCronJobName(c *kividbv1alpha1.KividbCluster) string   { return c.Name + "-backup" }
 

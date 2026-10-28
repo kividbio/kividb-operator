@@ -12,6 +12,7 @@ import (
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -169,10 +170,12 @@ func (s *server) handleAPILiveStatus(w http.ResponseWriter, r *http.Request) {
 		IP                string `json:"ip"`
 		ReplicationOffset int64  `json:"replicationOffset"`
 		MasterHost        string `json:"masterHost,omitempty"`
-		Keys              *int64 `json:"keys,omitempty"`
-		AofEnabled        bool   `json:"aofEnabled"`
-		UsedMemory        string `json:"usedMemory,omitempty"`
-		Error             string `json:"error,omitempty"`
+		// MasterLinkUp: a replica's link to its master is up.
+		MasterLinkUp *bool  `json:"masterLinkUp,omitempty"`
+		Keys         *int64 `json:"keys,omitempty"`
+		AofEnabled   bool   `json:"aofEnabled"`
+		UsedMemory   string `json:"usedMemory,omitempty"`
+		Error        string `json:"error,omitempty"`
 	}
 	out := make([]row, 0, len(pods.Items))
 	for i := range pods.Items {
@@ -195,6 +198,7 @@ func (s *server) handleAPILiveStatus(w http.ResponseWriter, r *http.Request) {
 				rr.Role = string(st.Role)
 				rr.ReplicationOffset = st.ReplicationOffset
 				rr.MasterHost = st.MasterHost
+				rr.MasterLinkUp = st.MasterLinkUp
 				rr.AofEnabled = st.AofEnabled
 				if st.KeyCountKnown {
 					keys := st.KeyCount
@@ -220,6 +224,7 @@ func postAgentJSON(ctx context.Context, podIP, path string, payload any) ([]byte
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	agentapi.SetToken(req, agentToken())
 	client := &http.Client{Timeout: agentHTTPTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -238,6 +243,7 @@ func getAgentStatus(ctx context.Context, podIP string) (*agentapi.StatusResponse
 	if err != nil {
 		return nil, err
 	}
+	agentapi.SetToken(req, agentToken())
 	client := &http.Client{Timeout: agentHTTPTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -294,12 +300,17 @@ func (s *server) handleAPIScale(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Replicas *int32 `json:"replicas"`
+		Shards   *int32 `json:"shards"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err)
 		return
 	}
-	if body.Replicas == nil || *body.Replicas < 0 {
+	if (body.Replicas == nil) == (body.Shards == nil) {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("set one of replicas or shards"))
+		return
+	}
+	if body.Replicas != nil && *body.Replicas < 0 {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("replicas must be >= 0 (count of replica pods, not including master)"))
 		return
 	}
@@ -309,12 +320,29 @@ func (s *server) handleAPIScale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	patch := client.MergeFrom(c.DeepCopy())
-	c.Spec.Replicas = *body.Replicas
+	if body.Replicas != nil {
+		c.Spec.Replicas = *body.Replicas
+	}
+	if body.Shards != nil {
+		if c.Spec.Shards == nil {
+			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("%s is not sharded; a cluster is sharded or not from its creation", name))
+			return
+		}
+		if *body.Shards < 1 {
+			writeJSONError(w, http.StatusBadRequest, fmt.Errorf("a sharded cluster needs at least 1 shard"))
+			return
+		}
+		c.Spec.Shards = body.Shards
+	}
+	if c.Spec.Shards != nil && *c.Spec.Shards*(c.Spec.Replicas+1) > maxShardedNodes {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("%d shards × %d pods each is more than the %d nodes supported", *c.Spec.Shards, c.Spec.Replicas+1, maxShardedNodes))
+		return
+	}
 	if err := s.ctrlClient.Patch(r.Context(), c, patch); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"replicas": c.Spec.Replicas, "desiredPods": c.Spec.Replicas + 1})
+	writeJSON(w, http.StatusOK, map[string]any{"replicas": c.Spec.Replicas, "shards": specShards(c), "desiredPods": desiredPods(c)})
 }
 
 func (s *server) handleAPIDeleteCluster(w http.ResponseWriter, r *http.Request) {
@@ -408,6 +436,16 @@ func (s *server) handleAPIPromote(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("%s is already master", body.Pod))
 		return
 	}
+	if c.Spec.Shards != nil {
+		// The engine fails over within the shard: CLUSTER FAILOVER on the
+		// replica, which its master hands over to without losing a write.
+		if _, err := postAgentJSON(r.Context(), target.Status.PodIP, "/cluster/failover", nil); err != nil {
+			writeJSONError(w, http.StatusBadGateway, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"promoted": body.Pod})
+		return
+	}
 	// A switchover is two steps here and the operator does the rest: make
 	// the target a master, then turn the current master into its replica.
 	// The operator sees its labeled master replicating from another healthy
@@ -456,6 +494,10 @@ func (s *server) handleAPISnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("cluster has no snapshotConfigRef — configure backups first"))
 		return
 	}
+	if c.Spec.Shards != nil {
+		s.snapshotFromCronJob(w, r, c)
+		return
+	}
 	pods, err := s.clientset.CoreV1().Pods(namespace).List(r.Context(), metav1.ListOptions{
 		LabelSelector: clusterLabelSelector(name) + ",kividb.io/role=master",
 	})
@@ -491,6 +533,7 @@ func postAgentJSONTimeout(ctx context.Context, podIP, path string, payload any, 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	agentapi.SetToken(req, agentToken())
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -503,3 +546,35 @@ func postAgentJSONTimeout(ctx context.Context, podIP, path string, payload any, 
 	}
 	return respBody, nil
 }
+
+// snapshotFromCronJob starts a sharded cluster's backup run now: a Job
+// from the backup CronJob's template, as `kubectl create job --from`
+// does. The operator records it as a KividbSnapshot like a scheduled one.
+func (s *server) snapshotFromCronJob(w http.ResponseWriter, r *http.Request, c *kividbv1alpha1.KividbCluster) {
+	cj, err := s.clientset.BatchV1().CronJobs(c.Namespace).Get(r.Context(), backupCronJobName(c.Name), metav1.GetOptions{})
+	if err != nil {
+		writeJSONError(w, http.StatusConflict, fmt.Errorf("the backup CronJob is not there yet: %w", err))
+		return
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        cj.Name + "-m" + strconv.FormatInt(time.Now().Unix(), 36),
+			Namespace:   c.Namespace,
+			Labels:      cj.Spec.JobTemplate.Labels,
+			Annotations: map[string]string{"cronjob.kubernetes.io/instantiate": "manual"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "batch/v1", Kind: "CronJob", Name: cj.Name, UID: cj.UID,
+				Controller: ptrTo(true), BlockOwnerDeletion: ptrTo(true),
+			}},
+		},
+		Spec: cj.Spec.JobTemplate.Spec,
+	}
+	created, err := s.clientset.BatchV1().Jobs(c.Namespace).Create(r.Context(), job, metav1.CreateOptions{})
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"job": created.Name})
+}
+
+func ptrTo[T any](v T) *T { return &v }

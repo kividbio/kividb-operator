@@ -93,3 +93,19 @@ spec:
                   format: int64
                 error:
                   type: string
+                shards:
+                  type: array
+                  items:
+                    type: object
+                    required: [index]
+                    properties:
+                      index:
+                        type: integer
+                        format: int32
+                      sourcePod:
+                        type: string
+                      sizeBytes:
+                        type: integer
+                        format: int64
+                      error:
+                        type: string

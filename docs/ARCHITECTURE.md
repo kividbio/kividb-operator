@@ -130,7 +130,7 @@ does, in order:
    (`renderACLFile`), hashing passwords with SHA-256 exactly like kividb's
    own `ACL SETUSER ... >password` would.
 3. Create/update the `<cluster>-auth` Secret (ACL file) and
-   `<cluster>-config` ConfigMap (kividb.conf, rendered from the
+   `<cluster>-config` Secret (kividb.conf, rendered from the
    `KividbConfig`'s `spec.directives` plus the operator-owned
    `port`/`aclfile`/TLS directives — `replicaof` is deliberately never
    written here; topology is runtime-managed, not config-file-managed).
@@ -214,10 +214,22 @@ decision-maker at a time.
 Scheduling itself is delegated entirely to a native Kubernetes `CronJob`
 (`<cluster>-backup`) — the operator does not implement its own cron
 scheduler. The CronJob's pod runs the **same agent binary** in a different
-mode: `agent backup-trigger --url http://<source-service>.<ns>.svc:8081/backup`,
-where `<source-service>` is the master Service or the replica Service,
-depending on the owning `KividbSnapshotConfig`'s `spec.source` (see
-[CONFIGURATION.md](CONFIGURATION.md#source-master-or-replica)).
+mode: `agent backup-trigger --targets <every pod's agent> --role master|replica`.
+It asks each pod's agent, by its stable name under the headless Service
+(`<pod>.<cluster>-headless.<ns>.svc:8081`), for its role, and sends
+`/backup` to the first that holds the role the owning
+`KividbSnapshotConfig`'s `spec.source` asks for (see
+[CONFIGURATION.md](CONFIGURATION.md#source-master-or-replica)). It sends the
+agent token, which every agent endpoint but the probes and `/metrics`
+requires.
+
+**The agent token.** The operator keeps one token in a Secret in its own
+namespace (`<release>-agent-token` with the chart; it creates it with a
+random value at its first start), and copies it into each cluster's auth
+Secret (`<cluster>-auth`, key `agent-token`). The agents read it from
+there, the operator and the backup Jobs send it, and the GUI reads it from
+the same Secret mounted as a file. The agent port is on the headless
+Service only.
 
 That single HTTP call is all the CronJob pod ever does. It never mounts
 the data PVC and never sees S3 credentials — those stay inside whichever

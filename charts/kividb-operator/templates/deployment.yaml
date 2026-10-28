@@ -43,14 +43,21 @@ spec:
             - --metrics-bind-address={{ .Values.manager.metricsBindAddress }}
             - --agent-timeout={{ .Values.manager.agentTimeout }}
             - --default-agent-image={{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag }}
+            - --agent-token-secret={{ include "kividb-operator.fullname" . }}-agent-token
             {{- if .Values.leaderElection.enabled }}
             - --leader-elect
             {{- end }}
-          {{- if .Values.watchNamespace }}
           env:
+            # The agent token Secret lives here; the operator creates it at
+            # its first start.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- if .Values.watchNamespace }}
             - name: WATCH_NAMESPACE
               value: {{ .Values.watchNamespace | quote }}
-          {{- end }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: 8080

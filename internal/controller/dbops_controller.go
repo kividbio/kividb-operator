@@ -56,7 +56,6 @@ func (r *KividbDbOpsReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{}, err
 	}
-
 	var podList corev1.PodList
 	if err := r.List(ctx, &podList, client.InNamespace(op.Namespace), client.MatchingLabels(selectorLabels(&cluster))); err != nil {
 		return ctrl.Result{}, err
@@ -134,9 +133,10 @@ func (r *KividbDbOpsReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// The master hands its role to an in-sync replica before it is
 	// restarted (see switchover in rollout.go for why it must not simply
-	// be restarted in place). The cluster controller does the handover;
-	// this only asks for it and waits.
-	if next == cluster.Status.MasterPod && hasSyncedReplica(&cluster, next) {
+	// be restarted in place). The cluster controller does the handover --
+	// in a sharded cluster, a CLUSTER FAILOVER within the shard; this only
+	// asks for it and waits.
+	if isMasterPod(&cluster, next) && hasSyncedReplica(&cluster, next) {
 		if p.Annotations[StepDownAnnotation] != "true" {
 			patch := client.MergeFrom(p.DeepCopy())
 			if p.Annotations == nil {
@@ -199,6 +199,8 @@ func restartPending(p *corev1.Pod, deletedUID string, cluster *kividbv1alpha1.Ki
 		return "to terminate"
 	case !isPodReady(p):
 		return "to become Ready"
+	case isSharded(cluster) && (cluster.Status.Cluster == nil || cluster.Status.Cluster.State != "ok"):
+		return "for the cluster to serve every slot"
 	}
 	for _, ps := range cluster.Status.Pods {
 		if ps.Name == p.Name && ps.Ready && ps.Role != kividbv1alpha1.RoleUnknown && ps.Role != "" {
@@ -211,10 +213,34 @@ func restartPending(p *corev1.Pod, deletedUID string, cluster *kividbv1alpha1.Ki
 	return "to rejoin the cluster"
 }
 
+// isMasterPod reports whether pod is the master, or in a sharded cluster
+// a shard's master.
+func isMasterPod(cluster *kividbv1alpha1.KividbCluster, pod string) bool {
+	if !isSharded(cluster) {
+		return pod == cluster.Status.MasterPod
+	}
+	for _, sh := range cluster.Status.Shards {
+		if sh.MasterPod == pod {
+			return true
+		}
+	}
+	return false
+}
+
 // hasSyncedReplica reports whether some pod other than master is a Ready,
-// in-sync replica, i.e. whether the master has anyone to hand over to.
+// in-sync replica (of the same shard, in a sharded cluster), i.e. whether
+// the master has anyone to hand over to.
 func hasSyncedReplica(cluster *kividbv1alpha1.KividbCluster, master string) bool {
+	var shard *int32
 	for _, ps := range cluster.Status.Pods {
+		if ps.Name == master {
+			shard = ps.Shard
+		}
+	}
+	for _, ps := range cluster.Status.Pods {
+		if isSharded(cluster) && (shard == nil || ps.Shard == nil || *ps.Shard != *shard) {
+			continue
+		}
 		if ps.Name != master && ps.Ready && ps.Synced && ps.Role == kividbv1alpha1.RoleReplica {
 			return true
 		}

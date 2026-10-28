@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
@@ -17,24 +18,62 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// snapshotSourceServiceName picks which Service (master or replica) a
-// backup CronJob's backup-trigger client targets, per the owning
-// KividbSnapshotConfig's spec.source. Defaults to master (also the
-// recommended, and CRD-defaulted, value) for any unrecognized value.
-func snapshotSourceServiceName(c *kividbv1alpha1.KividbCluster, source kividbv1alpha1.SnapshotSource) string {
+// snapshotSourceRole is the role of the pod a backup is taken from, per the
+// KividbSnapshotConfig's spec.source. Master (also the recommended, and
+// CRD-defaulted, value) for any unrecognized value.
+func snapshotSourceRole(source kividbv1alpha1.SnapshotSource) agentapi.Role {
 	if source == kividbv1alpha1.SnapshotSourceReplica {
-		return replicaServiceName(c)
+		return agentapi.RoleReplica
 	}
-	return masterServiceName(c)
+	return agentapi.RoleMaster
+}
+
+// agentTargets is every pod's agent by its stable name under the headless
+// Service: <pod>.<cluster>-headless.<ns>.svc:<agent port>. The backup Job
+// asks each for its role, so it finds the current master (or a replica)
+// wherever a failover has put it, without the agent port on any
+// load-balanced Service.
+func agentTargets(c *kividbv1alpha1.KividbCluster) string {
+	n := int(c.Spec.Replicas) + 1
+	targets := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		targets = append(targets, fmt.Sprintf("%s-%d.%s.%s.svc:%d", statefulSetName(c), i, headlessServiceName(c), c.Namespace, AgentPort))
+	}
+	return strings.Join(targets, ",")
+}
+
+// shardAgentTargets is agentTargets for a sharded cluster: each shard's
+// pods under its headless Service, shards separated by ';'.
+func shardAgentTargets(c *kividbv1alpha1.KividbCluster) string {
+	groups := make([]string, 0, shardCount(c))
+	for s := int32(0); s < shardCount(c); s++ {
+		var targets []string
+		for n := int32(0); n <= c.Spec.Replicas; n++ {
+			targets = append(targets, fmt.Sprintf("%s.%s.%s.svc:%d", shardPodName(c, s, n), shardHeadlessServiceName(c, s), c.Namespace, AgentPort))
+		}
+		groups = append(groups, strings.Join(targets, ","))
+	}
+	return strings.Join(groups, ";")
+}
+
+// backupTriggerArgs is what the backup Job runs: one pod's backup, or in
+// a sharded cluster one run across every shard.
+func backupTriggerArgs(c *kividbv1alpha1.KividbCluster, role agentapi.Role, timeout int32) []string {
+	args := []string{"backup-trigger"}
+	if isSharded(c) {
+		args = append(args, "--shards", shardAgentTargets(c), "--cluster", c.Name)
+	} else {
+		args = append(args, "--targets", agentTargets(c))
+	}
+	return append(args, "--role", string(role), "--timeout", fmt.Sprintf("%ds", timeout))
 }
 
 // desiredBackupCronJob builds the CronJob that triggers scheduled backups,
 // from the KividbCluster's referenced KividbSnapshotConfig. The Job's
 // single container is the *same agent image* running in "backup-trigger"
-// client mode: it makes one HTTP POST to the target Service (which always
-// resolves to whichever pod currently holds the configured role,
-// failover-safe by construction) at /backup, waits for the response, and
-// exits 0/non-zero accordingly. All S3 upload logic and credentials stay
+// client mode: it asks every pod's agent for its role, POSTs /backup to the
+// one holding the configured role (failover-safe: roles are read when the
+// Job runs), waits for the response, and exits 0/non-zero accordingly. All S3 upload logic and credentials stay
 // inside the target pod's own agent sidecar -- the CronJob pod never
 // mounts the data PVC and never sees S3 credentials.
 func desiredBackupCronJob(c *kividbv1alpha1.KividbCluster, snapCfg *kividbv1alpha1.KividbSnapshotConfig) *batchv1.CronJob {
@@ -47,7 +86,6 @@ func desiredBackupCronJob(c *kividbv1alpha1.KividbCluster, snapCfg *kividbv1alph
 	if source == "" {
 		source = kividbv1alpha1.SnapshotSourceMaster
 	}
-	backupURL := fmt.Sprintf("http://%s.%s.svc:%d/backup", snapshotSourceServiceName(c, source), c.Namespace, AgentPort)
 
 	resources := snapCfg.Spec.JobResources
 	if resources.Requests == nil && resources.Limits == nil {
@@ -98,12 +136,9 @@ func desiredBackupCronJob(c *kividbv1alpha1.KividbCluster, snapCfg *kividbv1alph
 									Name:            "backup-trigger",
 									Image:           agentImage(c),
 									ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
-									Args: []string{
-										"backup-trigger",
-										"--url", backupURL,
-										"--timeout", fmt.Sprintf("%ds", timeout),
-									},
-									Resources: resources,
+									Args:            backupTriggerArgs(c, snapshotSourceRole(source), timeout),
+									Env:             []corev1.EnvVar{agentTokenEnv(c)},
+									Resources:       resources,
 								},
 							},
 						},
@@ -218,6 +253,12 @@ func populateSnapshotStatus(ctx context.Context, c client.Client, job *batchv1.J
 	snap.Status.DurationMs = result.DurationMs
 	snap.Status.SourcePod = result.SourcePod
 	snap.Status.SourceRole = kividbv1alpha1.NodeRole(result.SourceRole)
+	snap.Status.Shards = nil
+	for _, s := range result.Shards {
+		snap.Status.Shards = append(snap.Status.Shards, kividbv1alpha1.SnapshotShardStatus{
+			Index: s.Index, SourcePod: s.SourcePod, SizeBytes: s.SizeBytes, Error: s.Error,
+		})
+	}
 }
 
 // latestBackupResult finds the most recent pod belonging to job and reads

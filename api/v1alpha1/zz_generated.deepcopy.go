@@ -153,8 +153,137 @@ func (in *FailoverSpec) DeepCopy() *FailoverSpec {
 	return out
 }
 
+func (in *ClusterModeSpec) DeepCopyInto(out *ClusterModeSpec) {
+	*out = *in
+	if in.NodeTimeoutMs != nil {
+		out.NodeTimeoutMs = new(int32)
+		*out.NodeTimeoutMs = *in.NodeTimeoutMs
+	}
+	if in.RequireFullCoverage != nil {
+		out.RequireFullCoverage = new(bool)
+		*out.RequireFullCoverage = *in.RequireFullCoverage
+	}
+	if in.MinReplicasToWrite != nil {
+		out.MinReplicasToWrite = new(int32)
+		*out.MinReplicasToWrite = *in.MinReplicasToWrite
+	}
+	if in.MinReplicasMaxLagSeconds != nil {
+		out.MinReplicasMaxLagSeconds = new(int32)
+		*out.MinReplicasMaxLagSeconds = *in.MinReplicasMaxLagSeconds
+	}
+	if in.BusSecretRef != nil {
+		out.BusSecretRef = new(SecretKeyRef)
+		*out.BusSecretRef = *in.BusSecretRef
+	}
+}
+
+func (in *ClusterModeSpec) DeepCopy() *ClusterModeSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(ClusterModeSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *ShardStatus) DeepCopyInto(out *ShardStatus) {
+	*out = *in
+	if in.Slots != nil {
+		out.Slots = make([]string, len(in.Slots))
+		copy(out.Slots, in.Slots)
+	}
+	if in.Pods != nil {
+		out.Pods = make([]string, len(in.Pods))
+		copy(out.Pods, in.Pods)
+	}
+}
+
+func (in *ShardStatus) DeepCopy() *ShardStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(ShardStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *ClusterModeStatus) DeepCopyInto(out *ClusterModeStatus) {
+	*out = *in
+	if in.StaleNodeIDs != nil {
+		out.StaleNodeIDs = make([]string, len(in.StaleNodeIDs))
+		copy(out.StaleNodeIDs, in.StaleNodeIDs)
+	}
+	if in.Rebalance != nil {
+		out.Rebalance = in.Rebalance.DeepCopy()
+	}
+}
+
+func (in *RebalanceStatus) DeepCopyInto(out *RebalanceStatus) {
+	*out = *in
+	if in.StartTime != nil {
+		out.StartTime = in.StartTime.DeepCopy()
+	}
+	if in.Current != nil {
+		out.Current = in.Current.DeepCopy()
+	}
+	if in.Pending != nil {
+		out.Pending = make([]SlotMove, len(in.Pending))
+		for i := range in.Pending {
+			in.Pending[i].DeepCopyInto(&out.Pending[i])
+		}
+	}
+	if in.LastErrorTime != nil {
+		out.LastErrorTime = in.LastErrorTime.DeepCopy()
+	}
+}
+
+func (in *RebalanceStatus) DeepCopy() *RebalanceStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(RebalanceStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *SlotMove) DeepCopyInto(out *SlotMove) {
+	*out = *in
+	if in.Slots != nil {
+		out.Slots = make([]string, len(in.Slots))
+		copy(out.Slots, in.Slots)
+	}
+	if in.StartTime != nil {
+		out.StartTime = in.StartTime.DeepCopy()
+	}
+}
+
+func (in *SlotMove) DeepCopy() *SlotMove {
+	if in == nil {
+		return nil
+	}
+	out := new(SlotMove)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *ClusterModeStatus) DeepCopy() *ClusterModeStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(ClusterModeStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
 func (in *KividbClusterSpec) DeepCopyInto(out *KividbClusterSpec) {
 	*out = *in
+	if in.Shards != nil {
+		out.Shards = new(int32)
+		*out.Shards = *in.Shards
+	}
+	if in.Cluster != nil {
+		out.Cluster = in.Cluster.DeepCopy()
+	}
 	if in.ImagePullSecrets != nil {
 		out.ImagePullSecrets = make([]corev1.LocalObjectReference, len(in.ImagePullSecrets))
 		copy(out.ImagePullSecrets, in.ImagePullSecrets)
@@ -226,6 +355,10 @@ func (in *KividbClusterSpec) DeepCopy() *KividbClusterSpec {
 
 func (in *KividbPodStatus) DeepCopyInto(out *KividbPodStatus) {
 	*out = *in
+	if in.Shard != nil {
+		out.Shard = new(int32)
+		*out.Shard = *in.Shard
+	}
 }
 
 func (in *KividbPodStatus) DeepCopy() *KividbPodStatus {
@@ -241,7 +374,18 @@ func (in *KividbClusterStatus) DeepCopyInto(out *KividbClusterStatus) {
 	*out = *in
 	if in.Pods != nil {
 		out.Pods = make([]KividbPodStatus, len(in.Pods))
-		copy(out.Pods, in.Pods)
+		for i := range in.Pods {
+			in.Pods[i].DeepCopyInto(&out.Pods[i])
+		}
+	}
+	if in.Shards != nil {
+		out.Shards = make([]ShardStatus, len(in.Shards))
+		for i := range in.Shards {
+			in.Shards[i].DeepCopyInto(&out.Shards[i])
+		}
+	}
+	if in.Cluster != nil {
+		out.Cluster = in.Cluster.DeepCopy()
 	}
 	if in.LastFailoverTime != nil {
 		out.LastFailoverTime = in.LastFailoverTime.DeepCopy()
@@ -620,6 +764,10 @@ func (in *KividbSnapshotStatus) DeepCopyInto(out *KividbSnapshotStatus) {
 	}
 	if in.CompletionTime != nil {
 		out.CompletionTime = in.CompletionTime.DeepCopy()
+	}
+	if in.Shards != nil {
+		out.Shards = make([]SnapshotShardStatus, len(in.Shards))
+		copy(out.Shards, in.Shards)
 	}
 }
 

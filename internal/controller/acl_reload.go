@@ -2,9 +2,8 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"strconv"
+	"strings"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
@@ -13,12 +12,18 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// configHash fingerprints the rendered kividb.conf, which holds no
-// credentials (the ACL file and passwords live elsewhere).
+// configHash fingerprints the rendered kividb.conf for the pod template,
+// so that a change rolls the pods. A sharded cluster's file holds secrets
+// (masterauth, the cluster bus secret), and the pod template is readable
+// by anyone who can read the pod: salted and slow, as the ACL file is
+// fingerprinted, never a plain hash of it.
 func configHash(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
+	return agentapi.Fingerprint(s, configFingerprintSalt)
 }
+
+// configFingerprintSalt separates the config's fingerprints from the other
+// uses of agentapi.Fingerprint.
+const configFingerprintSalt = "kividb-operator/kividb-conf"
 
 // aclFileFingerprint fingerprints the rendered ACL file the same way the
 // agent fingerprints the file mounted in its pod.
@@ -44,7 +49,11 @@ type authGenerations struct {
 // bumpAuthGenerations records the hashes of the ACL file and the default
 // user's password on secret, advancing the matching counter whenever one
 // differs from what was recorded last time, and returns the counters.
-func bumpAuthGenerations(c *kividbv1alpha1.KividbCluster, secret *corev1.Secret, aclContent, defaultPassword string) authGenerations {
+//
+// The agent token counts as part of the auth: the agents read it from their
+// environment at startup, so a new token needs the pods restarted, as a new
+// password does.
+func bumpAuthGenerations(c *kividbv1alpha1.KividbCluster, secret *corev1.Secret, aclContent, defaultPassword, agentToken string) authGenerations {
 	if secret.Annotations == nil {
 		secret.Annotations = map[string]string{}
 	}
@@ -59,7 +68,7 @@ func bumpAuthGenerations(c *kividbv1alpha1.KividbCluster, secret *corev1.Secret,
 		return generation
 	}
 	return authGenerations{
-		auth: bump(AuthHashAnnotation, AuthGenerationAnnotation, passwordFingerprint(c, defaultPassword)),
+		auth: bump(AuthHashAnnotation, AuthGenerationAnnotation, passwordFingerprint(c, defaultPassword+"\x00agent-token\x00"+agentToken)),
 		acl:  bump(AclHashAnnotation, AclGenerationAnnotation, aclFileFingerprint(aclContent)),
 	}
 }
@@ -100,6 +109,14 @@ func (r *KividbClusterReconciler) reconcileAclReload(ctx context.Context, c *kiv
 		}
 
 		reloaded, err := r.Agent.AclReload(ctx, p.Status.PodIP, fileHash)
+		if err != nil && strings.Contains(err.Error(), "LOADING") {
+			// A replica loading the dataset from its master answers
+			// LOADING to everything; it reads the file anyway, and is
+			// stamped on a later pass. Not worth a warning: a burst of
+			// them uses up the Events the cluster may record.
+			log.V(1).Info("pod is still loading its dataset; ACL reload later", "pod", p.Name)
+			continue
+		}
 		if err != nil {
 			log.Error(err, "ACL reload failed", "pod", p.Name)
 			r.event(c, corev1.EventTypeWarning, "AclReloadFailed", "reloading the ACL file on %s: %v", p.Name, err)

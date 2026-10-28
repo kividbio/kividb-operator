@@ -14,7 +14,10 @@ const (
 	PhaseRunning      ClusterPhase = "Running"
 	PhaseDegraded     ClusterPhase = "Degraded"
 	PhaseFailingOver  ClusterPhase = "FailingOver"
-	PhaseError        ClusterPhase = "Error"
+	// PhaseRebalancing: a sharded cluster is moving hash slots between
+	// shards, after spec.shards changed.
+	PhaseRebalancing ClusterPhase = "Rebalancing"
+	PhaseError       ClusterPhase = "Error"
 )
 
 // NodeRole is the runtime replication role of a single kividb pod, as tracked
@@ -187,10 +190,60 @@ type FailoverSpec struct {
 	UnhealthyThresholdSeconds *int32 `json:"unhealthyThresholdSeconds,omitempty"`
 }
 
+// ClusterModeSpec tunes kividb's cluster mode, for a KividbCluster with
+// spec.shards. The operator owns every cluster-* directive: these are the
+// ones a user may choose.
+type ClusterModeSpec struct {
+	// NodeTimeoutMs is cluster-node-timeout: how long a node may go
+	// unanswered before the others suspect it, and so roughly how long a
+	// failover takes. Defaults to 5000.
+	// +optional
+	// +kubebuilder:validation:Minimum=1000
+	NodeTimeoutMs *int32 `json:"nodeTimeoutMs,omitempty"`
+
+	// RequireFullCoverage is cluster-require-full-coverage: when true (the
+	// default), every node refuses commands while any slot has no working
+	// master.
+	// +optional
+	RequireFullCoverage *bool `json:"requireFullCoverage,omitempty"`
+
+	// MinReplicasToWrite is min-replicas-to-write: a master refuses writes
+	// unless at least this many replicas are connected and no more than
+	// MinReplicasMaxLagSeconds behind. 0 (the default) turns it off.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MinReplicasToWrite *int32 `json:"minReplicasToWrite,omitempty"`
+
+	// MinReplicasMaxLagSeconds is min-replicas-max-lag. Defaults to 10.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MinReplicasMaxLagSeconds *int32 `json:"minReplicasMaxLagSeconds,omitempty"`
+
+	// BusSecretRef names the cluster-bus-secret: the nodes prove they know
+	// it before the cluster bus accepts them. When unset the operator
+	// generates one into the Secret <cluster>-bus.
+	// +optional
+	BusSecretRef *SecretKeyRef `json:"busSecretRef,omitempty"`
+}
+
 // KividbClusterSpec defines the desired state of a KividbCluster.
+// +kubebuilder:validation:XValidation:rule="has(self.shards) == has(oldSelf.shards)",message="spec.shards cannot be added or removed after creation: a cluster is sharded, or not, for good"
 type KividbClusterSpec struct {
-	// Replicas is the number of replica pods in addition to the single
-	// master. Total pods managed by the StatefulSet is Replicas+1.
+	// Shards turns the cluster into a sharded one: that many shards, each
+	// a master and Replicas replicas, in kividb's cluster mode, with the
+	// 16384 hash slots spread across the shards. Unset: one master and its
+	// replicas, as before. Set or unset only at creation; the number can
+	// change later.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Shards *int32 `json:"shards,omitempty"`
+
+	// Cluster tunes cluster mode. Only with Shards.
+	// +optional
+	Cluster *ClusterModeSpec `json:"cluster,omitempty"`
+
+	// Replicas is the number of replica pods for each master: beside the
+	// single master, or in each shard when Shards is set.
 	// +optional
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=0
@@ -411,6 +464,139 @@ type KividbPodStatus struct {
 	// dataset.
 	// +optional
 	Keys int64 `json:"keys,omitempty"`
+
+	// Shard is the shard the pod belongs to, in a sharded cluster.
+	// +optional
+	Shard *int32 `json:"shard,omitempty"`
+
+	// NodeID is the pod's cluster node ID, in a sharded cluster. The
+	// operator keeps it to recognise a pod that rejoined with a new ID
+	// (its volume was lost), whose old ID must then be forgotten.
+	// +optional
+	NodeID string `json:"nodeID,omitempty"`
+}
+
+// ShardStatus reports one shard of a sharded cluster.
+type ShardStatus struct {
+	// Index of the shard: its pods are <cluster>-<index>-<n>.
+	Index int32 `json:"index"`
+
+	// MasterPod is the shard's current master: after a failover, not
+	// necessarily <cluster>-<index>-0.
+	// +optional
+	MasterPod string `json:"masterPod,omitempty"`
+
+	// MasterNodeID is the master's cluster node ID.
+	// +optional
+	MasterNodeID string `json:"masterNodeID,omitempty"`
+
+	// Slots are the hash-slot ranges the shard's master owns, e.g. "0-5460".
+	// +optional
+	Slots []string `json:"slots,omitempty"`
+
+	// Pods are the shard's pods.
+	// +optional
+	Pods []string `json:"pods,omitempty"`
+
+	// ReadyPods counts the shard's Ready pods.
+	// +optional
+	ReadyPods int32 `json:"readyPods,omitempty"`
+}
+
+// ClusterModeStatus is CLUSTER INFO as the operator last saw it.
+type ClusterModeStatus struct {
+	// State is cluster_state: ok, or fail.
+	// +optional
+	State string `json:"state,omitempty"`
+
+	// SlotsAssigned counts the slots that have a master.
+	// +optional
+	SlotsAssigned int32 `json:"slotsAssigned,omitempty"`
+
+	// SlotsFail counts the slots whose master is failed.
+	// +optional
+	SlotsFail int32 `json:"slotsFail,omitempty"`
+
+	// KnownNodes counts the nodes in the cluster, this one included.
+	// +optional
+	KnownNodes int32 `json:"knownNodes,omitempty"`
+
+	// CurrentEpoch is the cluster's current configuration epoch.
+	// +optional
+	CurrentEpoch int64 `json:"currentEpoch,omitempty"`
+
+	// StaleNodeIDs are the old node IDs of pods that rejoined with a new
+	// one (their volume was lost). The operator forgets them on every node
+	// that still knows them, until none does: gossip would otherwise bring
+	// them back.
+	// +optional
+	StaleNodeIDs []string `json:"staleNodeIDs,omitempty"`
+
+	// Shards is how many shards the slots are spread over. When
+	// spec.shards differs, the operator moves slots until it does not.
+	// +optional
+	Shards int32 `json:"shards,omitempty"`
+
+	// Rebalance is a change of the shard count under way.
+	// +optional
+	Rebalance *RebalanceStatus `json:"rebalance,omitempty"`
+}
+
+// RebalancePhase is where a change of the shard count is.
+type RebalancePhase string
+
+const (
+	// RebalanceAddingShards: waiting for every pod, new shards' too, to be
+	// up and in the cluster.
+	RebalanceAddingShards RebalancePhase = "AddingShards"
+	// RebalanceMovingSlots: moving slots, one move at a time.
+	RebalanceMovingSlots RebalancePhase = "MovingSlots"
+)
+
+// RebalanceStatus is a change of the shard count under way: from From
+// shards to To, moving slots with CLUSTER MIGRATION IMPORT.
+type RebalanceStatus struct {
+	// From is the number of shards that may hold slots: the shard count
+	// before, or more if the change was itself changed half way.
+	From int32 `json:"from"`
+	// To is spec.shards.
+	To int32 `json:"to"`
+	// +optional
+	Phase RebalancePhase `json:"phase,omitempty"`
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+	// Current is the move under way.
+	// +optional
+	Current *SlotMove `json:"current,omitempty"`
+	// Pending are the moves still to make after Current, as planned now.
+	// +optional
+	Pending []SlotMove `json:"pending,omitempty"`
+	// MovesDone counts the moves completed.
+	// +optional
+	MovesDone int32 `json:"movesDone,omitempty"`
+	// LastError is the last move's failure, retried after a while.
+	// +optional
+	LastError string `json:"lastError,omitempty"`
+	// +optional
+	LastErrorTime *metav1.Time `json:"lastErrorTime,omitempty"`
+}
+
+// SlotMove is slots moving from one shard's master to another's.
+type SlotMove struct {
+	FromShard int32 `json:"fromShard"`
+	ToShard   int32 `json:"toShard"`
+	// Slots are ranges, "0-1364".
+	Slots []string `json:"slots"`
+	// SlotCount is how many slots Slots covers.
+	SlotCount int32 `json:"slotCount"`
+	// DestPod and TaskID: the destination master the import runs on, and
+	// the engine's task ID for it.
+	// +optional
+	DestPod string `json:"destPod,omitempty"`
+	// +optional
+	TaskID string `json:"taskID,omitempty"`
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
 }
 
 // KividbClusterStatus defines the observed state of a KividbCluster.
@@ -426,6 +612,14 @@ type KividbClusterStatus struct {
 	// Pods reports per-pod role/readiness/offset.
 	// +optional
 	Pods []KividbPodStatus `json:"pods,omitempty"`
+
+	// Shards reports each shard, in a sharded cluster.
+	// +optional
+	Shards []ShardStatus `json:"shards,omitempty"`
+
+	// Cluster reports the state of cluster mode, in a sharded cluster.
+	// +optional
+	Cluster *ClusterModeStatus `json:"cluster,omitempty"`
 
 	// LastFailoverTime records when the operator last promoted a replica.
 	// +optional
@@ -454,6 +648,7 @@ type KividbClusterStatus struct {
 // +kubebuilder:resource:shortName=kdb
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Master",type=string,JSONPath=`.status.masterPod`
+// +kubebuilder:printcolumn:name="Shards",type=integer,JSONPath=`.spec.shards`
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.spec.replicas`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

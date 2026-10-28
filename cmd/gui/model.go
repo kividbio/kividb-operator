@@ -1,6 +1,10 @@
 package main
 
-import "time"
+import (
+	"time"
+
+	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
+)
 
 // ClusterSummary is the row shown on the dashboard (GET /api/clusters) for
 // a single KividbCluster. Every field here comes straight off the
@@ -25,8 +29,16 @@ type ClusterSummary struct {
 	ImageDefault bool   `json:"imageDefault,omitempty"`
 	Version      string `json:"version,omitempty"`
 	Variant      string `json:"variant,omitempty"`
-	// Replicas is spec.replicas: the replicas, not counting the master.
+	// Replicas is spec.replicas: the replicas, not counting the master
+	// (per shard, in a sharded cluster).
 	Replicas int32 `json:"replicas"`
+	// Shards is spec.shards; 0 for a cluster that is not sharded.
+	Shards int32 `json:"shards,omitempty"`
+	// SlotsAssigned, ClusterState and Rebalancing summarize a sharded
+	// cluster's status.cluster for the dashboard.
+	SlotsAssigned int32  `json:"slotsAssigned,omitempty"`
+	ClusterState  string `json:"clusterState,omitempty"`
+	Rebalancing   bool   `json:"rebalancing,omitempty"`
 
 	// Stats is what the GUI's own scraper last saw of the cluster's pods,
 	// nil until it has scraped them. It comes from memory, not from the
@@ -63,6 +75,9 @@ type PodView struct {
 	Role              string `json:"role"`
 	Ready             bool   `json:"ready"`
 	ReplicationOffset int64  `json:"replicationOffset"`
+	// Shard and NodeID: a sharded cluster's pod's shard and node ID.
+	Shard  *int32 `json:"shard,omitempty"`
+	NodeID string `json:"nodeID,omitempty"`
 
 	Phase        string `json:"phase,omitempty"`
 	PodIP        string `json:"podIP,omitempty"`
@@ -74,7 +89,10 @@ type PodView struct {
 // (master or replicas). Type mirrors spec, but ClusterIP/ExternalIP/Ports
 // are only known once the Service object actually exists.
 type ServiceView struct {
-	Name       string  `json:"name"`
+	Name string `json:"name"`
+	// Kind is the operator's kividb.io/service label: cluster, shard,
+	// replicas, headless, ...
+	Kind       string  `json:"kind,omitempty"`
 	Type       string  `json:"type"`
 	ClusterIP  string  `json:"clusterIP,omitempty"`
 	ExternalIP string  `json:"externalIP,omitempty"`
@@ -112,6 +130,8 @@ type SnapshotView struct {
 	Error          string     `json:"error,omitempty"`
 	StartTime      *time.Time `json:"startTime,omitempty"`
 	CompletionTime *time.Time `json:"completionTime,omitempty"`
+	// Shards is a sharded cluster's backup run, one entry per shard.
+	Shards []kividbv1alpha1.SnapshotShardStatus `json:"shards,omitempty"`
 }
 
 // ConditionView mirrors metav1.Condition for JSON display.
@@ -154,6 +174,11 @@ type ClusterDetail struct {
 	ConfigRef         string `json:"configRef,omitempty"`
 	AclConfigRef      string `json:"aclConfigRef,omitempty"`
 	SnapshotConfigRef string `json:"snapshotConfigRef,omitempty"`
+
+	// Cluster and ShardStatus are a sharded cluster's status.cluster and
+	// status.shards, as the operator reports them.
+	Cluster     *kividbv1alpha1.ClusterModeStatus `json:"cluster,omitempty"`
+	ShardStatus []kividbv1alpha1.ShardStatus      `json:"shardStatus,omitempty"`
 
 	Pods        []PodView        `json:"pods"`
 	Services    []ServiceView    `json:"services,omitempty"`

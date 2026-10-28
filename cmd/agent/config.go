@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 	"strconv"
+
+	"github.com/kividbio/kividb-operator/internal/agentapi"
 )
 
 // agentConfig is populated entirely from environment variables injected by
@@ -19,6 +21,9 @@ type agentConfig struct {
 	PodName      string // POD_NAME
 	PodIP        string // POD_IP
 	AclFile      string // ACL_FILE
+	// AgentToken (AGENT_TOKEN, from the cluster's auth Secret) is required
+	// as a bearer token on every endpoint but the probes and /metrics.
+	AgentToken string
 
 	S3Endpoint       string
 	S3Bucket         string
@@ -42,6 +47,7 @@ func loadConfig() agentConfig {
 		PodName:      os.Getenv("POD_NAME"),
 		PodIP:        os.Getenv("POD_IP"),
 		AclFile:      os.Getenv("ACL_FILE"),
+		AgentToken:   os.Getenv(agentapi.TokenEnv),
 
 		S3Endpoint:       os.Getenv("S3_ENDPOINT"),
 		S3Bucket:         os.Getenv("S3_BUCKET"),

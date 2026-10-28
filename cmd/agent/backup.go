@@ -31,7 +31,7 @@ const backupSaveTimeout = 5 * time.Minute
 // directory, which the operator pins to DataDir).
 var dataFiles = []string{"dump.kdb", "appendonly.aof"}
 
-func (s *server) runBackup(ctx context.Context) (*agentapi.BackupResponse, error) {
+func (s *server) runBackup(ctx context.Context, req agentapi.BackupRequest) (*agentapi.BackupResponse, error) {
 	start := time.Now()
 
 	if s.cfg.S3Endpoint == "" || s.cfg.S3Bucket == "" {
@@ -48,16 +48,22 @@ func (s *server) runBackup(ctx context.Context) (*agentapi.BackupResponse, error
 	}
 
 	objectKey := s.objectKey()
+	if req.Run != "" {
+		objectKey = s.backupPrefix() + req.Run + "/" + fmt.Sprintf("shard-%d-%s.tar.gz", req.Shard, s.cfg.PodName)
+	}
 	size, err := s.streamUpload(ctx, client, objectKey)
 	if err != nil {
 		return nil, fmt.Errorf("upload: %w", err)
 	}
 
-	pruned, err := s.pruneOldBackups(ctx, client)
-	if err != nil {
-		// Pruning failures should not fail the backup itself -- the new
-		// snapshot is already durably stored.
-		pruned = 0
+	// Part of a sharded backup: the manifest prunes, whole runs.
+	pruned := 0
+	if req.Run == "" {
+		if pruned, err = s.pruneOldBackups(ctx, client); err != nil {
+			// Pruning failures should not fail the backup itself -- the new
+			// snapshot is already durably stored.
+			pruned = 0
+		}
 	}
 
 	role := agentapi.RoleUnknown

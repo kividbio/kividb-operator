@@ -3,17 +3,20 @@
 // (server, cmd/agent). Both sides import this package so the request and
 // response shapes can never drift out of sync with each other.
 //
-// Endpoints:
+// Endpoints. Those marked * need the agent token as a bearer token
+// (Authorization: Bearer <token>, see SetToken); without it they answer
+// 401, and an agent with no token configured answers them 503.
 //
-//	GET  /healthz      -> 200 if the agent process itself is up (liveness).
+//	GET  /healthz       -> 200 if the agent process itself is up (liveness).
 //	GET  /readyz        -> 200 if a RESP PING against local kividb succeeds,
-//	                        503 otherwise (readiness; gates Service membership).
-//	GET  /status        -> 200 StatusResponse
-//	POST /promote        -> 200 OKResponse | 500 ErrorResponse (REPLICAOF NO ONE)
-//	POST /replicaof      -> body ReplicaOfRequest -> 200 OKResponse | 500 ErrorResponse
-//	POST /acl/reload    -> 200 OKResponse | 500 ErrorResponse (ACL LOAD)
-//	POST /backup         -> 200 BackupResponse | 500 ErrorResponse
-//	GET  /metrics        -> Prometheus text exposition format
+//	                       503 otherwise (readiness; gates Service membership).
+//	GET  /metrics       -> Prometheus text exposition format
+//	GET  /status      * -> 200 StatusResponse
+//	POST /promote     * -> 200 OKResponse | 500 ErrorResponse (REPLICAOF NO ONE)
+//	POST /replicaof   * -> body ReplicaOfRequest -> 200 OKResponse | 500 ErrorResponse
+//	POST /acl/reload  * -> 200 OKResponse | 500 ErrorResponse (ACL LOAD)
+//	POST /backup      * -> 200 BackupResponse | 500 ErrorResponse (see backup.go for a sharded cluster's)
+//	POST /exec        * -> body ExecRequest -> 200 ExecResponse (any command)
 package agentapi
 
 // Role mirrors kividbv1alpha1.NodeRole without importing the API package,
@@ -28,8 +31,12 @@ const (
 
 // StatusResponse is returned by GET /status.
 type StatusResponse struct {
-	Role              Role   `json:"role"`
-	Connected         bool   `json:"connected"`
+	Role      Role `json:"role"`
+	Connected bool `json:"connected"`
+	// MasterLinkUp: on a replica, whether its link to the master is up
+	// (ROLE's state is "connected"). Absent on a master, and from agents
+	// before 0.7.0.
+	MasterLinkUp      *bool  `json:"masterLinkUp,omitempty"`
 	MasterHost        string `json:"masterHost,omitempty"`
 	MasterPort        int32  `json:"masterPort,omitempty"`
 	ReplicationOffset int64  `json:"replicationOffset"`
@@ -84,6 +91,9 @@ type BackupResult struct {
 	Success bool `json:"success"`
 	BackupResponse
 	Error string `json:"error,omitempty"`
+	// Shards is a sharded cluster's backup, one entry per shard;
+	// ObjectKey is then the run's manifest.
+	Shards []BackupShardResult `json:"shards,omitempty"`
 }
 
 // ExecRequest is the body of POST /exec: a RESP command as string args.
