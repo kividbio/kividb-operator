@@ -44,6 +44,12 @@ func passwordFingerprint(c *kividbv1alpha1.KividbCluster, password string) strin
 type authGenerations struct {
 	auth string
 	acl  string
+	// overlap: the default user's credentials kept from before a password
+	// change while the pods roll, nil when none is under way; and
+	// defaultCredentials, all the credentials it accepts meanwhile (see
+	// auth_overlap.go).
+	overlap            []string
+	defaultCredentials []string
 }
 
 // bumpAuthGenerations records the hashes of the ACL file and the default

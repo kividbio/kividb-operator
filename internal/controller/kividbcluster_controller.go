@@ -132,7 +132,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if ref := defaultUserPasswordRef(aclConfig); ref != nil {
 		defaultPassword = secretValues[secretValueKey(ref)]
 	}
-	generations, err := r.reconcileSecret(ctx, &c, aclContent, defaultPassword)
+	generations, aclContent, err := r.reconcileSecret(ctx, &c, aclConfig, secretValues, aclContent, defaultPassword)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling secret: %w", err)
 	}
@@ -205,7 +205,8 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	r.reconcileAclReload(ctx, &c, podList.Items, aclContent, generations)
 	// One change of roles per pass: a pod is replaced only on a pass that
 	// did not just move the master role (statuses are from before it).
-	if r.reconcileHandover(ctx, &c, podList.Items, statuses, masterPod) == "" {
+	if r.reconcileHandover(ctx, &c, podList.Items, statuses, masterPod) == "" &&
+		r.reconcileAuthOverlap(ctx, &c, podList.Items, generations) {
 		r.reconcileRollout(ctx, &c, podList.Items, statuses, masterPod)
 	}
 
@@ -307,18 +308,37 @@ func (r *KividbClusterReconciler) resolveSecretValues(ctx context.Context, c *ki
 	return values, nil
 }
 
-func (r *KividbClusterReconciler) reconcileSecret(ctx context.Context, c *kividbv1alpha1.KividbCluster, aclContent, defaultPassword string) (authGenerations, error) {
+// reconcileSecret writes the operator's auth Secret: the ACL file, base
+// rendered with the default user's credentials kept from before a password
+// change (see auth_overlap.go), and the agent token. It returns the change
+// counters and the ACL file as written.
+func (r *KividbClusterReconciler) reconcileSecret(ctx context.Context, c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbAclConfig, secretValues map[string]string, base, defaultPassword string) (authGenerations, string, error) {
 	var generations authGenerations
+	aclContent := base
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName(c), Namespace: c.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		overlap := nextAuthOverlap(secret, base)
+		aclContent = base
+		if len(overlap) > 0 {
+			var err error
+			if aclContent, err = renderACLFileWith(aclConfig, secretValues, overlap); err != nil {
+				return err
+			}
+		}
 		desired := desiredAuthSecret(c, aclContent, r.agentToken())
 		secret.Labels = desired.Labels
 		secret.Type = desired.Type
 		secret.StringData = desired.StringData
+		secret.StringData[defaultCredentialKey] = strings.Join(aclDefaultCredentials(base), " ")
+		secret.StringData[defaultOverlapKey] = strings.Join(overlap, " ")
 		generations = bumpAuthGenerations(c, secret, aclContent, defaultPassword, r.agentToken())
+		if len(overlap) > 0 {
+			generations.overlap = overlap
+			generations.defaultCredentials = aclDefaultCredentials(aclContent)
+		}
 		return controllerutil.SetControllerReference(c, secret, r.scheme())
 	})
-	return generations, err
+	return generations, aclContent, err
 }
 
 // reconcileConfig writes the rendered kividb.conf into its Secret, and
