@@ -230,8 +230,10 @@ func (r *KividbClusterReconciler) reconcileRebalance(ctx context.Context, c *kiv
 			rb.MovesDone++
 			rb.LastError, rb.LastErrorTime = "", nil
 		default:
-			// Failed, canceled, or gone (the destination restarted; see
-			// kividbio/kividb#108): the slots stayed with the source.
+			// Failed, canceled, or gone (the destination restarted): the
+			// slots stayed with the source. The keys the destination had
+			// received are deleted when it starts again on engine 1.2; on
+			// 1.1.x they stay on it, unreachable (kividbio/kividb#108).
 			why := "the task is gone from " + m.DestPod + " (it restarted)"
 			if found {
 				why = task.State + ": " + task.LastError

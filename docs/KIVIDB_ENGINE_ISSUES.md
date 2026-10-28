@@ -1,5 +1,12 @@
 # kividb engine issues found while testing the operator
 
+> **This file is frozen at engine 1.0.5.** Issues 1 to 12 below are the
+> ones found then, with what was seen on 1.0.4 and 1.0.5-rc1. Engine
+> issues found since are filed on GitHub
+> ([kividbio/kividb](https://github.com/kividbio/kividb/issues)); the ones
+> the operator depends on, and where each stands, are in
+> [Status by engine version](#status-by-engine-version) below.
+
 Found while running kividb-operator 0.4.0 against **kividb v1.0.4**
 (`quay.io/kividbio/kividb@sha256:6bab772968654ecd357975a4f36f9e7d262ac7765be386d86170191eef1d8959`)
 on a single-node minikube cluster, in plain Docker containers, and on a
@@ -29,6 +36,26 @@ should be fixed before 1.0.5 is final.
 | [12](#12-new-in-v105-rc1-a-replica-panics-on-full-resync-after-its-cpu-limit-changes) | **New in rc1:** replica panics on full resync after its CPU limit changes | High | **Open, also in v1.0.5 final** |
 
 See also [Changes in v1.0.5-rc1 that clients and operators must handle](#changes-in-v105-rc1-that-clients-and-operators-must-handle).
+
+## Status by engine version
+
+Issues 1 to 11 have been fixed since 1.0.5. Issue 12 has not been
+re-tested since 1.0.5 final.
+
+Engine issues filed on GitHub since, that the operator works around or
+documents (0.7.0 targets engine 1.2.0):
+
+| Issue | What | Fixed in | What the operator does |
+|---|---|---|---|
+| [#107](https://github.com/kividbio/kividb/issues/107) | Automatic failover could elect the replica with the least data | 1.2.0 (election by replication offset; `cluster-replica-validity-factor`, default 10) | `spec.cluster.replicaValidityFactor` sets the factor; unset leaves the engine's default |
+| [#108](https://github.com/kividbio/kividb/issues/108) | An import cut short by a restart of its destination left its keys behind | 1.2.0 (deleted at the next start) | Retries the move; on 1.1.x the keys stay, documented |
+| [#109](https://github.com/kividbio/kividb/issues/109) | After a failover, every other replica of the shard resynced in full | 1.2.0 (`replid2`); a restarted replica resyncs in part since 1.0.5 | Nothing needed |
+| [#110](https://github.com/kividbio/kividb/issues/110) | A node announces one port, to clients and peers alike | 1.2.0 adds `cluster-announce-client-port` | Not used yet: an announced Service must serve the client port |
+| [#111](https://github.com/kividbio/kividb/issues/111) | `CONFIG SET` of a cluster setting said OK and changed nothing | 1.2.0 | `cluster-slot-migration-*` may be set in a `KividbConfig` |
+| [#112](https://github.com/kividbio/kividb/issues/112) | A new bus connection for every heartbeat | Partly, 1.2.0 (one connection per peer) | Keeps the 24-node cap until larger clusters are tested |
+| [#135](https://github.com/kividbio/kividb/issues/135) | `AUTH <password>` refused while the default user has no password | 1.2.0 (by design, as Redis) | Always logs in as `AUTH default <password>`; sets `masteruser default`; the exporter gets `REDIS_USER=default` |
+| [#156](https://github.com/kividbio/kividb/issues/156) | TLS certificates are not reloaded without a restart | 1.2.0 (`CONFIG SET`) | Not used yet: a renewed certificate takes effect when the pod restarts |
+| [#185](https://github.com/kividbio/kividb/issues/185) | A slow manual failover could lose writes | 1.2.0 (writes paused up to 10 s; the replica gives up after 5 s) | Reports an abandoned handover, asks again up to 5 times, and shows it in the `ShardSwitchover` condition |
 
 ---
 
@@ -529,6 +556,8 @@ threshold is still exposed; enabling AOF (`aof yes`) closes that.
 ---
 
 ## 12. New in v1.0.5-rc1: a replica panics on full resync after its CPU limit changes
+
+> **Not re-tested since v1.0.5 final.**
 
 **Severity: high.** Found while re-testing; not present in v1.0.4, which has
 no staging shards. **Still present in v1.0.5 final**

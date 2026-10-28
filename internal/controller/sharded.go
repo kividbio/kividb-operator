@@ -34,7 +34,9 @@ const (
 	podNameLabel = "statefulset.kubernetes.io/pod-name"
 
 	// maxShardedNodes caps shards × (replicas + 1) until larger clusters
-	// are tested (kividbio/kividb#112).
+	// are tested. Engines before 1.2 opened a new cluster bus connection
+	// for every heartbeat, N × (N - 1) a second (kividbio/kividb#112);
+	// 1.2 keeps one per peer, but nothing larger has been tested yet.
 	maxShardedNodes = 24
 
 	// maxShardedNameLen leaves room for -<shard>-<n>, -<shard>-headless and

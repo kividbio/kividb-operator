@@ -101,12 +101,17 @@ Setting `variant: tls`/`full` and pointing `image` at a build that
 actually supports it still isn't sufficient today — see the live-tested
 caveat below.
 
-> **TLS on kividb v1.0.3+:** e2e against `v1.0.3-tls` / `v1.0.3-full`
+> **TLS by engine version:** e2e against `v1.0.3-tls` / `v1.0.3-full`
 > confirmed the TLS port is in `LISTEN` when the operator mounts certs
 > and passes CLI flags (see `hack/e2e/04-compat-variants.sh`). On
 > **v1.0.2** the listener never opened — pin `spec.image` to v1.0.3+ if
-> you need TLS. The operator still writes both conf directives and CLI
-> flags because `--configfile` historically dropped `tls-*` keys; track
+> you need TLS. Engines from 1.1.0 read the `tls-*` directives from the
+> config file; the operator writes them there and also passes them as
+> CLI flags, for the older engines whose `--configfile` dropped them.
+> Engine 1.2 reloads certificates with `CONFIG SET` (and on `CONFIG SET
+> tls-cert-file` of the same path, a certificate renewed in place), with
+> no restart (kividbio/kividb#156); the operator does not use that yet,
+> so a renewed certificate takes effect when a pod restarts. Track
 > remaining upstream caveats in
 > [ROADMAP.md](ROADMAP.md#known-upstream-kividb-issues).
 
@@ -293,7 +298,11 @@ spec:
   `spec.shards` cannot be added to or removed from an existing cluster.
   Its value can change: see "Changing the shard count" below.
 - **At most 24 nodes** (`shards × (replicas + 1)`) for now, and a name of
-  at most 40 characters.
+  at most 40 characters. The cap dates from engines whose cluster bus
+  opened a new connection for every heartbeat, N × (N − 1) a second
+  across the cluster (kividbio/kividb#112). Engine 1.2 keeps one
+  connection per peer, which removes that cost; the cap stays until
+  larger clusters have been tested.
 - **Workloads.** One StatefulSet per shard, `<cluster>-<shard>`, whose pods
   are `<cluster>-<shard>-<n>`, and a PodDisruptionBudget per shard
   (`maxUnavailable: 1`). Pods prefer other nodes than their shard's other
@@ -327,7 +336,17 @@ spec:
   its replicas; the operator does not promote anything in cluster mode. It
   reports the move (`status.shards[].masterPod`, `lastFailoverTime`, a
   `ShardFailover` Event) and moves the `kividb.io/role` label, so
-  `<cluster>-replicas` follows.
+  `<cluster>-replicas` follows. From engine 1.2 the election favours the
+  replica that has read the most of the master's stream: each replica
+  waits an extra second for every other replica ahead of it
+  (kividbio/kividb#107); before 1.2 any replica could win, and writes only
+  another replica had were lost. Also from 1.2, a replica whose link to
+  the master has been down for longer than `nodeTimeoutMs ×
+  replicaValidityFactor` (by default 5 s × 10, about a minute) does not
+  stand at all, so a shard whose replicas were all cut off that long stays
+  down until its master is back (see `replicaValidityFactor` above). After
+  a failover, the shard's other replicas continue from the new master's
+  backlog rather than resyncing in full (1.2, kividbio/kividb#109).
 - **Looking after it.** Every few seconds the operator re-introduces a node
   the others have at an old address (after a cold restart, every pod's IP
   changes), puts a pod that came back empty behind its shard's master, and,
@@ -350,6 +369,22 @@ spec:
   `replicas: 0` has no one to hand over to: its master restarts in place,
   and its slots are down until it is back. A pod that has been unready
   for 30 s on an old template is replaced straight away.
+  - **The handover pauses the shard's writes.** During `CLUSTER
+    FAILOVER` the master holds its clients' writes until the replica has
+    caught up and won its election: on engine 1.2 for up to 10 s. If the
+    replica has not won within 5 s it gives the failover up (`Manual
+    failover abandoned` in its log) and the master carries on once the
+    pause ends; no write is lost either way (kividbio/kividb#185).
+  - **When a handover does not happen,** the operator asks again 20 s
+    after each request, at most 5 times in a row, then again after 10
+    minutes. 15 s after a request that has not moved the master, it emits
+    a `Warning` Event `ShardSwitchoverAbandoned`. While a handover is
+    pending, the condition `ShardSwitchover` says which shard, which pods
+    and which attempt (reason `InProgress`, `Retrying`, or `Stalled` once
+    the attempts ran out); it goes when the master has moved. The rolling
+    restart waits meanwhile. A `KividbDbOps` restart that has waited 5
+    minutes for a master to hand over fails, says so in its status, and
+    withdraws its step-down request.
 - **Changing the shard count.** Edit `spec.shards` on a running cluster
   and the operator moves slots until they are spread evenly over the new
   count (phase `Rebalancing`, progress in `status.cluster.rebalance`):
@@ -370,7 +405,10 @@ spec:
   - **Failures:** a move that fails leaves the slots with the source,
     and is tried again after 30 s (`status.cluster.rebalance.lastError`,
     a `SlotMoveFailed` Event). If the destination restarts during a move,
-    the keys it had received stay on it (kividbio/kividb#108).
+    engine 1.2 deletes the keys it had received for slots it does not
+    own when it starts again. On 1.1.x they stay on it, unreachable
+    (`MOVED`) but counted by `DBSIZE` and saved in its snapshots, until
+    those slots are moved to it again (kividbio/kividb#108).
   - **Meanwhile:** rolling restarts wait until the change is done; a
     stuck pod is still replaced. Moves wait for every pod to be ready and
     the cluster to serve every slot. A change can be changed again half
@@ -421,7 +459,8 @@ spec:
   clients and to the other nodes alike
   ([kividbio/kividb#110](https://github.com/kividbio/kividb/issues/110)),
   so a Service that serves another port, or an annotation that names one,
-  is refused.
+  is refused. Engine 1.2 adds `cluster-announce-client-port`, a port for
+  clients only, which would lift this; the operator does not use it yet.
 - **Hostnames and IPv4 addresses** only.
 - **Everyone sees the outside address,** clients inside Kubernetes too,
   since a node announces one address. Inside clients then go through the
@@ -504,6 +543,25 @@ spec:
   does not maintain a duplicate list and does not validate directive
   *names*, only that you don't set the operator-owned ones below). Values
   are always strings; kividb parses them itself.
+
+  **A directive the engine refuses stops the server at startup.** Since
+  1.0.5 an unknown name or a value that does not parse is fatal (`Bad
+  directive or wrong number of arguments`, exit 1). Engine 1.2 accepts
+  Redis's own settings that mean nothing to KiviDB with a warning, so a
+  carried-over `redis.conf` starts, and now applies settings earlier
+  versions ignored in the file; a name that is neither KiviDB's nor
+  Redis's, or a bad value, still stops it. Check a `KividbConfig` against
+  the engine version before you apply it:
+  - **On a running cluster,** the change rolls out one pod at a time,
+    replicas first, and a pod that crash-loops is not ready, so nothing
+    else is replaced: the rollout stalls after the first pod and the
+    cluster keeps serving. Fix or revert the `KividbConfig` and the
+    stuck pod is replaced. A pod that restarts on its own in the meantime
+    reads the new file too (the config is a mounted Secret, updated in
+    place), and crash-loops the same way.
+  - **On a new cluster, or a restart of every pod** (a cold restart after
+    the nodes went away), every pod reads the file at once and every pod
+    is down until the directive is fixed.
 
   **Do not set** `replicaof`, `port`, or `aclfile` — they are overwritten
   by the operator regardless of what's in `directives` (replication
