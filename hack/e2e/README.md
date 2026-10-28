@@ -38,7 +38,8 @@ Build operator images locally, then load them into minikube:
 make docker-build VERSION=0.6.0-local
 # or: docker build -t docker.io/kividb/kividb-operator:0.6.0-local -f Dockerfile .
 LOAD_IMAGES=1 OPERATOR_TAG=0.6.0-local make e2e
-# Pre-GA engine: KIVIDB_VERSION=v1.1.2-rc1 LOAD_IMAGES=1 OPERATOR_TAG=0.6.0-local make e2e
+# Pre-GA engine (release candidates are on GHCR only):
+#   KIVIDB_VERSION=v1.2.0-rc1 KIVIDB_IMAGE_BASE=ghcr.io/kividbio/kividb LOAD_IMAGES=1 OPERATOR_TAG=0.6.0-local make e2e
 ```
 
 ## Quick start
@@ -65,7 +66,8 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 |----------|---------|---------|
 | `OPERATOR_TAG` | `0.6.0-local` | Manager / agent / GUI image tag |
 | `OPERATOR_REGISTRY` | `docker.io/kividb` | Image registry prefix |
-| `KIVIDB_VERSION` | `v1.1.2` | Engine tag prefix (`v1.1.2`, or e.g. `v1.1.2-rc1` pre-GA) |
+| `KIVIDB_VERSION` | `v1.1.2` | Engine tag prefix (`v1.1.2`, or e.g. `v1.2.0-rc1` pre-GA) |
+| `KIVIDB_IMAGE_BASE` | `docker.io/kividb/kividb` | Engine image repository; `ghcr.io/kividbio/kividb` for release candidates |
 | `LOAD_IMAGES` | `0` | `1` → `minikube image load` for operator (+ engine in compat) |
 | `STRICT_TLS` | `0` | `1` → fail if TLS port is not LISTEN (else warn; ROADMAP) |
 | `STORAGE_CLASS` | `standard` | PVC StorageClass (minikube default) |
