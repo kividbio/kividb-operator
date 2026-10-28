@@ -385,3 +385,65 @@ func TestReconcileRoles_NoFailoverBeforeThreshold(t *testing.T) {
 		t.Errorf("unexpected agent calls: %v", h.agents.calls)
 	}
 }
+
+// The master pod was deleted and came back (a new IP) as the master, from
+// a snapshot older than its last writes. Its replicas, still following its
+// old address, hold those writes: one of them takes over, and the
+// restarted pod becomes its replica, rather than every replica being
+// resynced from the older data (A2a: 92 acknowledged writes lost).
+func TestReconcileRoles_MasterRestartedBehindItsReplicas(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.9", ready: true, agent: master(700)},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1000)},
+		testPod{name: "c1-2", ip: "10.0.0.3", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 990)},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: false, Synced: true, ReplicationOffset: 1000},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
+		{Name: "c1-2", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 990},
+	}
+	if m, failover := h.reconcile(); m != "c1-1" || !failover {
+		t.Fatalf("master=%q failover=%v, want a failover to c1-1", m, failover)
+	}
+	h.assertLabels(map[string]string{"c1-0": "replica", "c1-1": "master", "c1-2": "replica"})
+	h.assertRole("10.0.0.9", agentapi.RoleReplica, "10.0.0.2")
+	h.assertRole("10.0.0.3", agentapi.RoleReplica, "10.0.0.2")
+}
+
+// A master whose offset has only grown is left alone, even when a replica
+// read a moment later reports more (it applied writes in between).
+func TestReconcileRoles_MasterAheadOfItsLastOffsetIsLeftAlone(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "master", ready: true, agent: master(1200)},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1300)},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 1000},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
+	}
+	if m, failover := h.reconcile(); m != "c1-0" || failover {
+		t.Fatalf("master=%q failover=%v, want c1-0 and no failover", m, failover)
+	}
+	if len(h.agents.calls) != 0 {
+		t.Fatalf("unexpected agent calls: %v", h.agents.calls)
+	}
+}
+
+// While the master cannot be asked, its last offset and key count stay in
+// the status: they are what recognises it coming back behind.
+func TestReconcileRoles_UnreachablePodKeepsItsLastOffset(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "master", unreadyFor: 5 * time.Second},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1000)},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 1000, Keys: 42},
+	}
+	statuses, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.list())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := statuses[0]; s.Name != "c1-0" || s.ReplicationOffset != 1000 || s.Keys != 42 {
+		t.Fatalf("status of the unreachable master: %+v", s)
+	}
+}

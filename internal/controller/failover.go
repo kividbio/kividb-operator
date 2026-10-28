@@ -78,9 +78,11 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	currentMasterName := resolveCurrentMaster(pods, views, c.Status.MasterPod)
 
 	previouslySynced := make(map[string]bool, len(c.Status.Pods))
+	previous := make(map[string]kividbv1alpha1.KividbPodStatus, len(c.Status.Pods))
 	var masterKeysLastSeen int64
 	for _, ps := range c.Status.Pods {
 		previouslySynced[ps.Name] = ps.Synced
+		previous[ps.Name] = ps
 		if ps.Name == currentMasterName {
 			masterKeysLastSeen = ps.Keys
 		}
@@ -132,6 +134,26 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				needsFailover = failoverEnabled && time.Since(since) >= threshold
 			} else if !mv.ready {
 				needsFailover = failoverEnabled
+			}
+		}
+	}
+
+	// A master that restarted and came back with less than its replicas
+	// hold -- from a snapshot older than its last writes -- must not have
+	// them resync from it: that discards, on every copy, the writes it had
+	// acknowledged since that snapshot. The replica that holds the most
+	// takes over instead, and the restarted pod becomes its replica.
+	behindOf := ""
+	if !needsElection && !needsFailover && failoverEnabled {
+		if mv, ok := views[currentMasterName]; ok && mv.ready && mv.status != nil && mv.status.Role == agentapi.RoleMaster {
+			if ahead, aheadOffset := regressedMaster(previous[currentMasterName], mv.status, views, previouslySynced); ahead != "" {
+				log.Info("the master restarted behind its replicas; failing over to the replica that holds the most", "pod", currentMasterName,
+					"masterOffset", mv.status.ReplicationOffset, "lastSeenOffset", previous[currentMasterName].ReplicationOffset, "replica", ahead, "replicaOffset", aheadOffset)
+				r.event(c, corev1.EventTypeWarning, "MasterRestartedBehind",
+					"%s came back as the master at replication offset %d, behind the %d it had reached and behind %s (offset %d), which holds writes it lost; failing over rather than resyncing the replicas from its older data",
+					currentMasterName, mv.status.ReplicationOffset, previous[currentMasterName].ReplicationOffset, ahead, aheadOffset)
+				needsFailover = true
+				behindOf = ahead
 			}
 		}
 	}
@@ -200,7 +222,10 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		if err := r.setRoleLabel(ctx, views[candidate].pod, kividbv1alpha1.RoleMaster); err != nil {
 			return nil, currentMasterName, false, err
 		}
-		if needsFailover {
+		switch {
+		case behindOf != "":
+			r.event(c, corev1.EventTypeWarning, "Failover", "master %s restarted behind its replicas; promoted %s", currentMasterName, candidate)
+		case needsFailover:
 			r.event(c, corev1.EventTypeWarning, "Failover", "master %s is unavailable; promoted %s", currentMasterName, candidate)
 		}
 		newMasterName = candidate
@@ -224,10 +249,14 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	for _, p := range pods {
 		v := views[p.Name]
 		role := kividbv1alpha1.RoleUnknown
-		var offset, keys int64
+		// Last observed: a pod that cannot be asked keeps what it last
+		// reported. A master's offset is how its restart behind its
+		// replicas is recognised (regressedMaster), and its key count
+		// how emptied replicas are (withoutEmptied).
+		offset, keys := previous[p.Name].ReplicationOffset, previous[p.Name].Keys
 		synced := false
 		if v.status != nil {
-			keys = v.status.KeyCount
+			offset, keys = 0, v.status.KeyCount
 		}
 
 		switch {
@@ -320,6 +349,30 @@ func resolveCurrentMaster(pods []corev1.Pod, views map[string]*podView, statusMa
 		}
 	}
 	return labeled[0]
+}
+
+// regressedMaster recognises a master that restarted and lost writes its
+// replicas still hold. last is the master pod's status from the previous
+// reconcile, st what it reports now. A master's offset never goes down
+// while it runs (a promoted replica continues the offset of the stream it
+// followed), so an offset below the one last seen on the same pod, as the
+// master, means it restarted from older data; a replica that was in sync
+// and is ahead of it now holds writes it no longer has. It returns the
+// most caught-up such replica, "" if there is none.
+func regressedMaster(last kividbv1alpha1.KividbPodStatus, st *agentapi.StatusResponse, views map[string]*podView, synced map[string]bool) (string, int64) {
+	if last.Role != kividbv1alpha1.RoleMaster || last.ReplicationOffset <= 0 || st.ReplicationOffset >= last.ReplicationOffset {
+		return "", 0
+	}
+	best, bestOffset := "", st.ReplicationOffset
+	for name, v := range views {
+		if name == last.Name || !v.ready || v.status == nil || v.status.Role != agentapi.RoleReplica || !synced[name] {
+			continue
+		}
+		if o := v.status.ReplicationOffset; o > bestOffset || (o == bestOffset && best != "" && name < best) {
+			best, bestOffset = name, o
+		}
+	}
+	return best, bestOffset
 }
 
 // followsMaster reports whether a replica is already configured to
