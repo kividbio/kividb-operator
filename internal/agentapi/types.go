@@ -7,9 +7,13 @@
 // (Authorization: Bearer <token>, see SetToken); without it they answer
 // 401, and an agent with no token configured answers them 503.
 //
-//	GET  /healthz       -> 200 if the agent process itself is up (liveness).
+//	GET  /healthz       -> 200 if the agent process itself is up (the agent
+//	                       container's liveness).
 //	GET  /readyz        -> 200 if a RESP PING against local kividb succeeds,
 //	                       503 otherwise (readiness; gates Service membership).
+//	GET  /livez         -> 200 if local kividb answers anything at all within a
+//	                       few seconds (the kividb container's liveness: a hung
+//	                       engine accepts TCP connections and answers nothing).
 //	GET  /prestop       -> blocks while local kividb is a master with replicas
 //	                       attached, so the operator can hand the role over
 //	                       before the engine is stopped (both containers'

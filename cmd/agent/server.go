@@ -44,6 +44,7 @@ func (s *server) routes() http.Handler {
 	// from INFO, nothing that changes or reveals the data.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.HandleFunc("GET /livez", s.handleLivez)
 	// The preStop hook: it only ever waits, bounded by PreStopTimeout.
 	mux.HandleFunc("GET /prestop", s.handlePreStop)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)

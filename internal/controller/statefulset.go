@@ -95,6 +95,48 @@ func preStopHook() *corev1.Lifecycle {
 	}
 }
 
+// The kividb container's probes.
+//
+// Liveness fails only after 9 consecutive failures 10 s apart, each
+// allowing 5 s for an answer: an engine that has answered nothing for about
+// 90 s. That is long, on purpose:
+//
+//   - /livez counts any reply, LOADING and BUSY included, so an engine that
+//     is merely slow -- under heavy load, loading a full sync, running a
+//     long script or a save -- still passes; a probe fails only when no
+//     reply comes back at all.
+//   - A hung master must be failed over before it is restarted. The pod
+//     turns unready within 15 s (readiness: 3 failures, 5 s apart) and the
+//     operator fails over once it has been unready for
+//     spec.failover.unhealthyThresholdSeconds (30 s by default). Restarted
+//     sooner, it would come back as the master from its last snapshot and
+//     be resynced to its replicas -- the very loss the failover avoids. At
+//     90 s it comes back after the failover, and rejoins as a replica.
+//   - The agent proxies the probe, so an agent that is restarting does not
+//     take kividb down with it: its own liveness restarts it well within
+//     the 90 s.
+//
+// Until the engine has answered once, the startup probe stands in for
+// liveness: an engine loading a large dataset at startup does not listen
+// yet, and is given up to 30 minutes.
+func kividbLivenessProbe() *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler:     corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/livez", Port: intstr.FromInt(AgentPort)}},
+		PeriodSeconds:    10,
+		TimeoutSeconds:   5,
+		FailureThreshold: 9,
+	}
+}
+
+func kividbStartupProbe() *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler:     corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/livez", Port: intstr.FromInt(AgentPort)}},
+		PeriodSeconds:    10,
+		TimeoutSeconds:   5,
+		FailureThreshold: 180,
+	}
+}
+
 // desiredPDB keeps a node drain, or any other eviction, from taking more
 // than one pod of a replicated cluster at a time, as each shard's budget
 // does in a sharded cluster. An evicted master still hands its role over
@@ -353,13 +395,12 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 		Ports:           kividbPorts,
 		Resources:       c.Spec.Resources,
 		VolumeMounts:    volumeMounts,
-		LivenessProbe: &corev1.Probe{
-			ProbeHandler:        corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(int(port))}},
-			InitialDelaySeconds: 10,
-			PeriodSeconds:       10,
-			FailureThreshold:    6,
-		},
-		Lifecycle: preStopHook(),
+		// Liveness asks the engine to answer, through the agent's /livez: a
+		// deadlocked engine accepts TCP connections and answers nothing, so
+		// a TCP probe never restarts it. See kividbLivenessProbe for the numbers.
+		StartupProbe:  kividbStartupProbe(),
+		LivenessProbe: kividbLivenessProbe(),
+		Lifecycle:     preStopHook(),
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromInt(AgentPort)},

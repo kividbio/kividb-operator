@@ -10,6 +10,44 @@ import (
 	"github.com/kividbio/kividb-operator/internal/respclient"
 )
 
+// livenessTimeout is how long GET /livez gives kividb to answer a PING.
+// The kubelet's probe allows a little more (see the kividb container's
+// livenessProbe in internal/controller/statefulset.go).
+var livenessTimeout = 3 * time.Second
+
+// handleLivez is the kividb container's liveness check: does the engine
+// answer at all? A deadlocked engine still accepts TCP connections -- the
+// kernel completes the handshake -- and answers nothing, so a TCP probe
+// never restarts it.
+//
+// Any reply counts, an error reply included: NOAUTH (the probe does not
+// log in), LOADING while a replica loads its master's dataset, BUSY while
+// a script runs past its time limit. Each of them is the engine at work.
+// Only no reply in livenessTimeout, or no connection, fails the check.
+func (s *server) handleLivez(w http.ResponseWriter, r *http.Request) {
+	if err := engineAnswers(s.cfg.KividbAddr, livenessTimeout); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
+// engineAnswers sends PING to the engine at addr and reports whether any
+// reply came back within timeout.
+func engineAnswers(addr string, timeout time.Duration) error {
+	c, err := respclient.Dial(addr, timeout)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if reply, err := c.Do("PING"); reply == nil {
+		return fmt.Errorf("no reply to PING within %s: %w", timeout, err)
+	}
+	return nil
+}
+
 // preStopPoll is how often GET /prestop looks at the engine's role.
 var preStopPoll = 250 * time.Millisecond
 

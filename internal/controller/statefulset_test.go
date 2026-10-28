@@ -19,6 +19,28 @@ func container(t *testing.T, tmpl corev1.PodTemplateSpec, name string) corev1.Co
 	return corev1.Container{}
 }
 
+// B2a: a deadlocked engine accepts TCP connections and answers nothing.
+// Liveness asks it to answer, and is patient enough for a slow engine and
+// for the failover of a hung master to come first.
+func TestKividbLivenessAsksTheEngineToAnswer(t *testing.T) {
+	c := testCluster("c1")
+	k := container(t, podTemplate(c, nil, nil, nil), "kividb")
+	live := k.LivenessProbe
+	if live == nil || live.HTTPGet == nil || live.HTTPGet.Path != "/livez" || live.HTTPGet.Port.IntValue() != AgentPort || live.TCPSocket != nil {
+		t.Fatalf("liveness %+v, want GET /livez on the agent", live)
+	}
+	if window := live.PeriodSeconds * live.FailureThreshold; window < 60 || window > 120 {
+		t.Fatalf("liveness gives up after %d s, want 60-120", window)
+	}
+	// It must outlast readiness (15 s) plus the default failover threshold.
+	if window := live.PeriodSeconds * live.FailureThreshold; window <= int32(defaultUnhealthyThreshold.Seconds())+15 {
+		t.Fatalf("liveness gives up after %d s, before a hung master is failed over", window)
+	}
+	if s := k.StartupProbe; s == nil || s.HTTPGet == nil || s.HTTPGet.Path != "/livez" || s.PeriodSeconds*s.FailureThreshold < 600 {
+		t.Fatalf("startup probe %+v, want /livez with room for a long load", s)
+	}
+}
+
 // A2a: a master deleted, drained or evicted waits for the operator to hand
 // its role over; the agent waits with it, to answer meanwhile.
 func TestBothContainersWaitForTheHandoverBeforeStopping(t *testing.T) {
