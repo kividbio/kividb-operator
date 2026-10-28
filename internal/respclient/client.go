@@ -169,18 +169,26 @@ func readFull(r *bufio.Reader, buf []byte) (int, error) {
 	return total, nil
 }
 
-// Auth performs AUTH password (or AUTH username password if username != "").
+// Auth performs AUTH username password, with username "default" when it is
+// empty. The two-argument form is always sent, also for the default user:
+// from engine 1.2 (kividbio/kividb#135) a single-argument AUTH <password> is
+// refused while the default user has no password (nopass), which happens
+// for a while when a password is removed and a pod still holds the old
+// Secret. AUTH default <password> logs in on every engine version.
 func (c *Client) Auth(username, password string) error {
 	if password == "" {
 		return nil
 	}
-	var err error
-	if username != "" && username != "default" {
-		_, err = c.Do("AUTH", username, password)
-	} else {
-		_, err = c.Do("AUTH", password)
-	}
+	_, err := c.Do(authArgs(username, password)...)
 	return err
+}
+
+// authArgs is the AUTH command Auth sends.
+func authArgs(username, password string) []string {
+	if username == "" {
+		username = "default"
+	}
+	return []string{"AUTH", username, password}
 }
 
 // Ping issues PING and returns nil if the server replied PONG.

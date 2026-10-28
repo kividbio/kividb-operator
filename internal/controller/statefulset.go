@@ -193,6 +193,11 @@ func exporterEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.Kivi
 		{Name: "REDIS_EXPORTER_WEB_LISTEN_ADDRESS", Value: fmt.Sprintf(":%d", ExporterPort)},
 	}
 	if ref := defaultUserPasswordRef(aclConfig); ref != nil {
+		// REDIS_USER makes the exporter log in with AUTH default <password>
+		// rather than AUTH <password>, which engine 1.2 refuses while the
+		// default user has no password (kividbio/kividb#135), as during a
+		// password removal that this pod's Secret has not caught up with.
+		env = append(env, corev1.EnvVar{Name: "REDIS_USER", Value: "default"})
 		env = append(env, corev1.EnvVar{
 			Name: "REDIS_PASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
