@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -64,8 +65,36 @@ func TestShardedKividbConfigRefusesOperatorDirectives(t *testing.T) {
 			t.Errorf("%s accepted in a sharded cluster", key)
 		}
 	}
+	if validateKividbConfig(c, cfg(map[string]string{"cluster-replica-validity-factor": "0"})) == nil {
+		t.Error("cluster-replica-validity-factor accepted: it is spec.cluster.replicaValidityFactor")
+	}
 	if err := validateKividbConfig(c, cfg(map[string]string{"maxmemory": "1gb", "appendonly": "yes"})); err != nil {
 		t.Errorf("ordinary directives refused: %v", err)
+	}
+	// The slot migration settings are the user's (engine #111).
+	if err := validateKividbConfig(c, cfg(map[string]string{
+		"cluster-slot-migration-handoff-max-lag-bytes": "1mb",
+		"Cluster-Slot-Migration-Write-Pause-Timeout":   "5000",
+	})); err != nil {
+		t.Errorf("slot migration settings refused: %v", err)
+	}
+}
+
+func TestShardedConfigReplicaValidityFactor(t *testing.T) {
+	c := shardedCluster("s", 3, 1)
+	if s := renderKividbConfWith(c, nil, clusterSecrets{}); strings.Contains(s, "cluster-replica-validity-factor") {
+		t.Errorf("cluster-replica-validity-factor rendered while unset (engines before 1.2 do not start with it):\n%s", s)
+	}
+	for _, v := range []int32{0, 10, 30} {
+		c.Spec.Cluster = &kividbv1alpha1.ClusterModeSpec{ReplicaValidityFactor: int32p(v)}
+		want := fmt.Sprintf("cluster-replica-validity-factor %d\n", v)
+		if s := renderKividbConfWith(c, nil, clusterSecrets{}); !strings.Contains(s, want) {
+			t.Errorf("missing %q in\n%s", want, s)
+		}
+	}
+	c.Spec.Cluster = &kividbv1alpha1.ClusterModeSpec{ReplicaValidityFactor: int32p(5)}
+	if cp := c.Spec.Cluster.DeepCopy(); cp.ReplicaValidityFactor == c.Spec.Cluster.ReplicaValidityFactor || *cp.ReplicaValidityFactor != 5 {
+		t.Error("DeepCopy shares or loses replicaValidityFactor")
 	}
 }
 

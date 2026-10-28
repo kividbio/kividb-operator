@@ -285,6 +285,7 @@ spec:
     requireFullCoverage: true    # cluster-require-full-coverage
     minReplicasToWrite: 0        # min-replicas-to-write
     minReplicasMaxLagSeconds: 10 # min-replicas-max-lag
+    # replicaValidityFactor: 10  # cluster-replica-validity-factor; engine 1.2 or later
     # busSecretRef: {name: my-bus, key: secret}   # generated into <cluster>-bus when unset
 ```
 
@@ -300,7 +301,23 @@ spec:
 - **Configuration.** The operator sets every cluster-mode directive
   (`cluster-*`, `min-replicas-*`, `masteruser`/`masterauth`, `replicaof`,
   `tls-cluster`); a `KividbConfig` that sets one is refused. The bus
-  secret is always on.
+  secret is always on. The exceptions are the slot migration settings,
+  `cluster-slot-migration-handoff-max-lag-bytes` and
+  `cluster-slot-migration-write-pause-timeout`, which a `KividbConfig` may
+  set: the operator leaves them alone, and the engine applies them from
+  the next migration's handoff (kividbio/kividb#111).
+- **`replicaValidityFactor`** is `cluster-replica-validity-factor`
+  (engine 1.2 or later). When a master fails, a replica whose link to it
+  has been down for longer than `nodeTimeoutMs × replicaValidityFactor`
+  (plus the replication ping period) does not stand for election: its
+  data may be too old to take over with. Unset, the operator writes
+  nothing and the engine's default, 10, applies, as in Redis: with the
+  default node timeout of 5 s, a replica cut off from its master for more
+  than about a minute does not take over, and a shard whose replicas are
+  all that stale stays down until its master is back. `0` lets every
+  replica stand, however far behind; a larger factor tolerates longer
+  partitions. Engines before 1.2 do not know the directive and do not
+  start with it, so leave it unset on them.
 - **Forming the cluster.** Once every pod is ready, the operator
   introduces the nodes to each other (`CLUSTER MEET`), gives each shard's
   `-0` pod an even share of the slots, and has the shard's other pods

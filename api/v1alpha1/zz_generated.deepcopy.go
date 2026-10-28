@@ -171,6 +171,10 @@ func (in *ClusterModeSpec) DeepCopyInto(out *ClusterModeSpec) {
 		out.MinReplicasMaxLagSeconds = new(int32)
 		*out.MinReplicasMaxLagSeconds = *in.MinReplicasMaxLagSeconds
 	}
+	if in.ReplicaValidityFactor != nil {
+		out.ReplicaValidityFactor = new(int32)
+		*out.ReplicaValidityFactor = *in.ReplicaValidityFactor
+	}
 	if in.BusSecretRef != nil {
 		out.BusSecretRef = new(SecretKeyRef)
 		*out.BusSecretRef = *in.BusSecretRef
