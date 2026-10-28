@@ -887,6 +887,9 @@ func (in *DbOpsRestartStatus) DeepCopyInto(out *DbOpsRestartStatus) {
 		out.PendingPods = make([]string, len(in.PendingPods))
 		copy(out.PendingPods, in.PendingPods)
 	}
+	if in.HandoverStartTime != nil {
+		out.HandoverStartTime = in.HandoverStartTime.DeepCopy()
+	}
 }
 
 func (in *DbOpsRestartStatus) DeepCopy() *DbOpsRestartStatus {

@@ -46,9 +46,12 @@ type KividbClusterReconciler struct {
 	Agent    *AgentClient
 	Recorder record.EventRecorder
 
-	// failovers: when the operator last asked a shard for a CLUSTER
-	// FAILOVER ("<ns>/<cluster>/<shard>" -> time.Time).
+	// failovers: the handovers under way, by shard
+	// ("<ns>/<cluster>/<shard>" -> *shardHandover).
 	failovers sync.Map
+
+	// clock is time.Now, unless a test sets it.
+	clock func() time.Time
 }
 
 func (r *KividbClusterReconciler) scheme() *runtime.Scheme { return r.Scheme }
