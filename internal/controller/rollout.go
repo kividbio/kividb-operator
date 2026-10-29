@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -235,6 +236,7 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 		}
 	}
 	if len(outdated) == 0 {
+		r.rolloutDone(c)
 		return
 	}
 
@@ -249,6 +251,7 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 			continue
 		}
 		r.event(c, corev1.EventTypeWarning, "StuckPodReplaced", "%s was not ready and on an outdated pod template; replaced it", p.Name)
+		r.rolloutProgressed(c, fmt.Sprintf("replaced %s, which was not ready, on an outdated pod template", p.Name))
 		replaced = true
 	}
 	if replaced {
@@ -290,6 +293,27 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 	// no way to authenticate to a v1.0.5 master, so the last old pod of an
 	// engine upgrade would wait forever to be "in sync" first.
 	if unhealthy > 1 || (unhealthy == 1 && healthy[next.Name]) {
+		reasons := map[string]string{}
+		if at, ok := r.notSynced.Load(rolloutWaitKey(c)); ok {
+			reasons = at.(map[string]string)
+		}
+		var blockers []rolloutBlocker
+		for _, s := range statuses {
+			switch {
+			case healthy[s.Name] || s.Name == next.Name:
+			case !s.Ready:
+				blockers = append(blockers, rolloutBlocker{pod: s.Name, why: "not Ready"})
+			case s.Name == masterPod:
+				blockers = append(blockers, rolloutBlocker{pod: s.Name, why: "the master's agent did not answer"})
+			default:
+				why := reasons[s.Name]
+				if why == "" {
+					why = "not in sync"
+				}
+				blockers = append(blockers, rolloutBlocker{pod: s.Name, syncing: true, why: "replica not in sync: " + why})
+			}
+		}
+		r.rolloutWaiting(ctx, c, next.Name, blockers)
 		return
 	}
 
@@ -301,12 +325,14 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 	// first; the old master is then just another outdated replica and is
 	// replaced on a later pass.
 	if next.Name == masterPod && len(pods) > 1 {
-		if _, err := r.switchover(ctx, c, pods, statuses, masterPod, switchoverRequest{reason: "rollout"}); err != nil {
-			if errors.Is(err, errSwitchoverDeferred) {
-				log.V(1).Info("rollout: the master hands over later", "pod", masterPod, "why", err.Error())
-			} else {
-				log.Error(err, "rollout: moving the master role before replacing the master", "pod", masterPod)
-			}
+		to, err := r.switchover(ctx, c, pods, statuses, masterPod, switchoverRequest{reason: "rollout"})
+		switch {
+		case err == nil:
+			r.rolloutProgressed(c, fmt.Sprintf("moved the master role from %s to %s, to replace %s next", masterPod, to, masterPod))
+		case errors.Is(err, errSwitchoverDeferred):
+			log.V(1).Info("rollout: the master hands over later", "pod", masterPod, "why", err.Error())
+		default:
+			log.Error(err, "rollout: moving the master role before replacing the master", "pod", masterPod)
 		}
 		return
 	}
@@ -316,4 +342,5 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 		return
 	}
 	r.event(c, corev1.EventTypeNormal, "RollingUpdate", "replacing %s to apply the updated pod template (%d more to go)", next.Name, len(outdated)-1)
+	r.rolloutProgressed(c, fmt.Sprintf("replacing %s (%d more to go)", next.Name, len(outdated)-1))
 }

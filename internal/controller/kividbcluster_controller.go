@@ -58,6 +58,14 @@ type KividbClusterReconciler struct {
 	// ("<ns>/<cluster>" -> time.Time) was aborted, so the next one waits.
 	switchovers sync.Map
 
+	// rolloutWaits: what a cluster's rollout has been waiting for, and
+	// since when ("<ns>/<cluster>" -> *rolloutWait), see rollout_wait.go.
+	rolloutWaits sync.Map
+
+	// notSynced: why each replica of a replicated-mode cluster was not in
+	// sync on the last pass ("<ns>/<cluster>" -> map[pod]reason).
+	notSynced sync.Map
+
 	// clock is time.Now, unless a test sets it.
 	clock func() time.Time
 }

@@ -132,8 +132,12 @@ type ClusterStatusResponse struct {
 	ReplicationOffset int64 `json:"replicationOffset,omitempty"`
 	// MasterLinkUp: a replica's link to its master is up
 	// (master_link_status).
-	MasterLinkUp bool          `json:"masterLinkUp,omitempty"`
-	Nodes        []ClusterNode `json:"nodes,omitempty"`
+	MasterLinkUp bool `json:"masterLinkUp,omitempty"`
+	// MasterLastIOSeconds: on a replica, seconds since anything arrived
+	// from its master (master_last_io_seconds_ago; -1 while the link is
+	// down). Reported, not used to decide anything.
+	MasterLastIOSeconds *int64        `json:"masterLastIOSeconds,omitempty"`
+	Nodes               []ClusterNode `json:"nodes,omitempty"`
 }
 
 // Myself is the node's own line of CLUSTER NODES.

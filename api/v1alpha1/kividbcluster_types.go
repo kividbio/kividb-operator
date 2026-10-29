@@ -479,6 +479,25 @@ type KividbPodStatus struct {
 	// +optional
 	Keys int64 `json:"keys,omitempty"`
 
+	// ReplID is, on the master's entry, the replication stream
+	// (master_replid) its ReplicationOffset is a position in, recorded
+	// only while the pod reports being that stream's master. Empty on a
+	// replica's entry, and cleared when the master role moves.
+	// +optional
+	ReplID string `json:"replID,omitempty"`
+
+	// RunID is the engine's run_id when the pod was last asked. It changes
+	// whenever the engine restarts: failover treats a master's lower
+	// offset as lost writes only after such a restart.
+	// +optional
+	RunID string `json:"runID,omitempty"`
+
+	// Incarnation is the pod's UID and its kividb container's restart
+	// count when the pod was last asked: the restart evidence used when the
+	// agent does not report a run_id.
+	// +optional
+	Incarnation string `json:"incarnation,omitempty"`
+
 	// Shard is the shard the pod belongs to, in a sharded cluster.
 	// +optional
 	Shard *int32 `json:"shard,omitempty"`

@@ -85,6 +85,14 @@ rules:
       - get
       - list
       - watch
+  # An Event on the cluster for a shard promote, which the GUI asks the
+  # engine for itself.
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
   - apiGroups:
       - ""
     resources:

@@ -165,6 +165,49 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 
 ### Fixed
 
+Found by a second end-to-end test on AKS (operator master on engine
+v1.2.0-rc2):
+
+- **A false `MasterRestartedBehind` failover right after a planned
+  switchover lost 314 acknowledged writes** (new in this release). The
+  check compared the new master's offset with one recorded for it a moment
+  earlier, readings taken at different times, and failed over from a
+  master that had never restarted; the master it failed away from kept
+  taking writes until its resync from the replica promoted in its place
+  discarded them. Now the check needs evidence that the master's engine
+  restarted (a new engine `run_id`, or, from an older agent, a new pod or
+  a container restart), compares offsets only within the stream the pod
+  reported writing as the master (`status.pods[].replID`, cleared when the
+  role moves), and skips replicas already resynced from the restarted
+  master. When it does fail over, the restarted master's writes are held
+  (`CLIENT PAUSE WRITE`) until it follows the new master, as in a
+  switchover. The agent reports the engine's `run_id` and, on a master,
+  its `master_replid`; `status.pods[]` gains `replID`, `runID` and
+  `incarnation`. Helm does not upgrade CRDs: apply the new
+  `kividbclusters` CRD, or these fields are dropped and the check never
+  fires.
+- **A rollout waiting on a replica that was not in sync gave no sign**
+  (also in 0.6.0 for replicated clusters). The rollout rightly stops, in
+  a sharded cluster cluster-wide, but the cluster went on reporting
+  `Running` and `Ready` with no Event and no log line; a frozen replica
+  was found only because nothing moved. A new condition,
+  `RolloutProgressing`, says what the rollout is doing: `ReplacingPod`,
+  or `WaitingForReplicaSync` / `WaitingForPodReady` naming each pod it
+  waits for and why (link up or down, bytes behind the master, last I/O
+  from it). After 2 minutes on the same pods it turns `False`, with a
+  `RolloutWaiting` Warning Event and a log line, repeated every 10
+  minutes while the wait lasts. The rollout still waits as before. The
+  agent reports `master_last_io_seconds_ago` in its cluster status too.
+- **GUI: a cluster's operations list was empty for a `KividbDbOps`
+  created with kubectl.** It was filtered by a `kividb.io/cluster` label
+  that only the GUI's own DbOps carry; it now goes by `spec.clusterRef`.
+- **GUI: promoting a shard's replica left no Event.** The GUI asks the
+  engine for `CLUSTER FAILOVER` itself, so the operator never saw it; the
+  GUI now records a `ShardSwitchover` Event on the cluster, as the
+  operator does for its own handovers (and as a replicated cluster's
+  promote gets a `Switchover` Event). The GUI's ClusterRole gains
+  `create` on `events`.
+
 Found by an end-to-end test on AKS (replicated: 1 master + 2 replicas
 under 800 writes/s; sharded: 3 × (1 + 2)), which checked every
 acknowledged write afterwards.

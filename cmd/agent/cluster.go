@@ -63,6 +63,9 @@ func (s *server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		out.ReplicationOffset, _ = strconv.ParseInt(repl[key], 10, 64)
 		out.MasterLinkUp = repl["master_link_status"] == "up"
+		if v, err := strconv.ParseInt(repl["master_last_io_seconds_ago"], 10, 64); err == nil && repl["role"] == "slave" {
+			out.MasterLastIOSeconds = &v
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

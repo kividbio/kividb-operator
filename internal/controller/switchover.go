@@ -256,6 +256,9 @@ func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alp
 		}
 	}
 	unpause()
+	// The status written after this pass was read before the role moved:
+	// the old master's offset there is no reading of the new one.
+	forgetMasterOffsets(statuses, masterPod, target.Name)
 
 	if paused {
 		r.event(c, corev1.EventTypeNormal, "Switchover",

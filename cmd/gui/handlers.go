@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,6 +21,9 @@ type server struct {
 	watchNamespace string               // "" means all namespaces
 	auth           authConfig
 	metrics        *metricsStore // nil only if construction failed (should not happen)
+
+	// agentPost stands in for postAgentJSON in tests.
+	agentPost func(ctx context.Context, podIP, path string, payload any) ([]byte, error)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
