@@ -186,6 +186,18 @@ v1.2.0-rc2):
   `incarnation`. Helm does not upgrade CRDs: apply the new
   `kividbclusters` CRD, or these fields are dropped and the check never
   fires.
+- **A rollout waiting on a replica that was not in sync gave no sign**
+  (also in 0.6.0 for replicated clusters). The rollout rightly stops, in
+  a sharded cluster cluster-wide, but the cluster went on reporting
+  `Running` and `Ready` with no Event and no log line; a frozen replica
+  was found only because nothing moved. A new condition,
+  `RolloutProgressing`, says what the rollout is doing: `ReplacingPod`,
+  or `WaitingForReplicaSync` / `WaitingForPodReady` naming each pod it
+  waits for and why (link up or down, bytes behind the master, last I/O
+  from it). After 2 minutes on the same pods it turns `False`, with a
+  `RolloutWaiting` Warning Event and a log line, repeated every 10
+  minutes while the wait lasts. The rollout still waits as before. The
+  agent reports `master_last_io_seconds_ago` in its cluster status too.
 
 Found by an end-to-end test on AKS (replicated: 1 master + 2 replicas
 under 800 writes/s; sharded: 3 × (1 + 2)), which checked every

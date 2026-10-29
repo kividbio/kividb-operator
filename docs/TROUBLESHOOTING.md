@@ -128,6 +128,23 @@ kubectl annotate kividbcluster my-cluster kividb.io/allow-empty-failover=true
 
 Remove the annotation again afterwards.
 
+## A rolling restart stops moving (`RolloutWaiting`)
+
+The cluster is `Running` and `Ready`, but pods stay on the old template.
+A rollout only replaces the next pod while every other pod is Ready and
+every replica in sync, so a replica that never catches up holds it,
+cluster-wide in a sharded cluster. The `RolloutProgressing` condition
+names the pod and why (`kubectl describe kividbcluster my-cluster`), and
+after 2 minutes a `RolloutWaiting` Warning Event says the same:
+
+- **link down**: the replica cannot reach or authenticate to its master;
+  look at its engine log (`kubectl logs <pod> -c kividb`).
+- **link up, bytes behind, last I/O long ago**: the replica is connected
+  but applies nothing; restarting that pod (`kubectl delete pod <pod>`)
+  lets it resync, and the rollout goes on. Report it as an engine issue.
+- **first full sync not finished**: a large dataset is still loading;
+  wait.
+
 ## ACL / authentication errors (`NOAUTH`, `WRONGPASS`)
 
 The operator renders the referenced `KividbAclConfig` into the

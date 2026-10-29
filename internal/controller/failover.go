@@ -280,6 +280,8 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	}
 
 	statuses := make([]kividbv1alpha1.KividbPodStatus, 0, len(pods))
+	notSynced := map[string]string{} // why, for the rollout to report
+	defer r.notSynced.Store(rolloutWaitKey(c), notSynced)
 	for _, p := range pods {
 		v := views[p.Name]
 		role := kividbv1alpha1.RoleUnknown
@@ -313,6 +315,9 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			role = kividbv1alpha1.RoleReplica
 			offset = v.status.ReplicationOffset
 			synced = replicaSynced(masterStatus, v.status, masterIP, port, previouslySynced[p.Name])
+			if !synced {
+				notSynced[p.Name] = whyNotSynced(masterStatus, v.status, masterIP, port)
+			}
 			if masterIP != "" && !followsMaster(v.status, masterIP, port) {
 				if err := r.Agent.ReplicaOf(ctx, p.Status.PodIP, masterIP, port); err != nil {
 					log.Error(err, "failed to point replica at master", "pod", p.Name, "master", masterIP)

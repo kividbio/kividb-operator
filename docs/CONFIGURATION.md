@@ -70,7 +70,21 @@ is first handed to an in-sync replica with a lossless switchover (a
 `Switchover` event, see [Switchovers](#switchovers-and-stopping-a-master))
 and the old master is replaced afterwards, as a replica. A pod that is unready and still on the
 old template is replaced without waiting, so a change that fixes a
-crash-looping pod is not held up by that pod. Changes to a `KividbAclConfig` are
+crash-looping pod is not held up by that pod.
+
+While pods are on an outdated template, the condition
+`RolloutProgressing` says where the rollout is. `True`, reason
+`ReplacingPod`: it has just replaced a pod (or moved the master role to
+replace it next). `True`, reason `WaitingForReplicaSync` (a Ready replica
+is not in sync) or `WaitingForPodReady`: it waits, as it does after every
+replacement while the new pod syncs, and the message names each pod and
+why (its link up or down, how many bytes it is behind the master, when it
+last heard from it). After 2 minutes of waiting on the same pods the
+condition turns `False` with the same reason, and a `RolloutWaiting`
+Warning Event and a log line say the same, again every 10 minutes while
+it lasts. Nothing else changes: the rollout still waits, and `Ready`
+still describes the cluster's service. The condition goes once every pod
+is on the current template. Changes to a `KividbAclConfig` are
 applied without a restart unless the `default` user's password changed —
 see [Changing the default user's password](#changing-the-default-users-password)
 and [TROUBLESHOOTING.md](TROUBLESHOOTING.md#acl--authentication-errors-noauth-wrongpass).
@@ -491,7 +505,10 @@ spec:
 - **Restarts.** A change to the pod template (image, resources, config,
   a new password) and a `KividbDbOps` restart replace the pods one at a
   time across the whole cluster, replicas first, and only while every
-  slot is served and every other pod is ready and in sync. A shard's
+  slot is served and every other pod is ready and in sync; a wait is
+  shown on the `RolloutProgressing` condition, and one of more than 2
+  minutes by a `RolloutWaiting` Warning Event, as in a replicated
+  cluster (see [Image and variant](#image-and-variant)). A shard's
   master is never restarted while it is the master: its most caught-up
   replica takes over first with `CLUSTER FAILOVER`, which the engine runs
   without losing a write, and the old master is restarted as a replica

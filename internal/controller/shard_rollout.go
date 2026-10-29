@@ -288,6 +288,7 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		}
 	}
 	if len(outdated) == 0 {
+		r.rolloutDone(c)
 		return false
 	}
 
@@ -303,6 +304,7 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 			continue
 		}
 		r.event(c, corev1.EventTypeWarning, "StuckPodReplaced", "%s was not ready and on an outdated pod template; replaced it", p.pod.Name)
+		r.rolloutProgressed(c, fmt.Sprintf("replaced %s, which was not ready, on an outdated pod template", p.pod.Name))
 		replaced = true
 	}
 	if replaced {
@@ -342,6 +344,20 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	next := outdated[0]
 	// Every pod but the one replaced must be healthy (see reconcileRollout).
 	if unhealthy > 1 || (unhealthy == 1 && healthy[next]) {
+		var blockers []rolloutBlocker
+		for _, p := range pods {
+			switch {
+			case healthy[p] || p == next:
+			case !p.ready:
+				blockers = append(blockers, rolloutBlocker{pod: p.pod.Name, why: "not Ready"})
+			case p.status == nil:
+				blockers = append(blockers, rolloutBlocker{pod: p.pod.Name, why: "its agent did not answer"})
+			default:
+				blockers = append(blockers, rolloutBlocker{pod: p.pod.Name, syncing: true,
+					why: fmt.Sprintf("replica of shard %d not in sync: %s", p.shard, whyShardNotSynced(p, v.masters[p.shard]))})
+			}
+		}
+		r.rolloutWaiting(ctx, c, next.pod.Name, blockers)
 		return false
 	}
 
@@ -350,6 +366,7 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 			log.Error(err, "rollout: asking the shard master to step down", "pod", next.pod.Name)
 			return false
 		}
+		r.rolloutProgressed(c, fmt.Sprintf("asked shard %d's master %s to hand over, to replace it next", next.shard, next.pod.Name))
 		return r.reconcileShardStepDown(ctx, c, pods)
 	}
 	log.Info("rollout: replacing pod to apply the updated pod template", "pod", next.pod.Name, "remaining", len(outdated)-1)
@@ -358,5 +375,6 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		return false
 	}
 	r.event(c, corev1.EventTypeNormal, "RollingUpdate", "replacing %s to apply the updated pod template (%d more to go)", next.pod.Name, len(outdated)-1)
+	r.rolloutProgressed(c, fmt.Sprintf("replacing %s (%d more to go)", next.pod.Name, len(outdated)-1))
 	return true
 }
