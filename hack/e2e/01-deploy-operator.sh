@@ -21,11 +21,10 @@ log "applying CRDs from ${CHART_DIR}/crds"
 kubectl apply -f "${CHART_DIR}/crds"
 
 if [[ "${LOAD_IMAGES}" == "1" ]]; then
-  require minikube docker
+  require docker
   for img in "${MANAGER_IMG}" "${AGENT_IMG}" "${GUI_IMG}"; do
-    log "minikube image load ${img}"
     if docker image inspect "${img}" >/dev/null 2>&1; then
-      minikube image load "${img}"
+      load_image_to_cluster "${img}"
     else
       warn "local docker image ${img} not found — skipping load (pull or docker-build first)"
     fi

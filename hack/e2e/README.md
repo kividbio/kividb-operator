@@ -68,7 +68,8 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 | `OPERATOR_REGISTRY` | `docker.io/kividb` | Image registry prefix |
 | `KIVIDB_VERSION` | `v1.1.2` | Engine tag prefix (`v1.1.2`, or e.g. `v1.2.0-rc1` pre-GA) |
 | `KIVIDB_IMAGE_BASE` | `docker.io/kividb/kividb` | Engine image repository; `ghcr.io/kividbio/kividb` for release candidates |
-| `LOAD_IMAGES` | `0` | `1` → `minikube image load` for operator (+ engine in compat) |
+| `CLUSTER_DRIVER` | `minikube` | Cluster driver: `minikube` (default) or `kind` |
+| `LOAD_IMAGES` | `0` | `1` → load images into cluster (`minikube image load` or `kind load`) |
 | `STRICT_TLS` | `0` | `1` → fail if TLS port is not LISTEN (else warn; ROADMAP) |
 | `STORAGE_CLASS` | `standard` | PVC StorageClass (minikube default) |
 | `PVC_SIZE` | `1Gi` | Per-pod data volume |

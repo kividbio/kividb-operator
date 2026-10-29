@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-all.sh — sequential minikube e2e suite (00 → 07) with a summary report.
+# run-all.sh — sequential e2e suite with a summary report.
 #
 # Skip individual suites with SKIP_*=1, e.g.:
 #   SKIP_PROMETHEUS=1 SKIP_MONITOR=1 ./hack/e2e/run-all.sh
@@ -46,7 +46,7 @@ PASS=0
 FAIL=0
 SKIP=0
 
-log "=== kividb-operator minikube e2e @ ${STAMP} ==="
+log "=== kividb-operator e2e @ ${STAMP} ==="
 log "OPERATOR_TAG=${OPERATOR_TAG} KIVIDB_VERSION=${KIVIDB_VERSION} STRICT_TLS=${STRICT_TLS} LOAD_IMAGES=${LOAD_IMAGES}"
 
 for suite in "${SUITES[@]}"; do
@@ -79,7 +79,7 @@ for suite in "${SUITES[@]}"; do
 done
 
 {
-  echo "kividb-operator minikube e2e summary"
+  echo "kividb-operator e2e summary"
   echo "timestamp: ${STAMP}"
   echo "OPERATOR_TAG=${OPERATOR_TAG}"
   echo "KIVIDB_VERSION=${KIVIDB_VERSION}"

@@ -177,17 +177,17 @@ helm-package: ## Package the Helm chart into a .tgz using the version in Chart.y
 	helm package $(CHART_DIR) --destination dist/
 
 # ---------------------------------------------------------------------------
-# Minikube e2e / compat (hack/e2e)
+# Minikube / Kind e2e / compat (hack/e2e)
 # ---------------------------------------------------------------------------
 
 .PHONY: e2e e2e-prereqs e2e-deploy
-e2e: ## Run full minikube e2e suite
+e2e: ## Run full e2e suite against minikube (default) or kind (CLUSTER_DRIVER=kind)
 	./hack/e2e/run-all.sh
 
-e2e-prereqs: ## Check kubectl/helm/minikube/docker/redis-cli and minikube status
+e2e-prereqs: ## Check kubectl/helm/minikube|kind/docker/redis-cli and cluster status
 	./hack/e2e/00-prereqs.sh
 
-e2e-deploy: ## Helm-install the operator into minikube (local image tags)
+e2e-deploy: ## Helm-install the operator into the cluster (local image tags)
 	./hack/e2e/01-deploy-operator.sh
 
 # ---------------------------------------------------------------------------
