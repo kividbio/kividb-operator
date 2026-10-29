@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -127,7 +128,9 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				if err := r.Agent.Promote(ctx, mv.pod.Status.PodIP); err != nil {
 					return nil, currentMasterName, false, fmt.Errorf("re-promoting %s: %w", currentMasterName, err)
 				}
-				mv.status = &agentapi.StatusResponse{Role: agentapi.RoleMaster, ReplicationOffset: mv.status.ReplicationOffset}
+				// No stream ID: what the pod reports now is no baseline
+				// for regressedMaster, the next pass's reading is.
+				mv.status = &agentapi.StatusResponse{Role: agentapi.RoleMaster, ReplicationOffset: mv.status.ReplicationOffset, RunID: mv.status.RunID}
 			}
 		case !mv.ready || mv.status == nil || mv.status.Role != agentapi.RoleMaster:
 			if since, unready := readyFalseSince(mv.pod); unready {
@@ -146,11 +149,11 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	behindOf := ""
 	if !needsElection && !needsFailover && failoverEnabled {
 		if mv, ok := views[currentMasterName]; ok && mv.ready && mv.status != nil && mv.status.Role == agentapi.RoleMaster {
-			if ahead, aheadOffset := regressedMaster(previous[currentMasterName], mv.status, views, previouslySynced); ahead != "" {
+			if ahead, aheadOffset := regressedMaster(previous[currentMasterName], mv.pod, mv.status, views, previouslySynced, port); ahead != "" {
 				log.Info("the master restarted behind its replicas; failing over to the replica that holds the most", "pod", currentMasterName,
 					"masterOffset", mv.status.ReplicationOffset, "lastSeenOffset", previous[currentMasterName].ReplicationOffset, "replica", ahead, "replicaOffset", aheadOffset)
 				r.event(c, corev1.EventTypeWarning, "MasterRestartedBehind",
-					"%s came back as the master at replication offset %d, behind the %d it had reached and behind %s (offset %d), which holds writes it lost; failing over rather than resyncing the replicas from its older data",
+					"%s restarted and came back as the master at replication offset %d, behind the %d it had reached and behind %s (offset %d), which holds writes it lost; failing over rather than resyncing the replicas from its older data",
 					currentMasterName, mv.status.ReplicationOffset, previous[currentMasterName].ReplicationOffset, ahead, aheadOffset)
 				needsFailover = true
 				behindOf = ahead
@@ -187,6 +190,9 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		if candidate == "" {
 			candidate = electReplica(eligible, currentMasterName)
 		}
+		if _, ok := eligible[behindOf]; ok {
+			candidate = behindOf // the replica that holds what the restarted master lost
+		}
 		if seeded := bootstrapSeededPod(c); needsElection && seeded != "" {
 			// The very first election of a cluster bootstrapped from a
 			// snapshot. Only one pod holds the restored data, and it is
@@ -211,16 +217,44 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		// Service next to the new master, and the next reconcile could pick
 		// it as "the" master again and REPLICAOF the real one at it,
 		// discarding every write taken since the failover.
+		//
+		// A master that restarted behind its replicas is still up and
+		// taking writes, every one of which its resync from the new
+		// master will discard. Hold them, as a planned switchover does,
+		// from before the promotion until it is the new master's replica
+		// and its clients have been sent there.
+		fenced := ""
+		if old, ok := views[currentMasterName]; ok && behindOf != "" {
+			fenced = r.pauseWrites(ctx, old.pod, restartedMasterPause)
+		}
 		if old, ok := views[currentMasterName]; ok {
 			if err := r.setRoleLabel(ctx, old.pod, kividbv1alpha1.RoleReplica); err != nil {
+				r.unpauseWrites(ctx, fenced)
 				return nil, currentMasterName, false, fmt.Errorf("demoting %s: %w", currentMasterName, err)
 			}
 		}
-		if err := r.Agent.Promote(ctx, views[candidate].pod.Status.PodIP); err != nil {
+		candidateIP := views[candidate].pod.Status.PodIP
+		if err := r.Agent.Promote(ctx, candidateIP); err != nil {
+			r.unpauseWrites(ctx, fenced)
 			return nil, currentMasterName, false, fmt.Errorf("promoting %s: %w", candidate, err)
 		}
 		if err := r.setRoleLabel(ctx, views[candidate].pod, kividbv1alpha1.RoleMaster); err != nil {
 			return nil, currentMasterName, false, err
+		}
+		if fenced != "" {
+			// Its pause lasts restartedMasterPause: if this fails, it ends
+			// by itself, and the loop below asks again.
+			old := views[currentMasterName]
+			if err := r.Agent.ReplicaOf(ctx, fenced, candidateIP, port); err != nil {
+				log.Error(err, "pointing the restarted master at the new master", "pod", currentMasterName)
+			} else {
+				old.status = &agentapi.StatusResponse{Role: agentapi.RoleReplica, MasterHost: candidateIP, MasterPort: port,
+					KeyCount: old.status.KeyCount, KeyCountKnown: old.status.KeyCountKnown, RunID: old.status.RunID}
+				if _, err := r.Agent.Exec(ctx, fenced, "CLIENT", "KILL", "TYPE", "normal"); err != nil {
+					log.V(1).Info("disconnecting the restarted master's clients", "pod", currentMasterName, "error", err.Error())
+				}
+				r.unpauseWrites(ctx, fenced)
+			}
 		}
 		switch {
 		case behindOf != "":
@@ -250,13 +284,14 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		v := views[p.Name]
 		role := kividbv1alpha1.RoleUnknown
 		// Last observed: a pod that cannot be asked keeps what it last
-		// reported. A master's offset is how its restart behind its
-		// replicas is recognised (regressedMaster), and its key count
-		// how emptied replicas are (withoutEmptied).
-		offset, keys := previous[p.Name].ReplicationOffset, previous[p.Name].Keys
+		// reported. A master's offset, stream and run are how its restart
+		// behind its replicas is recognised (regressedMaster), and its key
+		// count how emptied replicas are (withoutEmptied).
+		last := previous[p.Name]
+		offset, keys, replID, runID, inc := last.ReplicationOffset, last.Keys, last.ReplID, last.RunID, last.Incarnation
 		synced := false
 		if v.status != nil {
-			offset, keys = 0, v.status.KeyCount
+			offset, keys, replID, runID, inc = 0, v.status.KeyCount, "", v.status.RunID, incarnation(v.pod)
 		}
 
 		switch {
@@ -267,6 +302,11 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			}
 			if v.status != nil {
 				offset = v.status.ReplicationOffset
+				if v.status.Role == agentapi.RoleMaster {
+					// The offset is "as master" only in the stream the
+					// pod itself reports writing.
+					replID = v.status.MasterReplID
+				}
 			}
 			synced = v.ready && v.status != nil
 		case v.ready && v.status != nil:
@@ -282,6 +322,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				return nil, newMasterName, failoverHappened, err
 			}
 		default:
+			replID = "" // not the master's entry
 			// Not ready / agent unreachable: report unknown role until it
 			// recovers. Its label is left alone unless it says "master" --
 			// exactly one pod may carry that, see resolveCurrentMaster.
@@ -299,6 +340,9 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			ReplicationOffset: offset,
 			Synced:            synced,
 			Keys:              keys,
+			ReplID:            replID,
+			RunID:             runID,
+			Incarnation:       inc,
 		})
 	}
 
@@ -351,28 +395,131 @@ func resolveCurrentMaster(pods []corev1.Pod, views map[string]*podView, statusMa
 	return labeled[0]
 }
 
+// restartedMasterPause is how long a master that restarted behind its
+// replicas has its writes held while the role moves away from it. The
+// pause is lifted as soon as it is the new master's replica.
+const restartedMasterPause = 10 * time.Second
+
+// kividbContainerName is the engine's container in every pod.
+const kividbContainerName = "kividb"
+
 // regressedMaster recognises a master that restarted and lost writes its
 // replicas still hold. last is the master pod's status from the previous
-// reconcile, st what it reports now. A master's offset never goes down
-// while it runs (a promoted replica continues the offset of the stream it
-// followed), so an offset below the one last seen on the same pod, as the
-// master, means it restarted from older data; a replica that was in sync
-// and is ahead of it now holds writes it no longer has. It returns the
-// most caught-up such replica, "" if there is none.
-func regressedMaster(last kividbv1alpha1.KividbPodStatus, st *agentapi.StatusResponse, views map[string]*podView, synced map[string]bool) (string, int64) {
-	if last.Role != kividbv1alpha1.RoleMaster || last.ReplicationOffset <= 0 || st.ReplicationOffset >= last.ReplicationOffset {
+// reconcile; pod and st are the pod and what its agent reports now.
+//
+// It acts only on a restart of that same master. Offsets read from a
+// master that has kept running are never taken as lost writes: two
+// readings moments apart, one of them just after a promotion, or one
+// taken in another stream, can disagree without a write being lost. (In
+// the AKS run A3, a planned switchover was followed 0.3 s later by a
+// failover on such a reading, which discarded 314 acknowledged writes.)
+// So:
+//   - last must have been recorded while the pod was the master: with an
+//     agent that reports streams, in the stream it reported writing
+//     (last.ReplID; cleared when the role moves);
+//   - the engine must have restarted since: a new run_id, or, from an
+//     agent that does not report one, a new pod or a container restart;
+//   - it then lost writes if it went on with its stream from a lower
+//     offset, or started a new stream (as an engine that was killed
+//     does); one that went on from where it was (a clean stop) lost
+//     nothing.
+//
+// It returns the most caught-up replica that was in sync and has not been
+// resynced from the restarted master yet (it is not following its current
+// address with the link up), "" if there is none.
+func regressedMaster(last kividbv1alpha1.KividbPodStatus, pod *corev1.Pod, st *agentapi.StatusResponse, views map[string]*podView, synced map[string]bool, port int32) (string, int64) {
+	if last.Role != kividbv1alpha1.RoleMaster || last.ReplicationOffset <= 0 || !engineRestarted(last, pod, st) {
 		return "", 0
 	}
-	best, bestOffset := "", st.ReplicationOffset
+	streams := st.RunID != "" || st.MasterReplID != ""
+	if streams && last.ReplID == "" {
+		return "", 0 // no offset recorded as this stream's master to compare with
+	}
+	floor := st.ReplicationOffset
+	switch {
+	case streams && st.MasterReplID != last.ReplID:
+		floor = 0 // a new stream: its offset is no position in the old one
+	case st.ReplicationOffset >= last.ReplicationOffset:
+		return "", 0 // it went on from where it was
+	}
+	best, bestOffset := "", floor
 	for name, v := range views {
 		if name == last.Name || !v.ready || v.status == nil || v.status.Role != agentapi.RoleReplica || !synced[name] {
 			continue
+		}
+		if pod.Status.PodIP != "" && followsMaster(v.status, pod.Status.PodIP, port) && (v.status.MasterLinkUp == nil || *v.status.MasterLinkUp) {
+			continue // already resynced from the restarted master: nothing left to save on it
 		}
 		if o := v.status.ReplicationOffset; o > bestOffset || (o == bestOffset && best != "" && name < best) {
 			best, bestOffset = name, o
 		}
 	}
 	return best, bestOffset
+}
+
+// engineRestarted reports whether pod's engine has restarted since last
+// was recorded: its run_id changed or, when either reading has none (an
+// agent before 0.7.0), the pod was recreated or its kividb container
+// restarted. Nothing known either way is no restart.
+func engineRestarted(last kividbv1alpha1.KividbPodStatus, pod *corev1.Pod, st *agentapi.StatusResponse) bool {
+	if last.RunID != "" && st.RunID != "" {
+		return last.RunID != st.RunID
+	}
+	now := incarnation(pod)
+	return last.Incarnation != "" && now != "" && last.Incarnation != now
+}
+
+// incarnation identifies one run of pod's kividb container: the pod's UID
+// and the container's restart count. "" when the pod has no UID.
+func incarnation(pod *corev1.Pod) string {
+	if pod.UID == "" {
+		return ""
+	}
+	var restarts int32
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == kividbContainerName {
+			restarts = cs.RestartCount
+		}
+	}
+	return string(pod.UID) + "/" + strconv.FormatInt(int64(restarts), 10)
+}
+
+// forgetMasterOffsets clears the recorded stream of the named pods'
+// entries: after the master role has moved between them, neither entry's
+// offset is a reading of the master it will be compared with.
+func forgetMasterOffsets(statuses []kividbv1alpha1.KividbPodStatus, names ...string) {
+	for i := range statuses {
+		for _, n := range names {
+			if statuses[i].Name == n {
+				statuses[i].ReplID = ""
+			}
+		}
+	}
+}
+
+// pauseWrites holds the writes of pod's engine for d (CLIENT PAUSE ...
+// WRITE) and returns its address, or "" when that could not be done (the
+// pause is best effort: the caller goes on without it).
+func (r *KividbClusterReconciler) pauseWrites(ctx context.Context, pod *corev1.Pod, d time.Duration) string {
+	ip := pod.Status.PodIP
+	if ip == "" {
+		return ""
+	}
+	if _, err := r.Agent.Exec(ctx, ip, "CLIENT", "PAUSE", strconv.FormatInt(d.Milliseconds(), 10), "WRITE"); err != nil {
+		logf.FromContext(ctx).Info("could not hold the writes of the master being failed away from", "pod", pod.Name, "error", err.Error())
+		return ""
+	}
+	return ip
+}
+
+// unpauseWrites lifts a pause set by pauseWrites ("" does nothing).
+func (r *KividbClusterReconciler) unpauseWrites(ctx context.Context, ip string) {
+	if ip == "" {
+		return
+	}
+	if _, err := r.Agent.Exec(ctx, ip, "CLIENT", "UNPAUSE"); err != nil {
+		logf.FromContext(ctx).Error(err, "lifting a write pause (it ends by itself)", "ip", ip)
+	}
 }
 
 // followsMaster reports whether a replica is already configured to

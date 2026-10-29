@@ -139,6 +139,8 @@ type testPod struct {
 	ready           bool
 	unreadyFor      time.Duration
 	agent           *agentapi.StatusResponse // nil: agent unreachable
+	uid             types.UID
+	restarts        int32 // of the kividb container
 }
 
 func master(offset int64) *agentapi.StatusResponse {
@@ -184,8 +186,9 @@ func newRolesHarness(t *testing.T, statusMaster string, pods ...testPod) *rolesH
 			cond.LastTransitionTime = metav1.NewTime(time.Now().Add(-p.unreadyFor))
 		}
 		objs = append(objs, &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: p.name, Namespace: c.Namespace, Labels: labels},
-			Status:     corev1.PodStatus{PodIP: p.ip, Conditions: []corev1.PodCondition{cond}},
+			ObjectMeta: metav1.ObjectMeta{Name: p.name, Namespace: c.Namespace, Labels: labels, UID: p.uid},
+			Status: corev1.PodStatus{PodIP: p.ip, Conditions: []corev1.PodCondition{cond},
+				ContainerStatuses: []corev1.ContainerStatus{{Name: kividbContainerName, RestartCount: p.restarts}}},
 		})
 		if p.agent != nil {
 			agents.status[p.ip] = p.agent
@@ -391,14 +394,18 @@ func TestReconcileRoles_NoFailoverBeforeThreshold(t *testing.T) {
 // old address, hold those writes: one of them takes over, and the
 // restarted pod becomes its replica, rather than every replica being
 // resynced from the older data (A2a: 92 acknowledged writes lost).
+//
+// Killed, the engine starts a new stream (a new run_id, a new replication
+// ID, a low offset). Its writes are held from before the promotion until
+// it follows the new master.
 func TestReconcileRoles_MasterRestartedBehindItsReplicas(t *testing.T) {
 	h := newRolesHarness(t, "c1-0",
-		testPod{name: "c1-0", ip: "10.0.0.9", ready: true, agent: master(700)},
+		testPod{name: "c1-0", ip: "10.0.0.9", ready: true, agent: masterRun(700, "stream-b", "run-2")},
 		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1000)},
 		testPod{name: "c1-2", ip: "10.0.0.3", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 990)},
 	)
 	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
-		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: false, Synced: true, ReplicationOffset: 1000},
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: false, Synced: true, ReplicationOffset: 1000, ReplID: "stream-a", RunID: "run-1"},
 		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
 		{Name: "c1-2", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 990},
 	}
@@ -408,6 +415,232 @@ func TestReconcileRoles_MasterRestartedBehindItsReplicas(t *testing.T) {
 	h.assertLabels(map[string]string{"c1-0": "replica", "c1-1": "master", "c1-2": "replica"})
 	h.assertRole("10.0.0.9", agentapi.RoleReplica, "10.0.0.2")
 	h.assertRole("10.0.0.3", agentapi.RoleReplica, "10.0.0.2")
+	h.assertCallOrder(
+		"exec 10.0.0.9 CLIENT PAUSE 10000 WRITE",
+		"promote 10.0.0.2",
+		"replicaof 10.0.0.9 -> 10.0.0.2",
+		"exec 10.0.0.9 CLIENT KILL TYPE normal",
+		"exec 10.0.0.9 CLIENT UNPAUSE",
+	)
+	if h.agents.paused["10.0.0.9"] {
+		t.Error("the restarted master's writes are still held")
+	}
+}
+
+// The same with the same stream: a master that went on with its stream,
+// after a restart, from below where it was.
+func TestReconcileRoles_MasterRestartedBehindInItsOwnStream(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.9", ready: true, agent: masterRun(700, "stream-a", "run-2")},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1000)},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 1000, ReplID: "stream-a", RunID: "run-1"},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
+	}
+	if m, failover := h.reconcile(); m != "c1-1" || !failover {
+		t.Fatalf("master=%q failover=%v, want a failover to c1-1", m, failover)
+	}
+}
+
+// A master that stopped cleanly goes on with its stream from where it was:
+// it lost nothing, whatever a replica read a moment later says.
+func TestReconcileRoles_CleanlyRestartedMasterIsLeftAlone(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.9", label: "master", ready: true, agent: masterRun(1000, "stream-a", "run-2")},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1200)},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 1000, ReplID: "stream-a", RunID: "run-1"},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
+	}
+	if m, failover := h.reconcile(); m != "c1-0" || failover {
+		t.Fatalf("master=%q failover=%v, want c1-0 and no failover", m, failover)
+	}
+}
+
+// A master whose engine has not restarted is never failed away from on
+// its offsets: a reading below the last one is a reading, not a loss.
+func TestReconcileRoles_LowerOffsetWithoutARestartIsLeftAlone(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "master", ready: true, agent: masterRun(28521873, "stream-b", "run-1")},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: linkDown(replicaOf("10.0.0.1", 28525844))},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 28521980, ReplID: "stream-b", RunID: "run-1"},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 28521000},
+	}
+	if m, failover := h.reconcile(); m != "c1-0" || failover {
+		t.Fatalf("master=%q failover=%v, want c1-0 and no failover", m, failover)
+	}
+	for _, call := range h.agents.calls {
+		if strings.HasPrefix(call, "promote") || strings.Contains(call, "PAUSE") {
+			t.Fatalf("unexpected agent call: %s", call)
+		}
+	}
+}
+
+// A3 on AKS: a planned switchover from c1-0 to c1-1 under load, then
+// reconciles whose readings of the new master are moments stale (28521980
+// recorded, 28521873 read next) while c1-2, now following c1-1, reports
+// more. c1-1 never restarted: it stays the master, and nothing is
+// promoted or repointed at another master.
+func TestReconcileRoles_NoFailoverOnStaleReadingsAfterASwitchover(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "master", ready: true, uid: "u0", agent: masterRun(28518513, "stream-a", "run-0")},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, uid: "u1", agent: replicaRun("10.0.0.1", 28518513, "run-1")},
+		testPod{name: "c1-2", ip: "10.0.0.3", label: "replica", ready: true, uid: "u2", agent: replicaRun("10.0.0.1", 28518513, "run-2")},
+	)
+	h.pass() // statuses as the switchover pass reads them
+
+	var list corev1.PodList
+	if err := h.r.List(context.Background(), &list, client.InNamespace(h.cluster.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	statuses := h.cluster.Status.Pods
+	if to, err := h.r.switchover(context.Background(), h.cluster, list.Items, statuses, "c1-0", switchoverRequest{reason: "step-down"}); err != nil || to == "" {
+		t.Fatalf("switchover: %q, %v", to, err)
+	}
+	h.cluster.Status.Pods = statuses // written as read before the switchover (masterPod stays c1-0)
+	for _, s := range statuses {
+		if s.ReplID != "" {
+			t.Errorf("%s keeps the stream %q recorded before the role moved", s.Name, s.ReplID)
+		}
+	}
+	newMaster := h.agents.status["10.0.0.2"]
+	newMaster.MasterReplID = "stream-b" // the promoted pod goes on with the stream under a new ID
+
+	// The passes that follow, with the new master's offset read as it was
+	// a moment ago and c1-2 ahead of that reading.
+	for i, o := range []int64{28521980, 28521873, 28521900} {
+		newMaster.ReplicationOffset = o
+		h.agents.status["10.0.0.3"].ReplicationOffset = 28525844
+		h.agents.calls = nil
+		if m, failover := h.pass(); m != "c1-1" || failover {
+			t.Fatalf("pass %d (master offset %d): master=%q failover=%v, want c1-1 and no failover", i, o, m, failover)
+		}
+		for _, call := range h.agents.calls {
+			if strings.HasPrefix(call, "promote") || strings.HasSuffix(call, "-> 10.0.0.3") {
+				t.Fatalf("pass %d: %s", i, call)
+			}
+		}
+	}
+	h.assertLabels(map[string]string{"c1-0": "replica", "c1-1": "master", "c1-2": "replica"})
+}
+
+// From an agent that reports no run_id, the restart evidence is the pod's:
+// a recreated pod (a new UID) behind its replicas is failed away from; the
+// same pod, never restarted, is not.
+func TestReconcileRoles_RestartEvidenceWithoutRunID(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		uid      types.UID
+		restarts int32
+		failover bool
+	}{
+		{"recreated", "u-new", 0, true},
+		{"container restarted", "u-old", 1, true},
+		{"never restarted", "u-old", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRolesHarness(t, "c1-0",
+				testPod{name: "c1-0", ip: "10.0.0.9", label: "master", ready: true, uid: tc.uid, restarts: tc.restarts, agent: master(700)},
+				testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1000)},
+			)
+			h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+				{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 1000, Incarnation: "u-old/0"},
+				{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
+			}
+			if _, failover := h.reconcile(); failover != tc.failover {
+				t.Fatalf("failover=%v, want %v", failover, tc.failover)
+			}
+		})
+	}
+}
+
+// A replica that already follows the restarted master at its address,
+// link up, has been resynced from it: there is nothing left on it to save.
+func TestReconcileRoles_RestartedMasterWhoseReplicasResyncedIsLeftAlone(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "master", ready: true, agent: masterRun(50, "stream-b", "run-2")},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaRun("10.0.0.1", 60, "run-r")},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 1000, ReplID: "stream-a", RunID: "run-1"},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
+	}
+	if m, failover := h.reconcile(); m != "c1-0" || failover {
+		t.Fatalf("master=%q failover=%v, want c1-0 and no failover", m, failover)
+	}
+}
+
+// The status records a master's stream only from the master itself, and
+// none for a replica.
+func TestReconcileRoles_RecordsStreamOnlyForTheMaster(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "master", ready: true, uid: "u0", agent: masterRun(100, "stream-a", "run-0")},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, uid: "u1", restarts: 2, agent: replicaRun("10.0.0.1", 100, "run-1")},
+	)
+	h.pass()
+	want := map[string]kividbv1alpha1.KividbPodStatus{
+		"c1-0": {ReplID: "stream-a", RunID: "run-0", Incarnation: "u0/0"},
+		"c1-1": {ReplID: "", RunID: "run-1", Incarnation: "u1/2"},
+	}
+	for _, s := range h.cluster.Status.Pods {
+		w := want[s.Name]
+		if s.ReplID != w.ReplID || s.RunID != w.RunID || s.Incarnation != w.Incarnation {
+			t.Errorf("%s: replID=%q runID=%q incarnation=%q, want %q %q %q", s.Name, s.ReplID, s.RunID, s.Incarnation, w.ReplID, w.RunID, w.Incarnation)
+		}
+	}
+}
+
+func masterRun(offset int64, replID, runID string) *agentapi.StatusResponse {
+	st := master(offset)
+	st.MasterReplID, st.RunID = replID, runID
+	return st
+}
+
+// linkDown marks a replica's link to its master as down (reconnecting).
+func linkDown(st *agentapi.StatusResponse) *agentapi.StatusResponse {
+	down := false
+	st.MasterLinkUp = &down
+	return st
+}
+
+func replicaRun(host string, offset int64, runID string) *agentapi.StatusResponse {
+	st := replicaOf(host, offset)
+	st.RunID = runID
+	return st
+}
+
+// pass runs one reconcileRoles pass and persists its statuses and master
+// the way updateStatus would.
+func (h *rolesHarness) pass() (masterPod string, failover bool) {
+	h.t.Helper()
+	var list corev1.PodList
+	if err := h.r.List(context.Background(), &list, client.InNamespace(h.cluster.Namespace)); err != nil {
+		h.t.Fatal(err)
+	}
+	statuses, masterPod, failover, err := h.r.reconcileRoles(context.Background(), h.cluster, list.Items)
+	if err != nil {
+		h.t.Fatalf("reconcileRoles: %v", err)
+	}
+	h.cluster.Status.Pods, h.cluster.Status.MasterPod = statuses, masterPod
+	return masterPod, failover
+}
+
+// assertCallOrder checks that the agent calls include want, in this order.
+func (h *rolesHarness) assertCallOrder(want ...string) {
+	h.t.Helper()
+	i := 0
+	for _, call := range h.agents.calls {
+		if i < len(want) && call == want[i] {
+			i++
+		}
+	}
+	if i < len(want) {
+		h.t.Errorf("agent calls %v: missing %q (in this order: %v)", h.agents.calls, want[i], want)
+	}
 }
 
 // A master whose offset has only grown is left alone, even when a replica

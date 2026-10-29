@@ -302,10 +302,13 @@ to about that many seconds, it does not remove it.
 from its last snapshot, which may be older than its last acknowledged
 writes, while its replicas still hold them. If the replicas resynced from
 it, those writes would be gone from every copy. The operator recognises
-it (the master's offset is below the one it last recorded for it, and a
-replica that was in sync is ahead) and fails over to the replica holding
-the most instead; the restarted pod becomes its replica
-(`MasterRestartedBehind` and `Failover` Events). It works when the master
+it -- the master's engine restarted (a new `run_id`, or a new pod or
+container restart), it came back below the offset it had reached in its
+stream or with a new stream, and a replica that was in sync is ahead --
+and fails over to the replica holding the most instead; the restarted pod
+becomes its replica (`MasterRestartedBehind` and `Failover` Events), with
+its writes held until it is. A master that never restarted is not failed
+away from on its offsets, however they compare. It works when the master
 pod is recreated, as its replicas then follow its old address until the
 operator points them anywhere. When only the container restarts, in
 place, with the same address, the replicas reconnect to it on their own
@@ -639,6 +642,9 @@ status:
       role: master
       ready: true
       replicationOffset: 184320
+      replID: 9179439ba2951dfa54bd550abc5bc2fd1485bbac  # the master's stream
+      runID: 3f1c...                                  # the engine's run_id
+      incarnation: 6b0e.../0                          # pod UID / container restarts
   lastFailoverTime: "2026-06-12T03:14:22Z"
   observedGeneration: 7
   conditions:

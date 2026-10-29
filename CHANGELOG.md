@@ -165,6 +165,28 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 
 ### Fixed
 
+Found by a second end-to-end test on AKS (operator master on engine
+v1.2.0-rc2):
+
+- **A false `MasterRestartedBehind` failover right after a planned
+  switchover lost 314 acknowledged writes** (new in this release). The
+  check compared the new master's offset with one recorded for it a moment
+  earlier, readings taken at different times, and failed over from a
+  master that had never restarted; the master it failed away from kept
+  taking writes until its resync from the replica promoted in its place
+  discarded them. Now the check needs evidence that the master's engine
+  restarted (a new engine `run_id`, or, from an older agent, a new pod or
+  a container restart), compares offsets only within the stream the pod
+  reported writing as the master (`status.pods[].replID`, cleared when the
+  role moves), and skips replicas already resynced from the restarted
+  master. When it does fail over, the restarted master's writes are held
+  (`CLIENT PAUSE WRITE`) until it follows the new master, as in a
+  switchover. The agent reports the engine's `run_id` and, on a master,
+  its `master_replid`; `status.pods[]` gains `replID`, `runID` and
+  `incarnation`. Helm does not upgrade CRDs: apply the new
+  `kividbclusters` CRD, or these fields are dropped and the check never
+  fires.
+
 Found by an end-to-end test on AKS (replicated: 1 master + 2 replicas
 under 800 writes/s; sharded: 3 × (1 + 2)), which checked every
 acknowledged write afterwards.

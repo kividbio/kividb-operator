@@ -303,6 +303,12 @@ spec:
                       replicationOffset:
                         type: integer
                         format: int64
+                      replID:
+                        type: string
+                      runID:
+                        type: string
+                      incarnation:
+                        type: string
                       shard:
                         type: integer
                       nodeID:

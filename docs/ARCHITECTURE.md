@@ -175,16 +175,28 @@ does, in order:
    `spec.failover.unhealthyThresholdSeconds` (default 30s), or its agent
    reports a role other than master, a failover is triggered (unless
    `spec.failover.enabled: false`). So is one for a master that **came
-   back behind its replicas**: its replication offset is below the one the
-   status last recorded for it as the master (a master's offset never goes
-   down while it runs, so it restarted from an older snapshot), and a
-   replica that was in sync holds more. Letting the replicas resync from
-   it would drop, on every copy, the writes it acknowledged after that
-   snapshot; the replica holding the most is promoted instead and the
-   restarted pod becomes its replica (`MasterRestartedBehind` Event). The
-   status keeps a pod's last offset and key count while it cannot be asked,
-   which is what makes this, and the empty-replica check below, work across
-   the pod's restart.
+   back behind its replicas**. This needs evidence that the master's
+   engine restarted since the status last recorded it as the master: a
+   new engine `run_id` (`status.pods[].runID`) or, from an agent that does
+   not report one, a new pod UID or a container restart
+   (`status.pods[].incarnation`). Offsets of a master that kept running
+   are never taken as lost writes: two readings moments apart, or one
+   taken just after a switchover, can disagree without a write being
+   lost. The restarted master lost writes if it went on with its stream
+   (`status.pods[].replID`, recorded only while the pod reports being that
+   stream's master, and cleared when the role moves) from a lower offset,
+   or started a new stream, as a killed engine does; and a replica that
+   was in sync, and has not been resynced from it yet, holds more. Letting
+   the replicas resync from it would drop, on every copy, the writes it
+   acknowledged after its last snapshot; the replica holding the most is
+   promoted instead and the restarted pod becomes its replica
+   (`MasterRestartedBehind` Event). Its writes are held (`CLIENT PAUSE
+   WRITE`) from before the promotion until it follows the new master and
+   its clients have been disconnected, as in a planned switchover: what it
+   acknowledged after coming back is discarded with its data. The status
+   keeps a pod's last offset, key count, run and stream while it cannot be
+   asked, which is what makes this, and the empty-replica check below,
+   work across the pod's restart.
 5. **Election**: among the remaining ready pods, pick the one with the
    highest `replicationOffset` (most caught-up); ties break on pod name
    for determinism. Call `POST /promote` on it, move the

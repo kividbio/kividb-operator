@@ -202,7 +202,11 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 			if v, err := strconv.ParseInt(fields["connected_slaves"], 10, 64); err == nil {
 				out.ConnectedReplicas = &v
 			}
+			out.MasterReplID = fields["master_replid"]
 		}
+	}
+	if info, err := c.Info("server"); err == nil {
+		out.RunID = respclient.ParseInfo(info)["run_id"]
 	}
 	if lastSave, err := c.LastSave(); err == nil {
 		out.LastSaveUnix = lastSave

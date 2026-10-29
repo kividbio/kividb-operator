@@ -56,8 +56,16 @@ type StatusResponse struct {
 	MasterHost        string `json:"masterHost,omitempty"`
 	MasterPort        int32  `json:"masterPort,omitempty"`
 	ReplicationOffset int64  `json:"replicationOffset"`
-	LastSaveUnix      int64  `json:"lastSaveUnix"`
-	AofEnabled        bool   `json:"aofEnabled"`
+	// MasterReplID: on a master, the ID of the replication stream it
+	// writes (INFO replication master_replid); ReplicationOffset is a
+	// position in that stream. A promotion, and a restart after a kill,
+	// start a new one. Absent on a replica, and from agents before 0.7.0.
+	MasterReplID string `json:"masterReplID,omitempty"`
+	// RunID is the engine's run_id (INFO server): new every time the
+	// engine process starts. Absent from agents before 0.7.0.
+	RunID        string `json:"runID,omitempty"`
+	LastSaveUnix int64  `json:"lastSaveUnix"`
+	AofEnabled   bool   `json:"aofEnabled"`
 	// KeyCount is the number of keys across all databases (INFO keyspace).
 	// KeyCountKnown tells a real 0 apart from an agent too old to report
 	// the field at all.
