@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -142,12 +143,20 @@ func (s *server) handleAPIListDbOps(w http.ResponseWriter, r *http.Request) {
 	if !s.requireNS(w, namespace) {
 		return
 	}
+	// By the DbOps' own cluster reference: one created with kubectl
+	// carries no kividb.io/cluster label (the GUI's own do).
 	var list kividbv1alpha1.KividbDbOpsList
-	if err := s.ctrlClient.List(r.Context(), &list, client.InNamespace(namespace), client.MatchingLabels{"kividb.io/cluster": name}); err != nil {
+	if err := s.ctrlClient.List(r.Context(), &list, client.InNamespace(namespace)); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, list.Items)
+	ops := make([]kividbv1alpha1.KividbDbOps, 0, len(list.Items))
+	for _, op := range list.Items {
+		if op.Spec.ClusterRef.Name == name {
+			ops = append(ops, op)
+		}
+	}
+	writeJSON(w, http.StatusOK, ops)
 }
 
 func (s *server) handleAPILiveStatus(w http.ResponseWriter, r *http.Request) {
@@ -444,10 +453,23 @@ func (s *server) handleAPIPromote(w http.ResponseWriter, r *http.Request) {
 		// replica gives it up when it has not caught up and won its
 		// election within 5 s, and the master carries on. So this reports
 		// a request, and the view shows whether the role moved.
-		if _, err := postAgentJSON(r.Context(), target.Status.PodIP, "/cluster/failover", nil); err != nil {
+		if _, err := s.postAgent(r.Context(), target.Status.PodIP, "/cluster/failover", nil); err != nil {
 			writeJSONError(w, http.StatusBadGateway, err)
 			return
 		}
+		// The operator reports the handovers it asks for itself; this one
+		// is the GUI's, so the GUI says so (the operator's ShardSwitchover).
+		shard, master := target.Labels[shardLabel], ""
+		for _, st := range c.Status.Shards {
+			if strconv.Itoa(int(st.Index)) == shard {
+				master = st.MasterPod
+			}
+		}
+		if master == "" {
+			master = "its master"
+		}
+		s.clusterEvent(r.Context(), c, corev1.EventTypeNormal, "ShardSwitchover",
+			fmt.Sprintf("shard %s: asked %s to take over from %s (CLUSTER FAILOVER), from the GUI", shard, body.Pod, master))
 		writeJSON(w, http.StatusAccepted, map[string]string{"requested": body.Pod})
 		return
 	}
@@ -471,6 +493,38 @@ func (s *server) handleAPIPromote(w http.ResponseWriter, r *http.Request) {
 // switchoverToAnnotation asks the operator for a switchover to a pod
 // (internal/controller.SwitchoverToAnnotation).
 const switchoverToAnnotation = "kividb.io/switchover-to"
+
+// postAgent is postAgentJSON, unless a test replaces it.
+func (s *server) postAgent(ctx context.Context, podIP, path string, payload any) ([]byte, error) {
+	if s.agentPost != nil {
+		return s.agentPost(ctx, podIP, path, payload)
+	}
+	return postAgentJSON(ctx, podIP, path, payload)
+}
+
+// clusterEvent records an Event on cluster c, as the operator's own are,
+// for an action the GUI took itself. A failure is only logged: the action
+// has been taken.
+func (s *server) clusterEvent(ctx context.Context, c *kividbv1alpha1.KividbCluster, eventType, reason, message string) {
+	now := metav1.Now()
+	ev := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("%s.%x", c.Name, now.UnixNano()), Namespace: c.Namespace},
+		InvolvedObject: corev1.ObjectReference{
+			APIVersion: kividbv1alpha1.GroupVersion.String(), Kind: "KividbCluster",
+			Name: c.Name, Namespace: c.Namespace, UID: c.UID, ResourceVersion: c.ResourceVersion,
+		},
+		Reason:         reason,
+		Message:        message,
+		Type:           eventType,
+		Source:         corev1.EventSource{Component: "kividb-operator-gui"},
+		FirstTimestamp: now,
+		LastTimestamp:  now,
+		Count:          1,
+	}
+	if _, err := s.clientset.CoreV1().Events(c.Namespace).Create(ctx, ev, metav1.CreateOptions{}); err != nil {
+		log.Printf("recording event %s on %s/%s: %v", reason, c.Namespace, c.Name, err)
+	}
+}
 
 func (s *server) handleAPISnapshot(w http.ResponseWriter, r *http.Request) {
 	namespace := r.PathValue("namespace")

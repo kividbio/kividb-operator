@@ -198,6 +198,15 @@ v1.2.0-rc2):
   `RolloutWaiting` Warning Event and a log line, repeated every 10
   minutes while the wait lasts. The rollout still waits as before. The
   agent reports `master_last_io_seconds_ago` in its cluster status too.
+- **GUI: a cluster's operations list was empty for a `KividbDbOps`
+  created with kubectl.** It was filtered by a `kividb.io/cluster` label
+  that only the GUI's own DbOps carry; it now goes by `spec.clusterRef`.
+- **GUI: promoting a shard's replica left no Event.** The GUI asks the
+  engine for `CLUSTER FAILOVER` itself, so the operator never saw it; the
+  GUI now records a `ShardSwitchover` Event on the cluster, as the
+  operator does for its own handovers (and as a replicated cluster's
+  promote gets a `Switchover` Event). The GUI's ClusterRole gains
+  `create` on `events`.
 
 Found by an end-to-end test on AKS (replicated: 1 master + 2 replicas
 under 800 writes/s; sharded: 3 × (1 + 2)), which checked every

@@ -236,7 +236,8 @@ services, events, statefulsets, cronjobs; `get`/`list` on storageclasses
 (the new-cluster form); **`create`, `patch`, `update` and `delete` on
 `kividbclusters`**; **`create` on `kividbdbops`**; **`delete` on pods**;
 **`get` on `pods/log`**; **`create` on `jobs`** (a sharded cluster's
-snapshot). Never `secrets` via the API clients.
+snapshot); **`create` on `events`** (the `ShardSwitchover` Event of a shard
+promote). Never `secrets` via the API clients.
 
 ## Building the image
 
