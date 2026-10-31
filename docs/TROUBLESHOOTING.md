@@ -128,6 +128,28 @@ kubectl annotate kividbcluster my-cluster kividb.io/allow-empty-failover=true
 
 Remove the annotation again afterwards.
 
+## `PersistenceDisabled`, `MasterRestartedEmpty`, `ShardDataLost`
+
+- **`PersistenceDisabled`** (and the `Persistence` condition `False`): the
+  cluster's `KividbConfig` sets `appendonly no`. The engine never
+  snapshots on a schedule, so a pod whose engine is killed restarts with
+  what it saved at its last clean shutdown or full sync, often nothing.
+  Remove the directive (the operator then writes `appendonly yes`) unless
+  the data can be lost. See
+  [CONFIGURATION.md](CONFIGURATION.md#persistence-the-append-only-file).
+- **`MasterRestartedEmpty`** (sharded): a shard master restarted with less
+  than half the keys its replica holds, typically without the append-only
+  file. The operator holds the master's writes and has the replica take
+  over (`CLUSTER FAILOVER FORCE`, then `TAKEOVER`);
+  `MasterRestartedEmptyResolved` follows when it has. If the condition
+  `MasterRestartedEmpty` says `Stalled`, the replica did not take over
+  after 6 requests: check its log, and if it still holds the data, run
+  `CLUSTER FAILOVER TAKEOVER` on it yourself.
+- **`ShardDataLost`** (sharded): a shard master restarted with less than
+  half of what it last reported and no replica of the shard holds more,
+  or the replica resynced from it before it could take over. The writes
+  it lost are only in a backup now. Turn the append-only file back on.
+
 ## A rolling restart stops moving (`RolloutWaiting`)
 
 The cluster is `Running` and `Ready`, but pods stay on the old template.

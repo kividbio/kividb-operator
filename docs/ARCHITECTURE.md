@@ -132,7 +132,9 @@ does, in order:
 3. Create/update the `<cluster>-auth` Secret (ACL file) and
    `<cluster>-config` Secret (kividb.conf, rendered from the
    `KividbConfig`'s `spec.directives` plus the operator-owned
-   `port`/`aclfile`/TLS directives — `replicaof` is deliberately never
+   `port`/`aclfile`/TLS directives, and `appendonly yes` /
+   `appendfsync everysec` unless the `KividbConfig` says whether the
+   append-only file is on — `replicaof` is deliberately never
    written here; topology is runtime-managed, not config-file-managed).
 4. Create/update the headless, master and replica Services.
 5. Create/update the StatefulSet (pod template only; `Selector`,

@@ -19,7 +19,9 @@ default and recommended — see
 [CONFIGURATION.md](CONFIGURATION.md#source-master-or-replica) for the
 trade-off). Whichever pod that Service resolves to does the actual work
 via its own `agent` sidecar: `BGSAVE`, wait for `LASTSAVE` to advance,
-`tar.gz` `dump.kdb` (+ `appendonly.aof` if AOF is enabled), stream it
+`tar.gz` `dump.kdb` (+ `appendonly.aof`, which the operator turns on by
+default from 0.7.0, see
+[CONFIGURATION.md](CONFIGURATION.md#persistence-the-append-only-file)), stream it
 straight into your S3-compatible bucket, then delete objects beyond
 `spec.retention`.
 
@@ -66,7 +68,12 @@ with the shard's error, and the run is pruned with the old ones.
 - The `KividbSnapshot` has `status.objectKey` set to the manifest and
   `status.shards[]` (each shard's source pod and size).
 - **Restoring** a sharded cluster (`bootstrapFromSnapshot`) is not
-  supported yet. A manifest has what a restore needs.
+  supported yet. A manifest has what a restore needs. A replicated
+  cluster whose `bootstrapFromSnapshot` names a sharded run's
+  `KividbSnapshot` is refused before any restore Job runs
+  (`status.bootstrap.phase: Failed`, a `BootstrapRefused` Event): one
+  shard's archive holds only that shard's slots. To get at one shard's
+  data, restore its archive by hand (see [Manual restore](#manual-restore-legacy--emergency)).
 
 ## Configuring backups
 

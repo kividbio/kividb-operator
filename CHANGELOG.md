@@ -25,6 +25,15 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   its replicas between `MULTI` and `EXEC`; a 1.1.x replica still applies
   every write, but logs `Replicated command error (non-fatal): ERR unknown
   command 'MULTI'` (and `'EXEC'`) for each, until it is upgraded too.
+- **The append-only file is on by default** (`appendonly yes`,
+  `appendfsync everysec`), for every cluster whose `KividbConfig` does not
+  set `appendonly` itself. It comes with the rolling restart above. Writes
+  go through the file, so expect fewer writes a second at high
+  concurrency, and size the volumes for the log too. `appendonly: "no"` in
+  a `KividbConfig` keeps the old behaviour, with a `Persistence` condition
+  and a Warning Event that say what it risks: without it, a killed engine
+  comes back with only its last shutdown or full-sync snapshot, often
+  nothing (see Fixed).
 - **A `KividbConfig` directive the engine refuses stops the server.** 1.2
   accepts Redis's own settings with a warning and applies some it used to
   ignore, but a name that is neither KiviDB's nor Redis's, or a bad value,
@@ -164,6 +173,78 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   for engine release candidates, which are on GHCR only.
 
 ### Fixed
+
+Found by a third end-to-end test on AKS (operator master 853cd01 on an
+engine 1.2.0 candidate):
+
+- **A force-killed shard master lost its whole shard's data** (new in
+  this release: sharded clusters). The engine never snapshots on a
+  schedule, and the operator wrote no `appendonly` (for any cluster), so
+  there was no persistence at all. The master, deleted with
+  `--grace-period=0 --force`, was back in about a second -- inside the 5 s
+  node timeout, so no failover -- with its node ID, its slots and 0 keys.
+  Its replica refused to full-sync from a master with no keys, but asked
+  again every 10 s, and once the master had taken a few writes it went
+  through: "Dropped the 25939 local keys before loading 987". The cluster
+  stayed `Ready`, with no Event; a second kill lost 53,271 more. With
+  `appendonly yes` the same kill lost nothing. Now:
+  - **The append-only file is on by default**, for sharded and replicated
+    clusters alike: the operator writes `appendonly yes` and `appendfsync
+    everysec` unless the `KividbConfig` sets `appendonly` (or `aof`)
+    itself. `appendonly: "no"` opts out; the new `Persistence` condition
+    is then `False` (`AppendOnlyDisabled`) and a `Warning` Event
+    `PersistenceDisabled` is recorded when it turns so. See
+    [CONFIGURATION.md](docs/CONFIGURATION.md#persistence-the-append-only-file)
+    for the cost (write throughput, disk) and the trade-off.
+  - **A shard master that restarted with less than its replica holds is
+    failed away from.** When a shard master's engine started less than 2
+    minutes ago and a replica of its shard holds more than twice its keys,
+    the operator holds the master's writes (`CLIENT PAUSE WRITE`, which
+    also keeps an empty master empty, so the replica's full-sync guard
+    keeps refusing it) and has the replica take over with `CLUSTER
+    FAILOVER FORCE`, then `TAKEOVER` (at once with a single shard). It
+    asks a restarted master's agent before the pod is Ready. Events
+    `MasterRestartedEmpty`, `MasterRestartedEmptyResolved` and, when the
+    replica had resynced first or no replica held more, `ShardDataLost`;
+    condition `MasterRestartedEmpty` (`FailingOver`, `Stalled`,
+    `FailedOver`, `DataLost`) for 10 minutes. This is a safety net, not a
+    fix: a client that kept the pod's address (a container restarted in
+    place) writes to it at once, and the replica's first resync, about a
+    second after the restart, then goes through before any controller can
+    act. In a kind test without persistence, a forced delete lost 54 and
+    65 writes instead of the shard (takeover 0.7-1.0 s after the engine
+    started); an in-place kill still lost the shard (the replica resynced
+    0.16-0.43 s after the engine started), reported as `ShardDataLost`. The agent's `/cluster/status` reports the engine's `run_id`,
+    uptime, key count, `aof_enabled` and `loading`, and
+    `/cluster/failover` takes `{"mode": "force"|"takeover"}`; a sharded
+    cluster's `status.pods[]` record `keys`, `runID` and `incarnation`.
+    Needs the 0.7.0 agent image.
+- **Every planned handover of a shard master was also reported as a
+  `Warning` `ShardFailover`** (new in this release). The move was taken as
+  planned only if the old master's pod still had its step-down annotation
+  or deletion timestamp when the move was seen, and a deleted pod was by
+  then gone or back without them. The operator now remembers the
+  handovers it asked for (2 minutes), and the console's Promote notes the
+  replica it promoted on the cluster (`kividb.io/shard-promote`) before
+  asking for it: both are `Normal` `ShardSwitchover`.
+- **A sharded password change recorded no `PasswordChanged` Event**, and
+  other Events went missing after a rollout. client-go drops an object's
+  Events past 25, then lets one through every 5 minutes; one rollout of a
+  sharded cluster used that up. The operator's limit is now 100, then one
+  every 5 seconds.
+- **Removing a shard made its StatefulSet again** (new in this release).
+  On 4 → 3 the operator deleted the removed shard's StatefulSet and
+  volumes, and a pass that still read the change as under way (its status
+  a moment behind) created the StatefulSet again: two new pods on two new
+  disks, removed again 30 s later. A removed shard's StatefulSet (and
+  disruption budget) is now only updated while it exists, never created,
+  and it is deleted in the foreground, so it stays until its pods are
+  gone.
+- **A replicated cluster bootstrapped from a sharded cluster's backup**
+  ran its restore Job on the run's `manifest.json` ("gzip: invalid
+  header"), failed, and kept saying "restore Job running". It is refused
+  before any Job runs (`BootstrapRefused`), and a failed restore Job's
+  message says so.
 
 Found by a second end-to-end test on AKS (operator master on engine
 v1.2.0-rc2):
