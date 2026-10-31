@@ -96,7 +96,7 @@ before anything is created. **Copy** puts it on the clipboard for
 works and the manifest is shown, but nothing can be created.
 
 Default engine image when `spec.image` is empty:
-`docker.io/kividb/kividb:v1.1.2`.
+`docker.io/kividb/kividb:v1.1.3`.
 
 ### JSON API
 
@@ -208,5 +208,5 @@ services, events, statefulsets, cronjobs; `get`/`list` on storageclasses
 ## Building the image
 
 ```sh
-docker build -f Dockerfile.gui -t docker.io/kividb/kividb-operator-gui:0.6.0 .
+docker build -f Dockerfile.gui -t docker.io/kividb/kividb-operator-gui:0.6.1 .
 ```

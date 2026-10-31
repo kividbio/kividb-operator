@@ -17,7 +17,7 @@ import (
 // defaultKividbImage mirrors internal/controller/names.go's
 // DefaultKividbImage -- kept in sync manually rather than imported, same
 // rationale as the naming helpers below.
-const defaultKividbImage = "docker.io/kividb/kividb:v1.1.2"
+const defaultKividbImage = "docker.io/kividb/kividb:v1.1.3"
 
 // Object naming conventions below mirror the frozen convention documented
 // in docs/_internal-spec.md and implemented in internal/controller/names.go
@@ -114,8 +114,8 @@ func summarizeCluster(c *kividbv1alpha1.KividbCluster) ClusterSummary {
 	}
 }
 
-// imageTag is an image reference's tag ("v1.1.2-lua" of
-// "docker.io/kividb/kividb:v1.1.2-lua"), without any digest; "" if it has
+// imageTag is an image reference's tag ("v1.1.3-lua" of
+// "docker.io/kividb/kividb:v1.1.3-lua"), without any digest; "" if it has
 // none.
 func imageTag(image string) string {
 	if i := strings.IndexByte(image, '@'); i >= 0 {

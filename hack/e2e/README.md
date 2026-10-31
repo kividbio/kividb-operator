@@ -28,17 +28,17 @@ minikube start --cpus=4 --memory=6144 --driver=docker
 | `docker.io/kividb/kividb-operator:${OPERATOR_TAG}` | Manager |
 | `docker.io/kividb/kividb-operator-agent:${OPERATOR_TAG}` | Sidecar + backup-trigger |
 | `docker.io/kividb/kividb-operator-gui:${OPERATOR_TAG}` | Optional GUI |
-| `docker.io/kividb/kividb:v1.1.2` (+ `-tls`, `-lua`, `-full`) | Engine variants |
+| `docker.io/kividb/kividb:v1.1.3` (+ `-tls`, `-lua`, `-full`) | Engine variants |
 | `bitnamilegacy/minio`, `bitnamilegacy/minio-client` | In-cluster S3 for snapshots (override with `MINIO_IMAGE` / `MINIO_MC_IMAGE`) |
 | `prometheus-community/kube-prometheus-stack` | Optional monitoring |
 
 Build operator images locally, then load them into minikube:
 
 ```bash
-make docker-build VERSION=0.6.0-local
-# or: docker build -t docker.io/kividb/kividb-operator:0.6.0-local -f Dockerfile .
-LOAD_IMAGES=1 OPERATOR_TAG=0.6.0-local make e2e
-# Pre-GA engine: KIVIDB_VERSION=v1.1.2-rc1 LOAD_IMAGES=1 OPERATOR_TAG=0.6.0-local make e2e
+make docker-build VERSION=0.6.1-local
+# or: docker build -t docker.io/kividb/kividb-operator:0.6.1-local -f Dockerfile .
+LOAD_IMAGES=1 OPERATOR_TAG=0.6.1-local make e2e
+# Pre-GA engine: KIVIDB_VERSION=v1.1.2-rc1 LOAD_IMAGES=1 OPERATOR_TAG=0.6.1-local make e2e
 ```
 
 ## Quick start
@@ -63,9 +63,9 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `OPERATOR_TAG` | `0.6.0-local` | Manager / agent / GUI image tag |
+| `OPERATOR_TAG` | `0.6.1-local` | Manager / agent / GUI image tag |
 | `OPERATOR_REGISTRY` | `docker.io/kividb` | Image registry prefix |
-| `KIVIDB_VERSION` | `v1.1.2` | Engine tag prefix (`v1.1.2`, or e.g. `v1.1.2-rc1` pre-GA) |
+| `KIVIDB_VERSION` | `v1.1.3` | Engine tag prefix (`v1.1.3`, or e.g. `v1.1.2-rc1` pre-GA) |
 | `LOAD_IMAGES` | `0` | `1` → `minikube image load` for operator (+ engine in compat) |
 | `STRICT_TLS` | `0` | `1` → fail if TLS port is not LISTEN (else warn; ROADMAP) |
 | `STORAGE_CLASS` | `standard` | PVC StorageClass (minikube default) |
