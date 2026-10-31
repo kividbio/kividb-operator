@@ -13,11 +13,11 @@ metadata:
   namespace: default
 spec:
   replicas: 3 # 1 master + 3 replicas = 4 pods total
-  image: docker.io/kividb/kividb:v1.1.2
+  image: docker.io/kividb/kividb:v1.1.3
   imagePullPolicy: IfNotPresent
   # imagePullSecrets:
   #   - name: registry-pull-secret
-  agentImage: docker.io/kividb/kividb-operator-agent:0.6.0
+  agentImage: docker.io/kividb/kividb-operator-agent:0.6.1
   port: 6380
 
   # Configuration, ACL users, and the backup schedule/destination are all

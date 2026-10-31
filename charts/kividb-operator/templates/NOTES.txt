@@ -29,7 +29,7 @@ kividb-operator {{ .Chart.AppVersion }} has been installed into namespace "{{ .R
      name: my-kividb
      namespace: default
    spec:
-     image: docker.io/kividb/kividb:v1.1.2
+     image: docker.io/kividb/kividb:v1.1.3
      storage:
        size: 5Gi
    EOF

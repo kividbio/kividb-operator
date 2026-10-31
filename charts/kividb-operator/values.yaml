@@ -54,7 +54,7 @@ manager:
 
   image:
     repository: docker.io/kividb/kividb-operator
-    tag: "0.6.0"
+    tag: "0.6.1"
     pullPolicy: IfNotPresent
 
   resources:
@@ -101,7 +101,7 @@ manager:
 agent:
   image:
     repository: docker.io/kividb/kividb-operator-agent
-    tag: "0.6.0"
+    tag: "0.6.1"
     pullPolicy: IfNotPresent
   resources:
     requests:
@@ -142,7 +142,7 @@ gui:
 
   image:
     repository: docker.io/kividb/kividb-operator-gui
-    tag: "0.6.0"
+    tag: "0.6.1"
     pullPolicy: IfNotPresent
 
   service:

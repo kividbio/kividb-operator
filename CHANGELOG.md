@@ -6,6 +6,28 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-01
+
+A patch release of 0.6.0. The default engine is kividb **1.1.3**, a
+security release of kividb 1.1.
+
+### Security
+
+- **Default engine `docker.io/kividb/kividb:v1.1.3`** (it was `v1.1.2`):
+  in the controller, the CRD, the chart, the GUI, the samples and the docs.
+  **A `KividbCluster` that leaves `spec.image` unset moves to 1.1.3 when the
+  operator is upgraded**, the way every rollout goes: the replicas are
+  restarted first, then the operator switches over to an up-to-date replica,
+  and the old master is restarted last. Set `spec.image` to stay on a
+  version.
+
+### Changed
+
+- Default agent image **`docker.io/kividb/kividb-operator-agent:0.6.1`**.
+  A cluster that leaves `spec.agentImage` unset rolls to it in the same
+  rollout.
+- The e2e suite tests kividb 1.1.3 by default.
+
 ## [0.6.0] - 2026-10-24
 
 A new management GUI. The default engine stays kividb **1.1.2**.
