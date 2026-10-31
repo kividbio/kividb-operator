@@ -29,9 +29,37 @@ type shardPod struct {
 	index  int32
 	ready  bool
 	status *agentapi.ClusterStatusResponse // nil: not ready, or the agent did not answer
+	// probe is what the agent of a pod that is not Ready yet, but whose
+	// engine runs, answered: only the check for a master that restarted
+	// with less than its replicas hold (shard_restart.go) looks at it. Such
+	// a master is back, owning its slots, long before it is Ready.
+	probe *agentapi.ClusterStatusResponse
 }
 
 func (p *shardPod) ip() string { return p.pod.Status.PodIP }
+
+// seen is what the pod's agent answered: status, or for a pod that is not
+// Ready, probe.
+func (p *shardPod) seen() *agentapi.ClusterStatusResponse {
+	if p.status != nil {
+		return p.status
+	}
+	return p.probe
+}
+
+// probeTimeout bounds asking a pod that is not Ready: its engine may be
+// hung.
+const probeTimeout = 1500 * time.Millisecond
+
+// engineRunning reports whether the pod's kividb container is running.
+func engineRunning(pod *corev1.Pod) bool {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == kividbContainerName {
+			return cs.State.Running != nil
+		}
+	}
+	return false
+}
 
 func (p *shardPod) myself() (agentapi.ClusterNode, bool) {
 	if p.status == nil {
@@ -60,7 +88,7 @@ func (r *KividbClusterReconciler) observeShardedPods(ctx context.Context, c *kiv
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
 	for _, sp := range out {
-		if !sp.ready || sp.ip() == "" {
+		if sp.ip() == "" || (!sp.ready && (!engineRunning(sp.pod) || sp.pod.DeletionTimestamp != nil)) {
 			continue
 		}
 		wg.Add(1)
@@ -68,6 +96,14 @@ func (r *KividbClusterReconciler) observeShardedPods(ctx context.Context, c *kiv
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if !sp.ready {
+				pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+				defer cancel()
+				if st, err := r.Agent.ClusterStatus(pctx, sp.ip()); err == nil && st.Enabled && st.MyID != "" {
+					sp.probe = st
+				}
+				return
+			}
 			if st, err := r.Agent.ClusterStatus(ctx, sp.ip()); err == nil && st.Enabled && st.MyID != "" {
 				sp.status = st
 			}
@@ -463,15 +499,22 @@ func shardedStatus(c *kividbv1alpha1.KividbCluster, pods []*shardPod) (kividbv1a
 
 	// A pod whose agent does not answer keeps the node ID it last
 	// reported: the node is still that pod's (see orphanNodes).
-	lastNodeID := map[string]string{}
+	// So do its key count and engine run: how a master that restarted with
+	// less than it had is recognised (shard_restart.go).
+	last := map[string]kividbv1alpha1.KividbPodStatus{}
 	for _, ps := range c.Status.Pods {
-		lastNodeID[ps.Name] = ps.NodeID
+		last[ps.Name] = ps
 	}
 	c.Status.Pods = c.Status.Pods[:0]
 	ready := 0
 	for _, p := range pods {
 		shard := p.shard
-		st := kividbv1alpha1.KividbPodStatus{Name: p.pod.Name, Role: roleOf(p), Ready: p.ready, Shard: &shard, NodeID: lastNodeID[p.pod.Name]}
+		prev := last[p.pod.Name]
+		st := kividbv1alpha1.KividbPodStatus{Name: p.pod.Name, Role: roleOf(p), Ready: p.ready, Shard: &shard,
+			NodeID: prev.NodeID, Keys: prev.Keys, RunID: prev.RunID, Incarnation: prev.Incarnation}
+		if seen := p.seen(); seen != nil && seen.KeyCountKnown {
+			st.Keys, st.RunID, st.Incarnation = seen.KeyCount, seen.RunID, incarnation(p.pod)
+		}
 		if p.status != nil {
 			st.NodeID = p.status.MyID
 			st.ReplicationOffset = p.status.ReplicationOffset

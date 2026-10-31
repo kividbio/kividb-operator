@@ -33,7 +33,9 @@ type fakeEngine struct {
 	// abandonFailovers: CLUSTER FAILOVER says OK and nothing moves, as
 	// when the replica gives a manual failover up (engine 1.2).
 	abandonFailovers bool
-	moved            int // slots moved by imports
+	// refuseForced: CLUSTER FAILOVER FORCE says OK and wins no election.
+	refuseForced bool
+	moved        int // slots moved by imports
 }
 
 type fakeNode struct {
@@ -45,6 +47,12 @@ type fakeNode struct {
 	// hung: the engine accepts connections and answers nothing, so its
 	// agent cannot report; the others mark it failed.
 	hung bool
+	// keys, uptime (seconds; nil: not reported) and runID, as INFO says.
+	keys    int64
+	uptime  *int64
+	runID   string
+	paused  bool // CLIENT PAUSE WRITE
+	loading bool
 }
 
 func newFakeEngine() *fakeEngine {
@@ -112,6 +120,7 @@ func (e *fakeEngine) status(n *fakeNode) agentapi.ClusterStatusResponse {
 		Enabled: true, MyID: n.id, State: state, SlotsAssigned: covered, KnownNodes: len(ids),
 		Hostname: n.hostname, Nodes: agentapi.ParseClusterNodes(strings.Join(lines, "\n")),
 		ReplicationOffset: n.offset, MasterLinkUp: n.master != "" && !n.linkDown,
+		RunID: n.runID, UptimeSeconds: n.uptime, KeyCount: n.keys, KeyCountKnown: true, Loading: n.loading,
 	}
 }
 
@@ -134,12 +143,18 @@ func (e *fakeEngine) RoundTrip(req *http.Request) (*http.Response, error) {
 		NodeID   string   `json:"nodeID"`
 		Hostname string   `json:"hostname"`
 		Ranges   [][2]int `json:"ranges"`
+		Mode     string   `json:"mode"`
+		Args     []string `json:"args"`
 	}
 	if req.Body != nil {
 		_ = json.NewDecoder(req.Body).Decode(&body)
 	}
 	if req.URL.Path != "/cluster/status" && req.URL.Path != "/cluster/migration/status" {
-		e.calls = append(e.calls, fmt.Sprintf("%s %s %s%s", req.URL.Path, n.id[:6], body.IP, body.NodeID))
+		call := fmt.Sprintf("%s %s %s%s", req.URL.Path, n.id[:6], body.IP, body.NodeID)
+		if body.Mode != "" || len(body.Args) > 0 {
+			call += " " + strings.TrimSpace(body.Mode+" "+strings.Join(body.Args, " "))
+		}
+		e.calls = append(e.calls, call)
 	}
 	switch req.URL.Path {
 	case "/cluster/status":
@@ -183,15 +198,31 @@ func (e *fakeEngine) RoundTrip(req *http.Request) (*http.Response, error) {
 		delete(n.seen, body.NodeID)
 	case "/cluster/announce":
 		n.hostname = body.Hostname
+	case "/exec":
+		switch strings.ToUpper(strings.Join(body.Args, " ")) {
+		case "CLIENT UNPAUSE":
+			n.paused = false
+		default:
+			if len(body.Args) > 1 && strings.EqualFold(body.Args[0], "CLIENT") && strings.EqualFold(body.Args[1], "PAUSE") {
+				n.paused = true
+			}
+		}
+		return reply(http.StatusOK, agentapi.ExecResponse{Type: "status", Str: "OK"}), nil
 	case "/cluster/failover":
 		old := e.nodes[n.master]
 		if old == nil {
 			return reply(http.StatusInternalServerError, agentapi.ErrorResponse{Error: "You should send CLUSTER FAILOVER to a replica"}), nil
 		}
-		if e.abandonFailovers {
+		// A plain failover needs the master to answer; FORCE and TAKEOVER
+		// do not wait for it.
+		if e.abandonFailovers && body.Mode == "" {
 			break
 		}
+		if e.refuseForced && body.Mode == agentapi.FailoverForce {
+			break // no election won (nobody voted)
+		}
 		n.slots, old.slots = old.slots, nil
+		old.keys = n.keys // the old master resyncs from the new one
 		for _, o := range e.nodes {
 			if o.master == old.id {
 				o.master = n.id

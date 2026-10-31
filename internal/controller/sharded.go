@@ -462,7 +462,11 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 		return ctrl.Result{}, fmt.Errorf("listing announced Services: %w", err)
 	}
 	observed := r.observeShardedPods(ctx, c, pods.Items)
+	// First: a master that restarted with less than its replica holds is a
+	// race against the replica's next full-sync attempt.
+	restarted := r.reconcileRestartedMasters(ctx, c, observed)
 	acted, topoErr := r.reconcileClusterTopology(ctx, c, observed, exposed)
+	acted = acted || restarted
 	if topoErr != nil {
 		logf.FromContext(ctx).Error(topoErr, "cluster topology")
 	}
@@ -488,6 +492,11 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 		setCondition(&c.Status.Conditions, *cond)
 	} else {
 		removeCondition(&c.Status.Conditions, "ShardSwitchover")
+	}
+	if cond := r.restartedMasterCondition(c); cond != nil {
+		setCondition(&c.Status.Conditions, *cond)
+	} else {
+		removeCondition(&c.Status.Conditions, MasterRestartedEmptyCondition)
 	}
 	r.notePersistence(c, kdbConfig)
 	phase, err := r.updateShardedStatus(ctx, c, observed, topoErr)

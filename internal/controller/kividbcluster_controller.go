@@ -55,6 +55,11 @@ type KividbClusterReconciler struct {
 	// is reported as planned even once the old master's pod is gone.
 	handedOver sync.Map
 
+	// restartedMasters: shard masters that restarted with less than a
+	// replica holds ("<ns>/<cluster>/<shard>" -> *restartedMaster), see
+	// shard_restart.go.
+	restartedMasters sync.Map
+
 	// orphans: since when a node of a sharded cluster has been none of its
 	// pods ("<ns>/<cluster>/-1/<node ID>" -> time.Time), see orphanNodes.
 	orphans sync.Map
