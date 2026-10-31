@@ -489,6 +489,7 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	} else {
 		removeCondition(&c.Status.Conditions, "ShardSwitchover")
 	}
+	r.notePersistence(c, kdbConfig)
 	phase, err := r.updateShardedStatus(ctx, c, observed, topoErr)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)

@@ -227,6 +227,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		r.reconcileRollout(ctx, &c, podList.Items, statuses, masterPod)
 	}
 
+	r.notePersistence(&c, kdbConfig)
 	if statusErr := r.updateStatus(ctx, &c, statuses, masterPod, previousMasterPod, failoverHappened, err); statusErr != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", statusErr)
 	}
@@ -623,6 +624,16 @@ func removeCondition(conditions *[]metav1.Condition, conditionType string) {
 // correlator still folds similar Events together.
 func EventCorrelatorOptions() record.CorrelatorOptions {
 	return record.CorrelatorOptions{BurstSize: 100, QPS: 1.0 / 5}
+}
+
+// findCondition returns the condition of type conditionType, nil if none.
+func findCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
 }
 
 // SetupWithManager wires the controller into the manager, watching
