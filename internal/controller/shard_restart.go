@@ -74,6 +74,7 @@ const (
 type restartedMaster struct {
 	shard                   int32
 	master, replica         string
+	runID                   string // the restarted master's engine run
 	masterIP                string // whose writes are held
 	masterKeys, replicaKeys int64
 	detected, last          time.Time
@@ -183,6 +184,11 @@ func (r *KividbClusterReconciler) reconcileRestartedMasters(ctx context.Context,
 			}
 		}
 		m, q, lost := restartedBehind(c, pods, s)
+		if lost && rm != nil && rm.master == m.pod.Name && rm.runID == m.seen().RunID {
+			// Said already: the next pass can read the status from before
+			// this restart was recorded (the cache a moment behind).
+			continue
+		}
 		if lost && (rm == nil || !rm.resolved.IsZero()) {
 			mk := m.seen().KeyCount
 			had := int64(0)
@@ -195,7 +201,7 @@ func (r *KividbClusterReconciler) reconcileRestartedMasters(ctx context.Context,
 			r.event(c, corev1.EventTypeWarning, "ShardDataLost",
 				"shard %d: master %s restarted with %d keys; it last reported %d, and no replica of the shard holds more. The writes it lost are gone unless restored from a backup. %s",
 				s, m.pod.Name, mk, had, persistenceHint)
-			r.restartedMasters.Store(key, &restartedMaster{shard: s, master: m.pod.Name, masterKeys: mk, detected: now, resolved: now, lost: true,
+			r.restartedMasters.Store(key, &restartedMaster{shard: s, master: m.pod.Name, runID: m.seen().RunID, masterKeys: mk, detected: now, resolved: now, lost: true,
 				outcome: fmt.Sprintf("master %s restarted with %d keys, having reported %d; no replica held more: the writes are lost", m.pod.Name, mk, had)})
 			continue
 		}
@@ -207,7 +213,7 @@ func (r *KividbClusterReconciler) reconcileRestartedMasters(ctx context.Context,
 		}
 		mk, qk := m.seen().KeyCount, q.seen().KeyCount
 		if rm == nil || !rm.resolved.IsZero() || rm.master != m.pod.Name {
-			rm = &restartedMaster{shard: s, master: m.pod.Name, replica: q.pod.Name, masterKeys: mk, replicaKeys: qk, detected: now}
+			rm = &restartedMaster{shard: s, master: m.pod.Name, runID: m.seen().RunID, replica: q.pod.Name, masterKeys: mk, replicaKeys: qk, detected: now}
 			r.restartedMasters.Store(key, rm)
 			log.Info("a shard master restarted with less than its replica holds; failing over to the replica", "shard", s, "pod", m.pod.Name, "keys", mk, "replica", q.pod.Name, "replicaKeys", qk)
 			r.event(c, corev1.EventTypeWarning, "MasterRestartedEmpty",

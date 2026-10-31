@@ -210,14 +210,19 @@ func TestRestartedMasterOfTheOnlyShardIsTakenOver(t *testing.T) {
 // shard has none). Nothing to fail over to, but it is said.
 func TestShardDataLostIsReported(t *testing.T) {
 	h, _ := restartHarness(t, 2, 1)
+	stale := append([]kividbv1alpha1.KividbPodStatus(nil), h.c.Status.Pods...)
 	h.restart("s-1-0", 987)
 	h.node("s-1-1").keys = 987 // dropped its 25939 and loaded the master's 987
+	h.restartPass()
+	// The next pass reads the status from before (the cache a moment
+	// behind, as in the kind run, where it was said twice).
+	h.c.Status.Pods = stale
 	h.restartPass()
 	if hasCall(h.engine.calls, "/cluster/failover") {
 		t.Fatalf("failed over to a replica holding no more: %v", h.engine.calls)
 	}
 	ev := events(h.r)
-	if !strings.Contains(ev, "Warning ShardDataLost shard 1: master s-1-0 restarted with 987 keys; it last reported 25939") {
+	if strings.Count(ev, "Warning ShardDataLost shard 1: master s-1-0 restarted with 987 keys; it last reported 25939") != 1 {
 		t.Fatalf("events:\n%s", ev)
 	}
 	if cond := findCondition(h.c.Status.Conditions, MasterRestartedEmptyCondition); cond == nil || cond.Reason != "DataLost" {
