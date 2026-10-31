@@ -325,8 +325,11 @@ func (r *KividbClusterReconciler) finishRebalance(ctx context.Context, c *kividb
 	rb := rebalanceOf(c)
 	cl := c.Status.Cluster
 	for s := rb.To; s < rb.From; s++ {
+		// Foreground: the StatefulSet stays, being deleted, until its pods
+		// are gone, so nothing reads it as missing and makes it again while
+		// they stop (see removedShardStillThere).
 		sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: shardStatefulSetName(c, s), Namespace: c.Namespace}}
-		if err := r.Delete(ctx, sts); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.Delete(ctx, sts, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
 			logf.FromContext(ctx).Error(err, "rebalance: deleting a removed shard's StatefulSet", "shard", s)
 			return true
 		}
