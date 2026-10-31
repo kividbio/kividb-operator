@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -120,5 +121,15 @@ func TestShardPromoteRecordsAnEvent(t *testing.T) {
 	}
 	if got := fetchClusterEvents(context.Background(), s.clientset, "prod", "cache"); len(got) != 1 {
 		t.Fatalf("the cluster view shows %d events", len(got))
+	}
+	// Noted on the cluster, so the operator reports the move as asked for,
+	// not as a Warning ShardFailover.
+	var got kividbv1alpha1.KividbCluster
+	if err := s.ctrlClient.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: "cache"}, &got); err != nil {
+		t.Fatal(err)
+	}
+	pod0, at, _ := strings.Cut(got.Annotations[kividbv1alpha1.ShardPromoteAnnotation], " ")
+	if when, err := time.Parse(time.RFC3339, at); pod0 != "cache-0-1" || err != nil || time.Since(when) > time.Minute {
+		t.Fatalf("annotation %q", got.Annotations[kividbv1alpha1.ShardPromoteAnnotation])
 	}
 }

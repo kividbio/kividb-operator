@@ -414,6 +414,12 @@ type BootstrapPhase string
 // master to come back instead; see reconcileRoles.
 const AllowEmptyFailoverAnnotation = "kividb.io/allow-empty-failover"
 
+// ShardPromoteAnnotation records, on a sharded KividbCluster, the last
+// replica someone asked to take over its shard outside the operator (the
+// console's Promote): "<pod> <RFC 3339 time>". The operator reports the
+// move that follows as a planned switchover, not a failover.
+const ShardPromoteAnnotation = "kividb.io/shard-promote"
+
 const (
 	BootstrapPending    BootstrapPhase = "Pending"
 	BootstrapInProgress BootstrapPhase = "InProgress"

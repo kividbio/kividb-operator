@@ -50,6 +50,11 @@ type KividbClusterReconciler struct {
 	// ("<ns>/<cluster>/<shard>" -> *shardHandover).
 	failovers sync.Map
 
+	// handedOver: the last handover the operator asked a shard for
+	// ("<ns>/<cluster>/<shard>" -> plannedHandover), so the move it causes
+	// is reported as planned even once the old master's pod is gone.
+	handedOver sync.Map
+
 	// orphans: since when a node of a sharded cluster has been none of its
 	// pods ("<ns>/<cluster>/-1/<node ID>" -> time.Time), see orphanNodes.
 	orphans sync.Map
@@ -607,6 +612,17 @@ func removeCondition(conditions *[]metav1.Condition, conditionType string) {
 		}
 	}
 	*conditions = kept
+}
+
+// EventCorrelatorOptions is how the operator's Events are rate-limited.
+// client-go's defaults let 25 through per object and then one every 5
+// minutes: one rollout of a sharded cluster (a RollingUpdate per pod, a
+// ShardSwitchover per master) used that up, and what came after it --
+// PasswordChanged at the end of a password change, in the AKS run -- was
+// silently dropped. These let 100 through, then one every 5 seconds; the
+// correlator still folds similar Events together.
+func EventCorrelatorOptions() record.CorrelatorOptions {
+	return record.CorrelatorOptions{BurstSize: 100, QPS: 1.0 / 5}
 }
 
 // SetupWithManager wires the controller into the manager, watching

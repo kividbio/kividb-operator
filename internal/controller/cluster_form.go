@@ -566,8 +566,39 @@ func shardedStatus(c *kividbv1alpha1.KividbCluster, pods []*shardPod) (kividbv1a
 	return kividbv1alpha1.PhaseRunning, "ClusterOK", fmt.Sprintf("%d shards, all %d slots served, %d pods ready", len(shards), agentapi.TotalSlots, ready)
 }
 
+// plannedHandover is a CLUSTER FAILOVER the operator asked a shard for:
+// from which master, and when.
+type plannedHandover struct {
+	from string
+	at   time.Time
+}
+
+// plannedHandoverWindow is how long after a handover was asked for a
+// move of the shard's master is taken as that handover. The engine
+// completes one within seconds or gives it up (5 s), and the operator asks
+// again every failoverRetry.
+const plannedHandoverWindow = 2 * time.Minute
+
+// promotedPod is the pod the ShardPromoteAnnotation on c names, if it was
+// set within plannedHandoverWindow of now.
+func promotedPod(c *kividbv1alpha1.KividbCluster, now time.Time) string {
+	pod, at, ok := strings.Cut(c.Annotations[kividbv1alpha1.ShardPromoteAnnotation], " ")
+	if !ok {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, at)
+	if err != nil || now.Sub(t) > plannedHandoverWindow || t.Sub(now) > plannedHandoverWindow {
+		return ""
+	}
+	return pod
+}
+
 // noteShardFailovers records a shard whose master moved to another pod,
-// unless the operator asked for the move (a step-down).
+// unless the move was asked for: a step-down (the operator's handover,
+// for a rollout, a DbOps restart or a deleted master's pod), or the
+// console's Promote. A planned move is often seen only once the old
+// master's pod is gone (deleted, or replaced by a new one without the
+// annotation): what the operator asked for is remembered for a while.
 func (r *KividbClusterReconciler) noteShardFailovers(c *kividbv1alpha1.KividbCluster, before []kividbv1alpha1.ShardStatus, pods []*shardPod) {
 	prev := map[int32]string{}
 	for _, s := range before {
@@ -577,10 +608,17 @@ func (r *KividbClusterReconciler) noteShardFailovers(c *kividbv1alpha1.KividbClu
 	for _, p := range pods {
 		planned[p.pod.Name] = p.pod.Annotations[StepDownAnnotation] == "true" || p.pod.DeletionTimestamp != nil
 	}
+	now := r.now()
+	promoted := promotedPod(c, now)
 	for _, s := range c.Status.Shards {
 		// A shard owning no slots (one just added) has nothing to fail over.
 		if old := prev[s.Index]; old != "" && s.MasterPod != "" && old != s.MasterPod && len(s.Slots) > 0 {
-			if planned[old] {
+			if h, ok := r.handedOver.Load(handoverKey(c, s.Index)); ok {
+				if ph := h.(plannedHandover); ph.from == old && now.Sub(ph.at) <= plannedHandoverWindow {
+					planned[old] = true
+				}
+			}
+			if planned[old] || promoted == s.MasterPod {
 				r.event(c, corev1.EventTypeNormal, "ShardSwitchover", "shard %d: master moved from %s to %s, as asked", s.Index, old, s.MasterPod)
 				continue
 			}
