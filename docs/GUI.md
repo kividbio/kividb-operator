@@ -128,7 +128,7 @@ before anything is created. **Copy** puts it on the clipboard for
 works and the manifest is shown, but nothing can be created.
 
 Default engine image when `spec.image` is empty:
-`docker.io/kividb/kividb:v1.1.2`.
+`docker.io/kividb/kividb:v1.1.3`.
 
 ### JSON API
 

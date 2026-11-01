@@ -65,7 +65,7 @@ The same chart is at `oci://ghcr.io/kividbio/kividb-operator-chart`.
 
 (Pass whichever version you're installing to `--version`; omit it to get
 the latest chart. This chart release is validated against kividb
-**v1.1.2**, which is also the operator default when a `KividbCluster`
+**v1.1.3**, which is also the operator default when a `KividbCluster`
 leaves `spec.image` unset. See
 [docs/INSTALL.md](https://github.com/kividbio/kividb-operator/blob/master/docs/INSTALL.md)
 for the full install/upgrade/uninstall walkthrough, including the
