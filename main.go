@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -58,6 +59,10 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "kividb-operator-leader.kividb.io",
+		// client-go's default spam filter lets 25 Events through per object,
+		// then one every 5 minutes: a sharded cluster's rollout uses that up,
+		// and the Events after it (PasswordChanged, a failover) were dropped.
+		EventBroadcaster: record.NewBroadcasterWithCorrelatorOptions(controller.EventCorrelatorOptions()), //nolint:staticcheck // the only way to tune the spam filter
 	})
 	if err != nil {
 		ctrl.Log.Error(err, "unable to start manager")

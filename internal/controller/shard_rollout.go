@@ -182,6 +182,7 @@ func (r *KividbClusterReconciler) reconcileShardStepDown(ctx context.Context, c 
 		first := h.attempts == 0 && h.last.IsZero()
 		h.attempts++
 		h.last, h.warned, h.target = now, false, best.pod.Name
+		r.handedOver.Store(key, plannedHandover{from: p.pod.Name, at: now})
 		if first {
 			r.event(c, corev1.EventTypeNormal, "ShardSwitchover", "shard %d: asked %s to take over from %s (CLUSTER FAILOVER)", p.shard, best.pod.Name, p.pod.Name)
 		} else {

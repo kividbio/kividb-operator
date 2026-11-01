@@ -422,6 +422,18 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 		AuthGenerationAnnotation: generations.auth,
 	}
 	for s := int32(0); s < shardCount(c); s++ {
+		if s >= targetShards(c) {
+			// A shard being removed: kept up to date while it drains, never
+			// made again. Its StatefulSet is deleted once its slots are out,
+			// and a pass that read the cluster before that status landed
+			// would otherwise create it again, with new pods and new volumes
+			// (the AKS run's 4 -> 3).
+			if keep, err := r.removedShardStillThere(ctx, c, s); err != nil {
+				return ctrl.Result{}, err
+			} else if !keep {
+				continue
+			}
+		}
 		if err := r.applyStatefulSet(ctx, c, desiredShardStatefulSet(c, s, kdbConfig, aclConfig, snapCfg), rollout); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconciling statefulset of shard %d: %w", s, err)
 		}
@@ -450,7 +462,11 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 		return ctrl.Result{}, fmt.Errorf("listing announced Services: %w", err)
 	}
 	observed := r.observeShardedPods(ctx, c, pods.Items)
+	// First: a master that restarted with less than its replica holds is a
+	// race against the replica's next full-sync attempt.
+	restarted := r.reconcileRestartedMasters(ctx, c, observed)
 	acted, topoErr := r.reconcileClusterTopology(ctx, c, observed, exposed)
+	acted = acted || restarted
 	if topoErr != nil {
 		logf.FromContext(ctx).Error(topoErr, "cluster topology")
 	}
@@ -477,6 +493,12 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	} else {
 		removeCondition(&c.Status.Conditions, "ShardSwitchover")
 	}
+	if cond := r.restartedMasterCondition(c); cond != nil {
+		setCondition(&c.Status.Conditions, *cond)
+	} else {
+		removeCondition(&c.Status.Conditions, MasterRestartedEmptyCondition)
+	}
+	r.notePersistence(c, kdbConfig)
 	phase, err := r.updateShardedStatus(ctx, c, observed, topoErr)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
@@ -486,6 +508,20 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 		return ctrl.Result{RequeueAfter: shardedFormingInterval}, nil
 	}
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
+}
+
+// removedShardStillThere reports whether the StatefulSet of shard s, one
+// past spec.shards, exists and is not being deleted.
+func (r *KividbClusterReconciler) removedShardStillThere(ctx context.Context, c *kividbv1alpha1.KividbCluster, s int32) (bool, error) {
+	var sts appsv1.StatefulSet
+	err := r.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: shardStatefulSetName(c, s)}, &sts)
+	switch {
+	case apierrors.IsNotFound(err):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("reading the StatefulSet of shard %d: %w", s, err)
+	}
+	return sts.DeletionTimestamp == nil, nil
 }
 
 // shardedFormingInterval is how soon a sharded cluster that is forming, or

@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -66,6 +68,25 @@ func (s *server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 		if v, err := strconv.ParseInt(repl["master_last_io_seconds_ago"], 10, 64); err == nil && repl["role"] == "slave" {
 			out.MasterLastIOSeconds = &v
 		}
+	}
+	// What the operator needs to recognise a master that restarted with
+	// less than its replicas hold: when the engine started, and how much
+	// each node holds.
+	if info, err := c.Info("server"); err == nil {
+		server := respclient.ParseInfo(info)
+		out.RunID = server["run_id"]
+		if v, err := strconv.ParseInt(server["uptime_in_seconds"], 10, 64); err == nil {
+			out.UptimeSeconds = &v
+		}
+	}
+	if info, err := c.Info("keyspace"); err == nil {
+		out.KeyCount = keyspaceKeyCount(info)
+		out.KeyCountKnown = true
+	}
+	if info, err := c.Info("persistence"); err == nil {
+		persistence := respclient.ParseInfo(info)
+		out.AofEnabled = persistence["aof_enabled"] == "1"
+		out.Loading = persistence["loading"] == "1"
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -157,19 +178,47 @@ func (s *server) handleClusterAnnounce(w http.ResponseWriter, r *http.Request) {
 
 // handleClusterFailover asks this node, a replica, to take over from its
 // master: CLUSTER FAILOVER, which the two run together without losing a
-// write. The engine refuses it on a master.
+// write. The engine refuses it on a master. An optional body asks for
+// FORCE (no handshake with the master) or TAKEOVER (no election either):
+// the operator's way out when the master restarted with less than this
+// replica holds, and must not be waited for.
 func (s *server) handleClusterFailover(w http.ResponseWriter, r *http.Request) {
+	args, err := clusterFailoverArgs(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	c, err := s.dial()
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
 	defer c.Close()
-	if _, err := c.Do("CLUSTER", "FAILOVER"); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("CLUSTER FAILOVER: %w", err))
+	if _, err := c.Do(args...); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("%s: %w", strings.Join(args, " "), err))
 		return
 	}
 	writeJSON(w, http.StatusOK, agentapi.OKResponse{OK: true})
+}
+
+// clusterFailoverArgs is the CLUSTER FAILOVER command a request body asks
+// for. No body, or no mode, is the plain one.
+func clusterFailoverArgs(body io.Reader) ([]string, error) {
+	var req agentapi.ClusterFailoverRequest
+	if body != nil {
+		if err := json.NewDecoder(body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+	}
+	switch req.Mode {
+	case agentapi.FailoverDefault:
+		return []string{"CLUSTER", "FAILOVER"}, nil
+	case agentapi.FailoverForce:
+		return []string{"CLUSTER", "FAILOVER", "FORCE"}, nil
+	case agentapi.FailoverTakeover:
+		return []string{"CLUSTER", "FAILOVER", "TAKEOVER"}, nil
+	}
+	return nil, fmt.Errorf("unknown failover mode %q", req.Mode)
 }
 
 // handleClusterMigrationImport starts CLUSTER MIGRATION IMPORT on this

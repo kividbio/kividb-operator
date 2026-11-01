@@ -40,7 +40,7 @@ const ClusterLabel = "kividb.io/cluster"
 
 // KividbVariant selects which build of the kividb image to run. Each
 // variant beyond "standard" corresponds to a real, separately-published
-// image tag suffix (e.g. docker.io/kividb/kividb:v1.1.2-tls) -- the
+// image tag suffix (e.g. docker.io/kividb/kividb:v1.1.3-tls) -- the
 // features aren't runtime-togglable, they're compiled in.
 type KividbVariant string
 
@@ -264,9 +264,9 @@ type KividbClusterSpec struct {
 	Replicas int32 `json:"replicas,omitempty"`
 
 	// Image is the kividb container image, e.g.
-	// "docker.io/kividb/kividb:v1.1.2" or, for a non-standard build,
-	// "docker.io/kividb/kividb:v1.1.2-tls". Defaults to
-	// docker.io/kividb/kividb:v1.1.2 if unset -- set this explicitly to pin a specific
+	// "docker.io/kividb/kividb:v1.1.3" or, for a non-standard build,
+	// "docker.io/kividb/kividb:v1.1.3-tls". Defaults to
+	// docker.io/kividb/kividb:v1.1.3 if unset -- set this explicitly to pin a specific
 	// version. The operator uses this value verbatim; it never derives or
 	// modifies an image reference from Variant below.
 	// +optional
@@ -413,6 +413,12 @@ type BootstrapPhase string
 // was last seen holding data. Without it the operator waits for the
 // master to come back instead; see reconcileRoles.
 const AllowEmptyFailoverAnnotation = "kividb.io/allow-empty-failover"
+
+// ShardPromoteAnnotation records, on a sharded KividbCluster, the last
+// replica someone asked to take over its shard outside the operator (the
+// console's Promote): "<pod> <RFC 3339 time>". The operator reports the
+// move that follows as a planned switchover, not a failover.
+const ShardPromoteAnnotation = "kividb.io/shard-promote"
 
 const (
 	BootstrapPending    BootstrapPhase = "Pending"

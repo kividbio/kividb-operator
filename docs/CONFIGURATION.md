@@ -31,7 +31,7 @@ All fields below are under `spec:` unless stated otherwise.
 |---|---|---|---|
 | `shards` | int32 | unset | Makes the cluster **sharded**: that many shards in kividb's cluster mode. See [Sharded clusters](#sharded-clusters-shards). Set or left unset only when the cluster is created. |
 | `replicas` | int32 | `2` | Replica pods **in addition to** each master: beside the single master (total pods = `replicas + 1`), or in each shard (total = `shards × (replicas + 1)`). |
-| `image` | string | `docker.io/kividb/kividb:v1.1.2` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.1.2` or `docker.io/kividb/kividb:v1.1.2-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
+| `image` | string | `docker.io/kividb/kividb:v1.1.3` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.1.3` or `docker.io/kividb/kividb:v1.1.3-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
 | `variant` | string | `standard` | One of `standard`, `tls`, `lua`, `full`. See [Image and variant](#image-and-variant) — informational only, does not affect which image gets pulled. |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
 | `imagePullSecrets` | `[]LocalObjectReference` | — | Standard Kubernetes image pull secrets. |
@@ -45,12 +45,12 @@ All fields below are under `spec:` unless stated otherwise.
 `image` is the **only** field that determines which container actually
 runs — the operator uses it verbatim and never constructs, guesses, or
 modifies it. Leave it unset to use the release default
-(`docker.io/kividb/kividb:v1.1.2` for operator 0.6.0); set it explicitly
+(`docker.io/kividb/kividb:v1.1.3` for operator 0.6.0); set it explicitly
 to pin a different tag or variant:
 
 ```yaml
 spec:
-  image: docker.io/kividb/kividb:v1.1.2-tls
+  image: docker.io/kividb/kividb:v1.1.3-tls
 ```
 
 To move to a later version, just change this value — same as any other
@@ -97,7 +97,7 @@ a referenced [`KividbConfig`](#kividbconfig)'s `spec.tls`). It does
 **not** change which image tag gets pulled — there is no "tls variant
 tag" the operator appends or looks for. If you want a TLS-capable build,
 you set `image` to one yourself (e.g.
-`docker.io/kividb/kividb:v1.1.2-tls`) *and* set `variant: tls` to match;
+`docker.io/kividb/kividb:v1.1.3-tls`) *and* set `variant: tls` to match;
 the two aren't cross-validated by the API server, since only you know
 what a given `image` value actually contains.
 
@@ -173,6 +173,65 @@ One PVC per pod, mounted at `/data` (kividb's working directory — see
 creation is not currently propagated** — `VolumeClaimTemplates` are
 immutable on an existing StatefulSet; see TROUBLESHOOTING.md for the
 manual resize procedure.
+
+### Persistence: the append-only file
+
+The engine never snapshots on a schedule (`save` is accepted and does
+nothing). Without its append-only file, a pod keeps only what it saved at
+its last clean shutdown or full sync. An engine that is killed -- out of
+memory, a lost node, `kubectl delete pod --grace-period=0 --force` -- comes
+back with that, often nothing. In a sharded cluster that is the shard's
+data on every copy: the master is back within the node timeout, keeps its
+node ID and its slots, so no failover happens, and its replicas resync from
+it (in the AKS test, 25,939 acknowledged writes, with the cluster `Ready`
+throughout).
+
+So from 0.7.0 the operator writes, for every cluster, sharded or not:
+
+```
+appendonly yes
+appendfsync everysec
+```
+
+unless the referenced [`KividbConfig`](#kividbconfig) sets `appendonly` (or
+the engine's own name for it, `aof`) itself. A pod then reloads its data
+from its volume however it stopped: every acknowledged write reaches the
+file before it is acknowledged (engine 1.2, `aof-ack-after-write yes`), and
+the file is synced to disk once a second, so a killed process loses nothing
+and a node that loses power up to about a second. `everysec` is the only
+policy the engine applies.
+
+- **The cost.** Writes go through the file: fewer writes a second at high
+  concurrency, and the file takes disk space until the engine checkpoints
+  it (`auto-aof-rewrite-percentage`, `auto-aof-rewrite-min-size`). Size
+  `storage.size` for the dataset's snapshot and its log together.
+  `aof-ack-after-write no` (engine 1.2) acknowledges a write once it is
+  queued for the file: faster, and a killed engine can lose its last few
+  writes.
+- **Opting out.** `appendonly: "no"` in the `KividbConfig`. The cluster
+  then runs without persistence: the `Persistence` condition turns
+  `False` (reason `AppendOnlyDisabled`, with what it risks) and a
+  `Warning` Event `PersistenceDisabled` is recorded when it does. Only for
+  data that can be lost, such as a cache.
+- **Existing clusters** get it with the rolling restart 0.7.0 does anyway
+  (the agent token, the config Secret). A pod restarted with it loads its
+  `dump.kdb` as before and logs from there on; in the AKS test, turning it
+  on through a rollout under load lost no write.
+- **A forced delete** (`--grace-period=0 --force`) drops the pod object at
+  once, while its container may keep running for a moment; a new pod on
+  the same node and volume can start meanwhile, read the log, and the old
+  container's last writes are then lost when the replicas follow the new
+  one (77 writes in the kind test, with the append-only file on; none
+  with an in-place kill). That is Kubernetes giving up its one-pod
+  guarantee for a StatefulSet, not something the file can cover.
+- **Backups** of a pod with the append-only file hold `dump.kdb` and
+  `appendonly.aof`; a restore loads the snapshot and replays the log on
+  top (see [BACKUP_RESTORE.md](BACKUP_RESTORE.md)).
+
+What the operator does when a master comes back with less than its
+replicas anyway: [When the master restarts behind its replicas](#failover)
+for a replicated cluster, and the `MasterRestartedEmpty` check in
+[Sharded clusters](#sharded-clusters-shards).
 
 ### Scheduling: `tolerations`, `nodeSelector`, `affinity`
 
@@ -299,7 +358,13 @@ or its pod is force-deleted, the writes it acknowledged in its last moments
 and had not yet streamed are lost with it, and a master that is cut off
 (not dead) goes on acknowledging writes on the connections it still has
 until it is demoted -- in the AKS test, 150 ms after the promotion, 120
-writes. The operator does not fence it. `min-replicas-to-write` /
+writes. The operator does not fence it. The same holds for a master pod
+deleted with `--grace-period=0 --force`: the operator promotes a replica
+in the same second, but the deleted pod's container keeps running, and
+taking writes, for a moment after its pod object is gone, with no address
+left for the operator to pause it at (in the AKS test, 188 writes; its
+other replica, which had read past the promotion point from it, resynced
+in full). `min-replicas-to-write` /
 `min-replicas-max-lag` narrow this window: a master refuses writes
 (`NOREPLICAS`) unless that many replicas acknowledged within the lag. The
 operator does not set them in a replicated cluster (it does in a sharded
@@ -311,10 +376,12 @@ instead of after the lag. Set them in a [`KividbConfig`](#kividbconfig)
 if refusing writes is preferable to losing them; the lag bounds the loss
 to about that many seconds, it does not remove it.
 
-**When the master restarts behind its replicas.** A master that restarts
--- crashed, OOM-killed, deleted while it could not hand over -- comes back
-from its last snapshot, which may be older than its last acknowledged
-writes, while its replicas still hold them. If the replicas resynced from
+**When the master restarts behind its replicas.** With the
+[append-only file](#persistence-the-append-only-file) on, the default from
+0.7.0, a master that restarts comes back with what it acknowledged. Without
+it, a master that restarts -- crashed, OOM-killed, deleted while it could
+not hand over -- comes back from its last snapshot, which may be older than
+its last acknowledged writes, while its replicas still hold them. If the replicas resynced from
 it, those writes would be gone from every copy. The operator recognises
 it -- the master's engine restarted (a new `run_id`, or a new pod or
 container restart), it came back below the offset it had reached in its
@@ -472,8 +539,11 @@ spec:
 - **Failover is kividb's.** When a master fails, the engine promotes one of
   its replicas; the operator does not promote anything in cluster mode. It
   reports the move (`status.shards[].masterPod`, `lastFailoverTime`, a
-  `ShardFailover` Event) and moves the `kividb.io/role` label, so
-  `<cluster>-replicas` follows. From engine 1.2 the election favours the
+  `Warning` `ShardFailover` Event) and moves the `kividb.io/role` label, so
+  `<cluster>-replicas` follows. A move that was asked for -- a rollout's
+  or a deleted master's handover, the console's Promote -- is a `Normal`
+  `ShardSwitchover` instead, even when it is seen only after the old
+  master's pod is gone. From engine 1.2 the election favours the
   replica that has read the most of the master's stream: each replica
   waits an extra second for every other replica ahead of it
   (kividbio/kividb#107); before 1.2 any replica could win, and writes only
@@ -521,14 +591,37 @@ spec:
   for 30 s on an old template is replaced straight away.
   - **A force-killed master that is back within the node timeout** (5 s
     by default) keeps its slots: the engine never marked it failed, so no
-    replica took over. It comes back from its last snapshot, and its
-    replicas resync from it, dropping the writes they held that it lost
-    (3 in the AKS test). The engine decides this in cluster mode; the
-    operator does not hold a restarted master back, since delaying every
-    master's start until its replicas fail over would also promote a
-    replica holding less than the master's snapshot whenever both restart
-    together (a cold restart). Kept as it is until the engine refuses such
-    a resync.
+    replica took over. With the [append-only file](#persistence-the-append-only-file)
+    on (the default) it comes back with every write it acknowledged, and
+    its replica continues from it. Without it, it comes back from its last
+    snapshot, often empty, and its replica resyncs from it as soon as it
+    has taken a single write: the shard's data is gone on every copy (the
+    AKS test, with no persistence: 25,939 writes, cluster `Ready`, no
+    Event). The operator watches for this: when a shard master's engine
+    started less than 2 minutes ago and a replica of the shard holds more
+    than twice its keys, it holds the master's writes (`CLIENT PAUSE
+    WRITE`, which also keeps an empty master at no keys, so the replica's
+    full-sync guard keeps refusing it) and has that replica take over with
+    `CLUSTER FAILOVER FORCE`, then `TAKEOVER` after two tries (at once in
+    a cluster of one shard, where the restarted master is the only one
+    that could vote). It looks at the master's agent as soon as it
+    answers, before the pod is Ready. Events: `MasterRestartedEmpty`
+    (Warning), then `MasterRestartedEmptyResolved`, or `ShardDataLost`
+    (Warning) when the replica no longer held more by then, or the master
+    restarted with less than half of what it had and no replica held more;
+    the `MasterRestartedEmpty` condition shows the case while it runs and
+    for 10 minutes after. It is a race, and not always won. In a kind test
+    without persistence (engine 1.2.0-rc2, 800 writes/s): after a forced
+    delete the replica had taken over 0.7 to 1.0 s after the restarted
+    engine accepted connections, and the 54 and 65 writes the emptied
+    master took in that second were lost, instead of the shard's 4,500
+    and 164,000 keys. After an in-place kill (the container restarts with
+    the same IP, as on an out-of-memory kill), clients wrote to the master
+    within 0.2 s and the replica's first resync went through 0.16 and
+    0.43 s after it accepted connections, before the operator could look:
+    the shard's data was gone (27,000 and 184,000 keys), reported as
+    `ShardDataLost`. Persistence is the fix; this is the safety net, and
+    while slots move in or out of the shard it does not compare.
   - **The handover pauses the shard's writes.** During `CLUSTER
     FAILOVER` the master holds its clients' writes until the replica has
     caught up and won its election: on engine 1.2 for up to 10 s. If the
@@ -574,7 +667,10 @@ spec:
     the cluster to serve every slot. A change can be changed again half
     way: the shards of both counts are kept until the slots are where the
     last one says.
-- **Not yet:** `bootstrapFromSnapshot`.
+- **Not yet:** `bootstrapFromSnapshot`. A replicated cluster cannot be
+  seeded from a sharded cluster's backup either: it is refused before any
+  restore Job runs (`status.bootstrap.phase: Failed`, a `BootstrapRefused`
+  Event).
 
 **Services**, all ClusterIP; the operator never creates a load balancer:
 
@@ -669,7 +765,18 @@ status:
       status: "True"
       reason: AllPodsReady
       message: "master=my-cluster-1, 3 pod(s) ready"
+    - type: Persistence
+      status: "True"             # "False", reason AppendOnlyDisabled, when a KividbConfig sets appendonly no
+      reason: AppendOnlyFile
+      message: "appendonly yes, appendfsync everysec: ..."
 ```
+
+Other conditions come and go with what they report: `RolloutProgressing`,
+`ShardSwitchover`, `ExternallyAccessible`, and, in a sharded cluster,
+`MasterRestartedEmpty` (reason `FailingOver`, `Stalled`, `FailedOver` or
+`DataLost`) for 10 minutes after a shard master came back with less than
+its replica held. A sharded cluster's `status.pods[]` also carry `keys`,
+`runID` and `incarnation`, which that check compares with.
 
 Backup outcomes are no longer summarized on `KividbCluster.status` — look
 at the [`KividbSnapshot`](#kividbsnapshot-read-only) objects for a given
@@ -687,7 +794,7 @@ spec:
   directives:
     maxmemory: "1073741824"        # bytes
     threads: "4"
-    aof: "yes"
+    # appendonly: "no"             # the operator writes appendonly yes unless this says otherwise
     loglevel: "notice"
     notify-keyspace-events: "Ex"
     slowlog-log-slower-than: "10000"
@@ -766,7 +873,7 @@ usage-tracking to catch this earlier).
 > **On kividb before v1.0.5 the `default` user's password does not keep
 > unauthenticated clients out.** A client that never sends `AUTH` is
 > treated as `default` (see [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md),
-> issue 1). v1.0.5 and later enforce it, including v1.1.2, the default image of this release. If you
+> issue 1). v1.0.5 and later enforce it, including v1.1.3, the default image of this release. If you
 > pin an older engine with `spec.image`, limit who can reach the cluster's
 > Services with a NetworkPolicy.
 

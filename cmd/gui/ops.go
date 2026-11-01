@@ -453,6 +453,17 @@ func (s *server) handleAPIPromote(w http.ResponseWriter, r *http.Request) {
 		// replica gives it up when it has not caught up and won its
 		// election within 5 s, and the master carries on. So this reports
 		// a request, and the view shows whether the role moved.
+		//
+		// First noted on the cluster, so the operator reports the move as
+		// asked for, not as a failover (it may see it within 100 ms).
+		patch := client.MergeFrom(c.DeepCopy())
+		if c.Annotations == nil {
+			c.Annotations = map[string]string{}
+		}
+		c.Annotations[kividbv1alpha1.ShardPromoteAnnotation] = body.Pod + " " + time.Now().UTC().Format(time.RFC3339)
+		if err := s.ctrlClient.Patch(r.Context(), c, patch); err != nil {
+			log.Printf("noting the promote of %s on %s/%s: %v", body.Pod, namespace, name, err)
+		}
 		if _, err := s.postAgent(r.Context(), target.Status.PodIP, "/cluster/failover", nil); err != nil {
 			writeJSONError(w, http.StatusBadGateway, err)
 			return

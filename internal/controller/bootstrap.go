@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -57,6 +58,18 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 		c.Status.Bootstrap.Error = fmt.Sprintf("snapshot %q is not Succeeded with an objectKey (phase=%s)", snapName, snap.Status.Phase)
 		return true, fmt.Errorf("%s", c.Status.Bootstrap.Error)
 	}
+	if err := bootstrapSnapshotUsable(&snap); err != nil {
+		// Refused before any Job runs: a restore Job would only fail on
+		// it ("gzip: invalid header", a manifest is no archive), and
+		// leave the cluster saying "restore Job running".
+		if c.Status.Bootstrap.Phase != kividbv1alpha1.BootstrapFailed {
+			r.event(c, corev1.EventTypeWarning, "BootstrapRefused", "%v", err)
+		}
+		c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapFailed
+		c.Status.Bootstrap.Error = err.Error()
+		c.Status.Bootstrap.Message = "bootstrap refused"
+		return true, err
+	}
 
 	var snapCfg kividbv1alpha1.KividbSnapshotConfig
 	if err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: snap.Spec.SnapshotConfigRef.Name}, &snapCfg); err != nil {
@@ -91,10 +104,22 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 	if job.Status.Failed > 0 {
 		c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapFailed
 		c.Status.Bootstrap.Error = "bootstrap Job failed; check Job logs"
+		c.Status.Bootstrap.Message = fmt.Sprintf("restore Job %s failed", job.Name)
 		return true, fmt.Errorf("bootstrap job failed")
 	}
 
 	return true, nil
+}
+
+// bootstrapSnapshotUsable refuses a snapshot a replicated cluster cannot be
+// seeded from: a sharded cluster's backup run, whose object is a manifest
+// naming one archive per shard, each holding a part of the hash slots.
+func bootstrapSnapshotUsable(snap *kividbv1alpha1.KividbSnapshot) error {
+	if len(snap.Status.Shards) > 0 || strings.HasSuffix(snap.Status.ObjectKey, "/manifest.json") {
+		return fmt.Errorf("snapshot %q is a sharded cluster's backup (%d shards, manifest %s): a replicated cluster cannot be seeded from it, and restoring a sharded cluster is not supported yet; restore one shard's archive by hand (docs/BACKUP_RESTORE.md)",
+			snap.Name, len(snap.Status.Shards), snap.Status.ObjectKey)
+	}
+	return nil
 }
 
 func (r *KividbClusterReconciler) ensureBootstrapPVC(ctx context.Context, c *kividbv1alpha1.KividbCluster) error {

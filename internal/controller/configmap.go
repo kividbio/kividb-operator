@@ -76,6 +76,10 @@ func renderKividbConfWith(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1al
 		}
 	}
 
+	for k, v := range persistenceDirectives(directives) {
+		directives[k] = v
+	}
+
 	if tls := kividbTLSSpec(kdbConfig); tls != nil && tls.Enabled {
 		tlsPort := tls.Port
 		if tlsPort == 0 {
@@ -105,6 +109,106 @@ func renderKividbConfWith(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1al
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// The engine never snapshots on a schedule (`save` is accepted and does
+// nothing): without the append-only file, a pod keeps only what it saved
+// at its last clean shutdown or full sync. An engine that is killed -- out
+// of memory, a node lost, a forced delete -- comes back with that, or with
+// nothing. In a sharded cluster such a master is back within the node
+// timeout, keeps its node ID and its slots, and its replicas resync from
+// it: the shard's data is gone everywhere (the AKS run's B2, 25,939
+// acknowledged writes). So the append-only file is on unless a KividbConfig
+// turns it off.
+const (
+	// defaultAppendFsync is the only policy the engine applies: the file is
+	// written before a write is acknowledged and synced once a second.
+	defaultAppendFsync = "everysec"
+)
+
+// persistenceDirectives are the directives the operator adds so that the
+// append-only file is on: appendonly yes and appendfsync everysec, unless
+// directives (a KividbConfig's) already say whether it is ("appendonly",
+// or the engine's own name for it, "aof"). "appendonly no" is how a
+// cluster opts out.
+func persistenceDirectives(directives map[string]string) map[string]string {
+	if hasDirective(directives, "appendonly") || hasDirective(directives, "aof") {
+		return nil
+	}
+	out := map[string]string{"appendonly": "yes"}
+	if !hasDirective(directives, "appendfsync") {
+		out["appendfsync"] = defaultAppendFsync
+	}
+	return out
+}
+
+// appendOnlyDisabled reports whether kdbConfig turns the append-only file
+// off: appendonly (or aof) set to anything but "yes".
+func appendOnlyDisabled(kdbConfig *kividbv1alpha1.KividbConfig) bool {
+	if kdbConfig == nil {
+		return false
+	}
+	for k, v := range kdbConfig.Spec.Directives {
+		if strings.EqualFold(k, "appendonly") || strings.EqualFold(k, "aof") {
+			if !strings.EqualFold(strings.TrimSpace(v), "yes") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// persistenceCondition is the Persistence condition: True while the
+// append-only file is on, False when a KividbConfig turned it off.
+func persistenceCondition(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) metav1.Condition {
+	if appendOnlyDisabled(kdbConfig) {
+		risk := "the writes since are lost unless a replica takes over first"
+		if isSharded(c) {
+			risk = "a shard master back within the node timeout keeps its slots and its replicas resync from it, so the shard's writes since are lost on every copy"
+		}
+		return metav1.Condition{
+			Type:   PersistenceCondition,
+			Status: metav1.ConditionFalse,
+			Reason: "AppendOnlyDisabled",
+			Message: fmt.Sprintf("KividbConfig %s sets appendonly %q, and the engine never snapshots on a schedule: an engine that is killed (out of memory, a lost node, a forced delete) restarts with only what it saved at its last clean shutdown or full sync, often nothing; %s. Remove the directive, or set appendonly yes, to keep them",
+				kdbConfig.Name, appendOnlySetting(kdbConfig), risk),
+			ObservedGeneration: c.Generation,
+		}
+	}
+	return metav1.Condition{
+		Type:               PersistenceCondition,
+		Status:             metav1.ConditionTrue,
+		Reason:             "AppendOnlyFile",
+		Message:            "appendonly yes, appendfsync everysec: a pod that restarts, however it stopped, reloads its data from its volume",
+		ObservedGeneration: c.Generation,
+	}
+}
+
+// appendOnlySetting is the value kdbConfig gives appendonly (or aof).
+func appendOnlySetting(kdbConfig *kividbv1alpha1.KividbConfig) string {
+	for k, v := range kdbConfig.Spec.Directives {
+		if strings.EqualFold(k, "appendonly") || strings.EqualFold(k, "aof") {
+			return v
+		}
+	}
+	return ""
+}
+
+// PersistenceCondition is the condition that says whether the pods keep
+// their writes on their volumes (the append-only file).
+const PersistenceCondition = "Persistence"
+
+// notePersistence sets the Persistence condition, and records a Warning
+// Event when it turns False (the condition persists, so once per change,
+// not once per reconcile).
+func (r *KividbClusterReconciler) notePersistence(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) {
+	cond := persistenceCondition(c, kdbConfig)
+	if cond.Status == metav1.ConditionFalse {
+		if prev := findCondition(c.Status.Conditions, PersistenceCondition); prev == nil || prev.Status != metav1.ConditionFalse {
+			r.event(c, corev1.EventTypeWarning, "PersistenceDisabled", "%s", cond.Message)
+		}
+	}
+	setCondition(&c.Status.Conditions, cond)
 }
 
 // hasDirective reports whether name was configured, in any letter case.

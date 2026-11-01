@@ -69,7 +69,7 @@ const (
 	// different tag or variant (e.g. ...:v1.1.2-tls). Deliberately not
 	// derived from spec.variant: the operator never guesses an image tag
 	// from spec.variant.
-	DefaultKividbImage = "docker.io/kividb/kividb:v1.1.2"
+	DefaultKividbImage = "docker.io/kividb/kividb:v1.1.3"
 
 	// ExporterPort is the redis_exporter sidecar's standard listen port
 	// (its own documented default -- not something this project invented).

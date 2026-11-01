@@ -166,7 +166,7 @@ kubectl port-forward -n kividb-operator-system svc/kividb-operator-gui 8090:8090
 ## Status
 
 This project is at `v0.6.0` — see [CHANGELOG.md](CHANGELOG.md). Validated
-against kividb **v1.1.2** (that tag is also the default when
+against kividb **v1.1.3** (that tag is also the default when
 `spec.image` is unset). The next release, 0.7.0, targets kividb
 **1.2.0**, which fixes the engine limitations the docs mention (see
 [KIVIDB_ENGINE_ISSUES.md](docs/KIVIDB_ENGINE_ISSUES.md#status-by-engine-version));

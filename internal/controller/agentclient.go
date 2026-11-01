@@ -173,6 +173,13 @@ func (a *AgentClient) ClusterFailover(ctx context.Context, podIP string) error {
 	return a.postAction(ctx, podIP, "/cluster/failover", nil)
 }
 
+// ClusterFailoverMode is CLUSTER FAILOVER FORCE or TAKEOVER on the replica
+// at podIP (agentapi.FailoverForce, agentapi.FailoverTakeover): it takes
+// over without its master's help.
+func (a *AgentClient) ClusterFailoverMode(ctx context.Context, podIP, mode string) error {
+	return a.postAction(ctx, podIP, "/cluster/failover", agentapi.ClusterFailoverRequest{Mode: mode})
+}
+
 // ClusterMigrationImport starts moving ranges, all owned by one other
 // master, to the master at podIP, and returns the engine's task ID.
 func (a *AgentClient) ClusterMigrationImport(ctx context.Context, podIP string, ranges [][2]int) (string, error) {

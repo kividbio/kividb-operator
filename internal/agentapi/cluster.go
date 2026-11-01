@@ -14,7 +14,8 @@ import (
 //	POST /cluster/replicate -> body ClusterNodeRequest      (CLUSTER REPLICATE id)
 //	POST /cluster/forget    -> body ClusterNodeRequest      (CLUSTER FORGET id)
 //	POST /cluster/announce  -> body ClusterAnnounceRequest  (CONFIG SET cluster-announce-hostname)
-//	POST /cluster/failover  -> on a replica: CLUSTER FAILOVER, its master hands over
+//	POST /cluster/failover  -> on a replica: CLUSTER FAILOVER, its master hands over;
+//	                           optional body ClusterFailoverRequest for FORCE or TAKEOVER
 
 // TotalSlots is the number of hash slots in a cluster.
 const TotalSlots = 16384
@@ -138,6 +139,21 @@ type ClusterStatusResponse struct {
 	// down). Reported, not used to decide anything.
 	MasterLastIOSeconds *int64        `json:"masterLastIOSeconds,omitempty"`
 	Nodes               []ClusterNode `json:"nodes,omitempty"`
+
+	// RunID is the engine's run_id (INFO server): new every time the
+	// engine process starts. UptimeSeconds is uptime_in_seconds. Absent
+	// from agents before 0.7.0's restart check.
+	RunID         string `json:"runID,omitempty"`
+	UptimeSeconds *int64 `json:"uptimeSeconds,omitempty"`
+	// KeyCount is the number of keys across all databases (INFO keyspace);
+	// KeyCountKnown tells a real 0 apart from an agent that does not report
+	// it.
+	KeyCount      int64 `json:"keyCount,omitempty"`
+	KeyCountKnown bool  `json:"keyCountKnown,omitempty"`
+	// AofEnabled is aof_enabled from INFO persistence; Loading is loading
+	// (the dataset is still being read from disk).
+	AofEnabled bool `json:"aofEnabled,omitempty"`
+	Loading    bool `json:"loading,omitempty"`
 }
 
 // Myself is the node's own line of CLUSTER NODES.
@@ -174,6 +190,26 @@ type ClusterSlotsRequest struct {
 // ClusterNodeRequest names a node, for /cluster/replicate and /forget.
 type ClusterNodeRequest struct {
 	NodeID string `json:"nodeID"`
+}
+
+// CLUSTER FAILOVER modes, for ClusterFailoverRequest.
+const (
+	// FailoverDefault: the master pauses its clients until the replica has
+	// caught up, then the replica wins an election. Nothing acknowledged is
+	// lost; it needs a live master that the replica is in sync with.
+	FailoverDefault = ""
+	// FailoverForce: no handshake with the master, but still an election
+	// the other masters vote in.
+	FailoverForce = "force"
+	// FailoverTakeover: no election either; the replica takes the slots
+	// with a new epoch.
+	FailoverTakeover = "takeover"
+)
+
+// ClusterFailoverRequest is the optional body of POST /cluster/failover.
+type ClusterFailoverRequest struct {
+	// Mode is FailoverDefault, FailoverForce or FailoverTakeover.
+	Mode string `json:"mode,omitempty"`
 }
 
 // ClusterAnnounceRequest is POST /cluster/announce.
