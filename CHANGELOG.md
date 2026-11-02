@@ -178,6 +178,16 @@ rules that match the old keys (see Fixed).
 
 ### Fixed
 
+- **A `KividbDbOps` restart deleted a master in place when its replica was
+  not in sync at that moment, and did not wait for the other pods or ops**
+  (also in 0.6.x), so two restarts of one cluster could take two pods
+  down. A master with a replica now always hands over first, and each pod
+  is restarted only while every other pod is Ready, in sync and not being
+  deleted, as in a rolling update (a replica that is the only unhealthy
+  pod goes first; a wait of more than 5 minutes for another pod, or 60 for
+  a restarted one, fails the op, naming the pod). The ops of one cluster
+  run one at a time, oldest first; the others stay `Pending` with a
+  `Queued` condition.
 - **`spec.bootstrapFromSnapshot` added to a running cluster scaled it to 0
   and restored the snapshot over pod-0's data** (also in 0.6.x). The CRD
   now refuses the field after creation, and a cluster whose StatefulSet

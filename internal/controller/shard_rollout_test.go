@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -234,12 +235,18 @@ func TestDbOpsMasterOfAShard(t *testing.T) {
 	if !isMasterPod(c, "s-1-1") || isMasterPod(c, "s-1-0") {
 		t.Fatal("isMasterPod")
 	}
-	// s-0-0's only replica is not in sync; s-1-0 in sync is another shard's.
-	if hasSyncedReplica(c, "s-0-0") {
-		t.Fatal("another shard's replica counted")
+	// s-0-0's only replica is not in sync: s-0-0 still hands over to it.
+	if !hasReplica(c, "s-0-0") {
+		t.Fatal("s-0-1 not counted for its own shard")
 	}
-	if !hasSyncedReplica(c, "s-1-1") {
+	if !hasReplica(c, "s-1-1") {
 		t.Fatal("s-1-0 not counted for its own shard")
+	}
+	// Without s-0-1, s-0-0 has none: s-1-0 is another shard's replica.
+	alone := c.DeepCopy()
+	alone.Status.Pods = slices.DeleteFunc(alone.Status.Pods, func(ps kividbv1alpha1.KividbPodStatus) bool { return ps.Name == "s-0-1" })
+	if hasReplica(alone, "s-0-0") {
+		t.Fatal("another shard's replica counted")
 	}
 	c.Status.Cluster = &kividbv1alpha1.ClusterModeStatus{State: "fail"}
 	p := shardedPod(c, 0, 1, "10.0.0.2")

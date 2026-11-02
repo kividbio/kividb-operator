@@ -584,11 +584,17 @@ spec:
   slot is served and every other pod is ready and in sync; a wait is
   shown on the `RolloutProgressing` condition, and one of more than 2
   minutes by a `RolloutWaiting` Warning Event, as in a replicated
-  cluster (see [Image and variant](#image-and-variant)). A shard's
-  master is never restarted while it is the master: its most caught-up
-  replica takes over first with `CLUSTER FAILOVER`, which the engine runs
-  without losing a write, and the old master is restarted as a replica
-  (a `ShardSwitchover` Event, not a `ShardFailover`). The same happens
+  cluster (see [Image and variant](#image-and-variant)). The
+  `KividbDbOps` restarts of one cluster run one at a time, oldest first;
+  the others stay `Pending` (condition `Queued`). A restart that waits
+  more than 5 minutes for the rest of the cluster, or 60 for a pod it
+  restarted to be back and in sync, fails and names the pod; the pod
+  still comes back on its own, and a new restart restarts every pod
+  again. A shard's master is never restarted while it is the master: its
+  most caught-up replica takes over first with `CLUSTER FAILOVER`, which
+  the engine runs without losing a write, and the old master is
+  restarted as a replica (a `ShardSwitchover` Event, not a
+  `ShardFailover`). The same happens
   when a shard master's pod is deleted (by hand, a drain, an eviction):
   its `preStop` hook holds the engine while the replica takes over (see
   [Stopping a master](#switchovers-and-stopping-a-master)). A shard with
