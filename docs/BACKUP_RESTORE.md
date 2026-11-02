@@ -22,16 +22,43 @@ via its own `agent` sidecar: `BGSAVE`, wait for `LASTSAVE` to advance,
 `tar.gz` `dump.kdb` (+ `appendonly.aof`, which the operator turns on by
 default from 0.7.0, see
 [CONFIGURATION.md](CONFIGURATION.md#persistence-the-append-only-file)), stream it
-straight into your S3-compatible bucket, then delete objects beyond
-`spec.retention`.
+straight into your S3-compatible bucket, then delete the cluster's own
+archives beyond `spec.retention`. Only its pods'
+`<pod-name>-<timestamp>.tar.gz` objects directly under its folder count;
+anything else there is left alone.
 
 Objects are stored at:
 
 ```
-s3://<bucket>/<pathPrefix>/<cluster-name>/<pod-name>-<UTC timestamp>.tar.gz
+s3://<bucket>/<pathPrefix>/<namespace>.<cluster-name>/<pod-name>-<UTC timestamp>.tar.gz
 ```
 
-e.g. `s3://my-kividb-backups/prod/my-cluster/my-cluster-1-20260721T000004Z.tar.gz`.
+e.g. `s3://my-kividb-backups/prod/default.my-cluster/my-cluster-1-20260721T000004Z.tar.gz`.
+Clusters of the same name in different namespaces can share a bucket and
+`pathPrefix`: neither writes to or prunes the other's folder, nor any
+folder of the older layout. Clusters in different Kubernetes clusters
+cannot: give each its own bucket or `pathPrefix`.
+
+An agent from 0.6.x or earlier (a pod not rolled yet, or a
+`spec.agentImage` pinned to it) deletes anything under its
+`<pathPrefix>/<cluster-name>/`. That folder never holds new keys of a
+cluster with the same `pathPrefix`, but it does hold those of a cluster
+whose `pathPrefix` is `<pathPrefix>/<cluster-name>` or lies under it, as it always
+did. Upgrading that agent ends it.
+
+**Upgrading from 0.6.x or earlier:** backups taken before this release stay
+at `<pathPrefix>/<cluster-name>/<cluster-name>-<ordinal>-<UTC timestamp>.tar.gz`
+(sharded runs from pre-release builds: `<pathPrefix>/<cluster-name>/<run>/`).
+Their `KividbSnapshot`s still restore, since they record the full key.
+Retention no longer deletes them: a same-named cluster in another namespace
+may have written them too, and nothing in the key tells them apart. Delete
+them by hand once newer backups hold what you want to keep. If a
+same-named cluster in another namespace shares the `pathPrefix`, first
+check which old keys its `KividbSnapshot`s still name:
+
+```bash
+kubectl get kdbs -A -o custom-columns=NS:.metadata.namespace,KEY:.status.objectKey
+```
 
 Every run — success or failure — produces a
 [`KividbSnapshot`](CONFIGURATION.md#kividbsnapshot-read-only) object
@@ -46,8 +73,8 @@ agents>;... --cluster <name> --role <source>`, finds a pod with the
 wanted role in each shard, and has all shards upload at once:
 
 ```
-s3://<bucket>/<pathPrefix>/<cluster-name>/<run>/shard-<i>-<pod>.tar.gz
-s3://<bucket>/<pathPrefix>/<cluster-name>/<run>/manifest.json
+s3://<bucket>/<pathPrefix>/<namespace>.<cluster-name>/<run>/shard-<i>-<pod>.tar.gz
+s3://<bucket>/<pathPrefix>/<namespace>.<cluster-name>/<run>/manifest.json
 ```
 
 `<run>` is the UTC time the run started (`20261025T101500Z`). Once every
@@ -164,8 +191,8 @@ kubectl get kdbs -l kividb.io/cluster=my-cluster --sort-by=.status.startTime
 
 ```
 NAME                                      CLUSTER      PHASE       OBJECT KEY
-my-cluster-backups-20260720t230004z       my-cluster   Succeeded   prod/my-cluster/my-cluster-1-20260720T230004Z.tar.gz
-my-cluster-backups-20260721t000004z       my-cluster   Succeeded   prod/my-cluster/my-cluster-1-20260721T000004Z.tar.gz
+my-cluster-backups-20260720t230004z       my-cluster   Succeeded   prod/default.my-cluster/my-cluster-1-20260720T230004Z.tar.gz
+my-cluster-backups-20260721t000004z       my-cluster   Succeeded   prod/default.my-cluster/my-cluster-1-20260721T000004Z.tar.gz
 ```
 
 For full detail on the most recent run:
@@ -223,7 +250,7 @@ If you need to rewrite an existing PVC by hand:
    then download and extract it locally:
 
    ```bash
-   aws s3 cp s3://my-kividb-backups/prod/my-cluster/my-cluster-1-20260721T000004Z.tar.gz .
+   aws s3 cp s3://my-kividb-backups/prod/default.my-cluster/my-cluster-1-20260721T000004Z.tar.gz .
    tar xzf my-cluster-1-20260721T000004Z.tar.gz   # produces dump.kdb (and appendonly.aof)
    ```
 
