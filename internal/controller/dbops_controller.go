@@ -3,12 +3,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -24,6 +26,11 @@ const dbOpsRequeue = 5 * time.Second
 // failoverRetry apart; this leaves room for those and for the replica to
 // get in sync first.
 const dbOpsHandoverTimeout = 5 * time.Minute
+
+// DbOpsWaitingCondition is set while a restart waits for the rest of the
+// cluster to be healthy before it takes the next pod down; its
+// LastTransitionTime is when the wait began.
+const DbOpsWaitingCondition = "WaitingForCluster"
 
 // KividbDbOpsReconciler executes declarative database operations
 // (currently: InPlace rolling restart) against a KividbCluster.
@@ -143,7 +150,7 @@ func (r *KividbDbOpsReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// be restarted in place). The cluster controller does the handover --
 	// in a sharded cluster, a CLUSTER FAILOVER within the shard; this only
 	// asks for it and waits.
-	if isMasterPod(&cluster, next) && hasSyncedReplica(&cluster, next) {
+	if isMasterPod(&cluster, next) && hasReplica(&cluster, next) {
 		if st.HandoverStartTime == nil {
 			now := metav1.Now()
 			st.HandoverStartTime = &now
@@ -168,6 +175,28 @@ func (r *KividbDbOpsReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	st.HandoverStartTime = nil
+
+	// The gate of reconcileRollout: every other pod is there, Ready and in
+	// sync, and none is going away. Otherwise this restart takes down a
+	// second pod (with another op's, or a rollout's) or the only in-sync one.
+	if blocker, waiting := othersUnhealthy(podList.Items, &cluster, next); waiting != "" {
+		// The only unhealthy pod, a replica still to be restarted, goes
+		// first, as in reconcileRollout: the others would wait for it forever.
+		if _, also := othersUnhealthy(podList.Items, &cluster, blocker); also == "" &&
+			slices.Contains(st.PendingPods, blocker) && !isMasterPod(&cluster, blocker) {
+			st.PendingPods = append([]string{blocker}, removeString(st.PendingPods, blocker)...)
+			return ctrl.Result{RequeueAfter: dbOpsRequeue}, r.Status().Update(ctx, &op)
+		}
+		setCondition(&op.Status.Conditions, metav1.Condition{Type: DbOpsWaitingCondition, Status: metav1.ConditionTrue, Reason: "PodNotHealthy", Message: waiting})
+		if since := meta.FindStatusCondition(op.Status.Conditions, DbOpsWaitingCondition).LastTransitionTime; time.Since(since.Time) > dbOpsHandoverTimeout {
+			return r.fail(ctx, &op, fmt.Sprintf("%s was not restarted: %s for more than %s", next, waiting, dbOpsHandoverTimeout))
+		}
+		op.Status.Message = fmt.Sprintf("waiting to restart %s: %s", next, waiting)
+		_ = r.Status().Update(ctx, &op)
+		return ctrl.Result{RequeueAfter: dbOpsRequeue}, nil
+	}
+	removeCondition(&op.Status.Conditions, DbOpsWaitingCondition)
+
 	log.Info("deleting pod for restart", "pod", next, "cluster", cluster.Name)
 	if err := r.Delete(ctx, p); err != nil && !apierrors.IsNotFound(err) {
 		return r.fail(ctx, &op, fmt.Sprintf("deleting %s: %v", next, err))
@@ -266,10 +295,11 @@ func isMasterPod(cluster *kividbv1alpha1.KividbCluster, pod string) bool {
 	return false
 }
 
-// hasSyncedReplica reports whether some pod other than master is a Ready,
-// in-sync replica (of the same shard, in a sharded cluster), i.e. whether
-// the master has anyone to hand over to.
-func hasSyncedReplica(cluster *kividbv1alpha1.KividbCluster, master string) bool {
+// hasReplica reports whether master has a replica (of its shard, in a
+// sharded cluster). Whether it is in sync right now does not matter: the
+// handover waits for that, up to dbOpsHandoverTimeout. Only a master with
+// no replica at all (replicas: 0) is restarted in place.
+func hasReplica(cluster *kividbv1alpha1.KividbCluster, master string) bool {
 	var shard *int32
 	for _, ps := range cluster.Status.Pods {
 		if ps.Name == master {
@@ -280,11 +310,39 @@ func hasSyncedReplica(cluster *kividbv1alpha1.KividbCluster, master string) bool
 		if isSharded(cluster) && (shard == nil || ps.Shard == nil || *ps.Shard != *shard) {
 			continue
 		}
-		if ps.Name != master && ps.Ready && ps.Synced && ps.Role == kividbv1alpha1.RoleReplica {
+		if ps.Name != master {
 			return true
 		}
 	}
 	return false
+}
+
+// othersUnhealthy returns a pod other than next that cannot carry the
+// cluster while next restarts, and why; "" if there is none. All
+// desiredPodCount pods must exist, and every other one must not be being
+// deleted, and be Ready and in sync (Synced is shardHealthy in a sharded
+// cluster).
+func othersUnhealthy(pods []corev1.Pod, cluster *kividbv1alpha1.KividbCluster, next string) (pod, why string) {
+	if want := desiredPodCount(cluster); int32(len(pods)) != want {
+		return "", fmt.Sprintf("%d of %d pods exist", len(pods), want)
+	}
+	status := make(map[string]kividbv1alpha1.KividbPodStatus, len(cluster.Status.Pods))
+	for _, ps := range cluster.Status.Pods {
+		status[ps.Name] = ps
+	}
+	for i := range pods {
+		p := &pods[i]
+		switch ps, ok := status[p.Name]; {
+		case p.Name == next:
+		case p.DeletionTimestamp != nil:
+			return p.Name, p.Name + " is being deleted"
+		case !isPodReady(p) || !ok || !ps.Ready:
+			return p.Name, p.Name + " is not Ready"
+		case !ps.Synced:
+			return p.Name, p.Name + " is not in sync"
+		}
+	}
+	return "", ""
 }
 
 // restartOrder lists replica pods first (lexicographically), then the
