@@ -633,6 +633,23 @@ func (h *rolesHarness) pass() (masterPod string, failover bool) {
 	return masterPod, failover
 }
 
+// withClusterInClient puts the cluster into the fake client, with its
+// status subresource, so updateStatus can write it.
+func (h *rolesHarness) withClusterInClient() {
+	h.t.Helper()
+	pods := h.list()
+	if err := kividbv1alpha1.AddToScheme(h.r.Scheme); err != nil {
+		h.t.Fatal(err)
+	}
+	b := fake.NewClientBuilder().WithScheme(h.r.Scheme).WithObjects(h.cluster).
+		WithStatusSubresource(&kividbv1alpha1.KividbCluster{})
+	for i := range pods {
+		pods[i].ResourceVersion = ""
+		b = b.WithObjects(&pods[i])
+	}
+	h.r.Client = b.Build()
+}
+
 // assertCallOrder checks that the agent calls include want, in this order.
 func (h *rolesHarness) assertCallOrder(want ...string) {
 	h.t.Helper()

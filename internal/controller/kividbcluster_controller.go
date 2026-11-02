@@ -507,7 +507,17 @@ func (r *KividbClusterReconciler) updateStatus(ctx context.Context, c *kividbv1a
 	failoverObserved := failoverHappened || masterChanged
 	logf.FromContext(ctx).V(1).Info("updateStatus", "previousMasterPod", previousMasterPod, "masterPod", masterPod, "failoverHappened", failoverHappened, "masterChanged", masterChanged, "failoverObserved", failoverObserved)
 
-	c.Status.Pods = statuses
+	// A failed reconcileRoles returns no statuses. Keep the last ones, for as
+	// long as passes fail: the failover checks read them (the master's key
+	// count, which replicas were in sync), and empty would switch them off.
+	// This pass has no fresh status for any pod, so none is kept Ready.
+	if statuses != nil || roleErr == nil {
+		c.Status.Pods = statuses
+	} else {
+		for i := range c.Status.Pods {
+			c.Status.Pods[i].Ready = false
+		}
+	}
 	c.Status.MasterPod = masterPod
 	c.Status.ObservedGeneration = c.Generation
 	c.Status.Phase = computePhase(desiredPods, statuses, masterPod, failoverObserved)
