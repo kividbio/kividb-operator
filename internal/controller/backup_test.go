@@ -136,3 +136,25 @@ func containsArgPair(args []string, flag, value string) bool {
 	}
 	return false
 }
+
+func TestValidateSnapshotConfigSchedule(t *testing.T) {
+	t.Parallel()
+	snap := func(schedule string) *kividbv1alpha1.KividbSnapshotConfig {
+		return &kividbv1alpha1.KividbSnapshotConfig{ObjectMeta: metav1.ObjectMeta{Name: "nightly"},
+			Spec: kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: schedule}}
+	}
+	for _, s := range []string{"0 2 * * *", "*/15 * * * *", "0 3 * * MON-FRI", "@hourly", "@every 1h"} {
+		if err := validateSnapshotConfig(snap(s)); err != nil {
+			t.Errorf("%q refused: %v", s, err)
+		}
+	}
+	for _, s := range []string{"0 2 * *", "0 2 * * * *", "61 * * * *", "", "daily"} {
+		err := validateSnapshotConfig(snap(s))
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("KividbSnapshotConfig nightly: spec.schedule %q", s)) {
+			t.Errorf("%q: %v, want it refused, naming the config and the schedule", s, err)
+		}
+	}
+	if validateSnapshotConfig(nil) != nil {
+		t.Error("refused no KividbSnapshotConfig")
+	}
+}

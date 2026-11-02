@@ -65,6 +65,8 @@ spec:
                     port:
                       type: integer
                       default: 6443
+                      minimum: 0
+                      maximum: 65535
                       description: TLS listener port. Defaults to 6443.
                     certSecretRef:
                       type: object

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -15,12 +16,18 @@ import (
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // fakeAgents stands in for every pod's agent sidecar, keyed by pod IP. It
@@ -685,6 +692,23 @@ func (h *rolesHarness) pass() (masterPod string, failover bool) {
 	return masterPod, failover
 }
 
+// withClusterInClient puts the cluster into the fake client, with its
+// status subresource, so updateStatus can write it.
+func (h *rolesHarness) withClusterInClient() {
+	h.t.Helper()
+	pods := h.list()
+	if err := kividbv1alpha1.AddToScheme(h.r.Scheme); err != nil {
+		h.t.Fatal(err)
+	}
+	b := fake.NewClientBuilder().WithScheme(h.r.Scheme).WithObjects(h.cluster).
+		WithStatusSubresource(&kividbv1alpha1.KividbCluster{})
+	for i := range pods {
+		pods[i].ResourceVersion = ""
+		b = b.WithObjects(&pods[i])
+	}
+	h.r.Client = b.Build()
+}
+
 // assertCallOrder checks that the agent calls include want, in this order.
 func (h *rolesHarness) assertCallOrder(want ...string) {
 	h.t.Helper()
@@ -735,4 +759,357 @@ func TestReconcileRoles_UnreachablePodKeepsItsLastOffset(t *testing.T) {
 	if s := statuses[0]; s.Name != "c1-0" || s.ReplicationOffset != 1000 || s.Keys != 42 {
 		t.Fatalf("status of the unreachable master: %+v", s)
 	}
+}
+
+// failoverCase is a replicated cluster c1 whose master c1-0 has been
+// NotReady for a minute (past its 20s threshold) while its replica c1-1 is
+// healthy: a pass that reaches the roles promotes c1-1.
+type failoverCase struct {
+	c      *kividbv1alpha1.KividbCluster
+	r      *KividbClusterReconciler
+	cl     client.Client
+	agents *fakeAgents
+}
+
+// newFailoverCase builds it with objs besides the cluster and its pods;
+// edit changes the cluster first, refuse makes the API server refuse a
+// Create or Update.
+func newFailoverCase(t *testing.T, edit func(*kividbv1alpha1.KividbCluster), refuse func(client.Object) bool, objs ...client.Object) *failoverCase {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := kividbv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	threshold := int32(20)
+	c := &kividbv1alpha1.KividbCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default", UID: "u1"},
+		Spec:       kividbv1alpha1.KividbClusterSpec{Replicas: 1, Storage: kividbv1alpha1.StorageSpec{Size: "1Gi"}},
+	}
+	c.Spec.Failover.UnhealthyThresholdSeconds = &threshold
+	if edit != nil {
+		edit(c)
+	}
+	pod := func(name, ip, role string, ready bool) *corev1.Pod {
+		labels := selectorLabels(c)
+		labels[kividbv1alpha1.RoleLabel] = role
+		cond := corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue}
+		if !ready {
+			cond.Status = corev1.ConditionFalse
+			cond.LastTransitionTime = metav1.NewTime(time.Now().Add(-time.Minute))
+		}
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: c.Namespace, Labels: labels},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: kividbContainerName,
+				Ports: []corev1.ContainerPort{{Name: KividbPortName, ContainerPort: 6380}}}}},
+			Status: corev1.PodStatus{PodIP: ip, Conditions: []corev1.PodCondition{cond},
+				ContainerStatuses: []corev1.ContainerStatus{{Name: kividbContainerName}}},
+		}
+	}
+	refused := func(obj client.Object) error {
+		if refuse != nil && refuse(obj) {
+			return fmt.Errorf("%s is invalid", obj.GetName())
+		}
+		return nil
+	}
+	objs = append(objs, c, pod("c1-0", "10.0.0.1", "master", false), pod("c1-1", "10.0.0.2", "replica", true))
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
+		WithStatusSubresource(&kividbv1alpha1.KividbCluster{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if err := refused(obj); err != nil {
+					return err
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if err := refused(obj); err != nil {
+					return err
+				}
+				return cl.Update(ctx, obj, opts...)
+			},
+		}).Build()
+	agents := &fakeAgents{status: map[string]*agentapi.StatusResponse{
+		"10.0.0.1": master(100),
+		"10.0.0.2": replicaOf("10.0.0.1", 100),
+	}}
+	r := &KividbClusterReconciler{Client: cl, Scheme: scheme, Agent: &AgentClient{http: &http.Client{Transport: agents}}}
+	// The status subresource drops what WithObjects was given; set it.
+	c.Status.MasterPod = "c1-0"
+	c.Status.Phase = kividbv1alpha1.PhaseRunning
+	c.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "AllPodsReady", Message: "master=c1-0, 2 pod(s) ready", LastTransitionTime: metav1.Now()}}
+	if err := r.Status().Update(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	return &failoverCase{c: c, r: r, cl: cl, agents: agents}
+}
+
+// reconcile runs one pass, which must come back for another look in
+// requeue without an error: an error return would put the retry on the
+// rate limiter's backoff, which grows to minutes.
+func (f *failoverCase) reconcile(t *testing.T, requeue time.Duration) *kividbv1alpha1.KividbCluster {
+	t.Helper()
+	ctx := context.Background()
+	res, err := f.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.c)})
+	if err != nil || res.RequeueAfter != requeue {
+		t.Errorf("Reconcile = %+v, %v; want a requeue in %s and no error", res, err, requeue)
+	}
+	var got kividbv1alpha1.KividbCluster
+	if err := f.cl.Get(ctx, client.ObjectKeyFromObject(f.c), &got); err != nil {
+		t.Fatal(err)
+	}
+	return &got
+}
+
+// wantFailedOver checks c1-1 was promoted and Ready is False for reason,
+// with a message that says msg.
+func (f *failoverCase) wantFailedOver(t *testing.T, got *kividbv1alpha1.KividbCluster, reason, msg string) {
+	t.Helper()
+	if got.Status.MasterPod != "c1-1" {
+		t.Errorf("status.masterPod = %q, want c1-1 promoted (agent calls %v)", got.Status.MasterPod, f.agents.calls)
+	}
+	ready := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != reason || !strings.Contains(ready.Message, msg) {
+		t.Errorf("Ready condition %+v, want False, %s, %q", ready, reason, msg)
+	}
+}
+
+// An object the API server refuses to apply -- a backup CronJob, Services
+// -- must not stop failover, nor leave the cluster Ready. The steps after
+// the refused one are skipped.
+func TestReconcile_RefusedApplyStepStillFailsOver(t *testing.T) {
+	snap := &kividbv1alpha1.KividbSnapshotConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "default"},
+		Spec: kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: "0 2 * * *",
+			S3: kividbv1alpha1.S3StorageSpec{Endpoint: "s3.example", Bucket: "b", CredentialsSecretRef: kividbv1alpha1.S3CredentialsSecretRef{Name: "s3"}}},
+	}
+	for _, tc := range []struct {
+		name    string
+		refuse  func(client.Object) bool
+		wantMsg string
+		// noSTS: the StatefulSet, applied after the refused step, is not.
+		noSTS bool
+	}{
+		{"backup CronJob", func(obj client.Object) bool {
+			_, ok := obj.(*batchv1.CronJob)
+			return ok
+		}, "reconciling backup cronjob", false},
+		{"Services", func(obj client.Object) bool {
+			_, ok := obj.(*corev1.Service)
+			return ok
+		}, "reconciling services", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFailoverCase(t, func(c *kividbv1alpha1.KividbCluster) {
+				c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "snap"}
+			}, tc.refuse, snap.DeepCopy())
+			got := f.reconcile(t, 5*time.Second)
+			f.wantFailedOver(t, got, "ReconcileError", tc.wantMsg)
+			if tc.noSTS {
+				var sts appsv1.StatefulSet
+				if err := f.cl.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: statefulSetName(f.c)}, &sts); !apierrors.IsNotFound(err) {
+					t.Errorf("StatefulSet applied after the Services were refused (get: %v)", err)
+				}
+			}
+		})
+	}
+}
+
+// wantNothingWritten checks that none of the cluster's objects was
+// written: rendered without a reference they would open the default user,
+// drop the directives or remove the backup CronJob.
+func (f *failoverCase) wantNothingWritten(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	for _, o := range []struct {
+		name string
+		obj  client.Object
+	}{
+		{secretName(f.c), &corev1.Secret{}},
+		{configSecretName(f.c), &corev1.Secret{}},
+		{headlessServiceName(f.c), &corev1.Service{}},
+		{statefulSetName(f.c), &appsv1.StatefulSet{}},
+		{backupCronJobName(f.c), &batchv1.CronJob{}},
+	} {
+		if err := f.cl.Get(ctx, client.ObjectKey{Namespace: f.c.Namespace, Name: o.name}, o.obj); !apierrors.IsNotFound(err) {
+			t.Errorf("%T %s was written (get: %v)", o.obj, o.name, err)
+		}
+	}
+}
+
+// A referenced object that cannot be read -- deleted, or not made yet by
+// whatever makes it -- holds back every write, but not failover, and the
+// error shows on the Ready condition.
+func TestReconcile_UnreadableReferenceStillFailsOver(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*kividbv1alpha1.KividbCluster)
+		objs []client.Object
+		want string
+	}{
+		{"KividbConfig", func(c *kividbv1alpha1.KividbCluster) {
+			c.Spec.ConfigRef = &corev1.LocalObjectReference{Name: "conf"}
+		}, nil, `resolving configRef: KividbConfig "conf"`},
+		{"KividbAclConfig", func(c *kividbv1alpha1.KividbCluster) {
+			c.Spec.AclConfigRef = &corev1.LocalObjectReference{Name: "acl"}
+		}, nil, `resolving aclConfigRef: KividbAclConfig "acl"`},
+		{"KividbSnapshotConfig", func(c *kividbv1alpha1.KividbCluster) {
+			c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "snap"}
+		}, nil, `resolving snapshotConfigRef: KividbSnapshotConfig "snap"`},
+		{"password Secret", func(c *kividbv1alpha1.KividbCluster) {
+			c.Spec.AclConfigRef = &corev1.LocalObjectReference{Name: "acl"}
+		}, []client.Object{&kividbv1alpha1.KividbAclConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "acl", Namespace: "default"},
+			Spec:       kividbv1alpha1.KividbAclConfigSpec{RequirePassSecretRef: &kividbv1alpha1.SecretKeyRef{Name: "pw", Key: "password"}},
+		}}, "resolving referenced secrets: secret pw"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFailoverCase(t, tc.edit, nil, tc.objs...)
+			got := f.reconcile(t, 5*time.Second)
+			f.wantFailedOver(t, got, "ReconcileError", tc.want)
+			f.wantNothingWritten(t)
+		})
+	}
+}
+
+// A port that clashes, or a backup schedule CronJobs do not accept, is
+// refused before anything is written, and failover goes on.
+func TestReconcile_InvalidReferenceStillFailsOver(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*kividbv1alpha1.KividbCluster)
+		obj  client.Object
+		want string
+	}{
+		{"tls.port is the cluster port", func(c *kividbv1alpha1.KividbCluster) {
+			c.Spec.ConfigRef = &corev1.LocalObjectReference{Name: "conf"}
+		}, &kividbv1alpha1.KividbConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "conf", Namespace: "default"},
+			Spec:       kividbv1alpha1.KividbConfigSpec{TLS: &kividbv1alpha1.KividbTLSSpec{Enabled: true, Port: 6380}},
+		}, "tls.port 6380 is also"},
+		{"schedule with four fields", func(c *kividbv1alpha1.KividbCluster) {
+			c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "snap"}
+		}, &kividbv1alpha1.KividbSnapshotConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "default"},
+			Spec:       kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: "0 2 * *"},
+		}, `KividbSnapshotConfig snap: spec.schedule "0 2 * *"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFailoverCase(t, tc.edit, nil, tc.obj)
+			got := f.reconcile(t, reconcileInterval)
+			f.wantFailedOver(t, got, "InvalidSpec", tc.want)
+			f.wantNothingWritten(t)
+		})
+	}
+}
+
+// Held back with spec.port changed, the pods still listen on the old port:
+// the roles, which point replicas at spec.port, are left alone.
+func TestReconcile_HeldBackPortChangeLeavesRolesAlone(t *testing.T) {
+	f := newFailoverCase(t, func(c *kividbv1alpha1.KividbCluster) {
+		c.Spec.Port = 6390
+		c.Spec.ConfigRef = &corev1.LocalObjectReference{Name: "conf"}
+	}, nil)
+	got := f.reconcile(t, 5*time.Second)
+	if len(f.agents.calls) != 0 || got.Status.MasterPod != "c1-0" {
+		t.Errorf("roles changed (master %q, agent calls %v), want none: the pods are not on port 6390 yet", got.Status.MasterPod, f.agents.calls)
+	}
+	ready := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ReconcileError" || !strings.Contains(ready.Message, `KividbConfig "conf"`) {
+		t.Errorf("Ready condition %+v", ready)
+	}
+}
+
+// A change to an object a cluster references reconciles that cluster, and
+// only the clusters that reference it.
+func TestReferencedObjectsEnqueueTheirClusters(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := kividbv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ref := func(name string) *corev1.LocalObjectReference { return &corev1.LocalObjectReference{Name: name} }
+	cluster := func(name, ns string, edit func(*kividbv1alpha1.KividbCluster)) *kividbv1alpha1.KividbCluster {
+		c := &kividbv1alpha1.KividbCluster{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+		edit(c)
+		return c
+	}
+	acl := &kividbv1alpha1.KividbAclConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "acl", Namespace: "a"},
+		Spec: kividbv1alpha1.KividbAclConfigSpec{
+			RequirePassSecretRef: &kividbv1alpha1.SecretKeyRef{Name: "pw", Key: "password"},
+			Users:                []kividbv1alpha1.KividbUser{{Name: "app", PasswordSecretRef: &kividbv1alpha1.SecretKeyRef{Name: "app-pw", Key: "password"}}},
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		acl,
+		cluster("one", "a", func(c *kividbv1alpha1.KividbCluster) {
+			c.Spec.ConfigRef, c.Spec.AclConfigRef, c.Spec.SnapshotConfigRef = ref("conf"), ref("acl"), ref("snap")
+		}),
+		cluster("two", "a", func(c *kividbv1alpha1.KividbCluster) {
+			c.Spec.ConfigRef = ref("conf")
+			c.Spec.Cluster = &kividbv1alpha1.ClusterModeSpec{BusSecretRef: &kividbv1alpha1.SecretKeyRef{Name: "bus", Key: "secret"}}
+		}),
+		cluster("three", "a", func(c *kividbv1alpha1.KividbCluster) { c.Spec.ConfigRef = ref("other") }),
+		cluster("four", "b", func(c *kividbv1alpha1.KividbCluster) { c.Spec.ConfigRef = ref("conf") }),
+	).Build()
+	r := &KividbClusterReconciler{Client: cl, Scheme: scheme}
+	in := func(name string) metav1.ObjectMeta { return metav1.ObjectMeta{Name: name, Namespace: "a"} }
+	for _, tc := range []struct {
+		obj  client.Object
+		want string
+	}{
+		{&kividbv1alpha1.KividbConfig{ObjectMeta: in("conf")}, "a/one a/two"},
+		{&kividbv1alpha1.KividbConfig{ObjectMeta: in("snap")}, ""},
+		{&kividbv1alpha1.KividbAclConfig{ObjectMeta: in("acl")}, "a/one"},
+		{&kividbv1alpha1.KividbSnapshotConfig{ObjectMeta: in("snap")}, "a/one"},
+		{&corev1.Secret{ObjectMeta: in("pw")}, "a/one"},
+		{&corev1.Secret{ObjectMeta: in("app-pw")}, "a/one"},
+		{&corev1.Secret{ObjectMeta: in("bus")}, "a/two"},
+		{&corev1.Secret{ObjectMeta: in("unrelated")}, ""},
+	} {
+		var got []string
+		for _, req := range r.mapReferenceToClusters(context.Background(), tc.obj) {
+			got = append(got, req.String())
+		}
+		sort.Strings(got)
+		if strings.Join(got, " ") != tc.want {
+			t.Errorf("%T %s enqueues %v, want %q", tc.obj, tc.obj.GetName(), got, tc.want)
+		}
+	}
+}
+
+// setPodPort makes the pods' kividb container declare port, as pods made
+// with spec.port = port do.
+func (f *failoverCase) setPodPort(t *testing.T, port int32) {
+	t.Helper()
+	ctx := context.Background()
+	for _, name := range []string{"c1-0", "c1-1"} {
+		var p corev1.Pod
+		if err := f.cl.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &p); err != nil {
+			t.Fatal(err)
+		}
+		p.Spec.Containers[0].Ports[0].ContainerPort = port
+		if err := f.cl.Update(ctx, &p); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A port the cluster's own spec gives that clashes with another listener
+// of the pod -- monitoring turned on for a cluster on the exporter's port
+// -- is refused before anything is written, and failover goes on.
+func TestReconcile_PortClashStillFailsOver(t *testing.T) {
+	f := newFailoverCase(t, func(c *kividbv1alpha1.KividbCluster) {
+		c.Spec.Port = ExporterPort
+		c.Spec.Monitoring.Enabled = true
+	}, nil)
+	f.setPodPort(t, ExporterPort)
+	got := f.reconcile(t, reconcileInterval)
+	f.wantFailedOver(t, got, "InvalidSpec", "spec.port 9121 is also the metrics exporter's port")
+	f.wantNothingWritten(t)
 }

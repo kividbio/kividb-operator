@@ -265,8 +265,14 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		newMasterName = candidate
 		failoverHappened = needsFailover
 		// Refresh our view of the new master so downstream REPLICAOF checks
-		// below see it as master rather than stale replica state.
-		views[candidate].status = &agentapi.StatusResponse{Role: agentapi.RoleMaster}
+		// below see it as master rather than stale replica state, keeping its
+		// key count: the empty-replica check above needs it if this new
+		// master fails before a later pass reads it.
+		stub := &agentapi.StatusResponse{Role: agentapi.RoleMaster}
+		if st := views[candidate].status; st != nil {
+			stub.KeyCount, stub.KeyCountKnown = st.KeyCount, st.KeyCountKnown
+		}
+		views[candidate].status = stub
 	}
 
 	var masterIP string

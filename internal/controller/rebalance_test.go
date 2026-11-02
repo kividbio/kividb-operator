@@ -9,6 +9,7 @@ import (
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -144,7 +145,7 @@ func (h *formingHarness) checkSpread(to int32) {
 			h.t.Errorf("shard %d (%s) owns %d slots, want %d", s, m, got, shareOf(s, to))
 		}
 		for n := int32(0); n <= h.c.Spec.Replicas; n++ {
-			if p := shardPodName(h.c, s, n); p != m && h.node(p).master != nodeID(m) {
+			if p := shardPodName(h.c, s, n); p != m && h.node(p).master != h.node(m).id {
 				h.t.Errorf("%s follows %q, not its shard's master %s", p, h.node(p).master, m)
 			}
 		}
@@ -195,6 +196,119 @@ func TestRemoveAShard(t *testing.T) {
 	}
 	if len(h.c.Status.Cluster.StaleNodeIDs) != 0 {
 		t.Errorf("stale IDs left: %v", h.c.Status.Cluster.StaleNodeIDs)
+	}
+}
+
+// loseShard2sFinish runs a 3 -> 2 to its end, then puts back the status
+// from before the pass that finished it (that status write was lost) and
+// takes shard 2's pods away, as its StatefulSet's deletion does.
+func (h *formingHarness) loseShard2sFinish() {
+	for i := 0; i < 4; i++ {
+		h.pass()
+	}
+	h.c.Spec.Shards = int32p(2)
+	before := h.c.Status.DeepCopy()
+	for i := 0; i < 20 && (i == 0 || rebalanceOf(h.c) != nil); i++ {
+		before = h.c.Status.DeepCopy()
+		h.reshardPass()
+	}
+	if rebalanceOf(h.c) != nil {
+		h.t.Fatalf("the 3 -> 2 did not finish: %+v", rebalanceOf(h.c))
+	}
+	h.c.Status = *before
+	for _, p := range h.pods() {
+		if p.Labels[ShardLabel] == "2" {
+			pod := p
+			_ = h.r.Delete(context.Background(), &pod)
+			delete(h.engine.nodes, h.engine.byIP[p.Status.PodIP])
+			delete(h.engine.byIP, p.Status.PodIP)
+		}
+	}
+}
+
+// rebalancePass is reshardPass without its StatefulSet controller's part:
+// no pod is made or taken away.
+func (h *formingHarness) rebalancePass() {
+	ctx := context.Background()
+	h.r.startRebalance(h.c)
+	observed := h.r.observeShardedPods(ctx, h.c, h.pods())
+	if _, err := h.r.reconcileClusterTopology(ctx, h.c, observed, h.exposed); err != nil {
+		h.t.Log(err)
+	}
+	h.r.reconcileRebalance(ctx, h.c, observed)
+	h.c.Status.Phase, _, _ = shardedStatus(h.c, observed)
+}
+
+// The pass that finished a 3 -> 2 deleted shard 2's StatefulSet, but its
+// status write was lost (a stale pass's write won, or the operator
+// restarted). The change is seen again, with shard 2's pods gone for good:
+// it is finished again, not waited on for ever.
+func TestRemoveAShardWhoseFinishWasLost(t *testing.T) {
+	h := newFormingHarness(t, 3, 1)
+	h.loseShard2sFinish()
+	for i := 0; i < 10 && rebalanceOf(h.c) != nil; i++ {
+		h.rebalancePass()
+	}
+	if rb := rebalanceOf(h.c); rb != nil {
+		t.Fatalf("still rebalancing: %+v, phase %s", *rb, h.c.Status.Phase)
+	}
+	for i := 0; i < 4; i++ {
+		h.reshardPass()
+	}
+	h.checkSpread(2)
+}
+
+// While a removed shard's StatefulSet is there, its pods are waited for,
+// even when it owns no slots any more.
+func TestRemovedShardWithItsStatefulSetIsWaitedFor(t *testing.T) {
+	h := newFormingHarness(t, 3, 1)
+	h.loseShard2sFinish()
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: shardStatefulSetName(h.c, 2), Namespace: h.c.Namespace}}
+	if err := h.r.Create(context.Background(), sts); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		h.rebalancePass()
+	}
+	if rb := rebalanceOf(h.c); rb == nil || rb.Phase != kividbv1alpha1.RebalanceAddingShards {
+		t.Fatalf("shard 2's pods were not waited for: %+v", rb)
+	}
+}
+
+// The same lost finish, but spec.shards is raised back to 3 before a pass
+// sees it: the change becomes {3 -> 3}, and shard 2 is made again, owning
+// nothing, though the status counts it among the shards the slots are
+// spread over. Its -0 is still named its master and given its share.
+func TestRaiseBackAfterALostFinish(t *testing.T) {
+	h := newFormingHarness(t, 3, 1)
+	h.loseShard2sFinish()
+	// Shard 2's pods come back on new volumes and addresses, as new nodes;
+	// the others still know the old ones.
+	h.ids = map[string]string{}
+	for n := int32(0); n <= h.c.Spec.Replicas; n++ {
+		name, ip := shardPodName(h.c, 2, n), fmt.Sprintf("10.0.2.%d", n+11)
+		if err := h.r.Create(context.Background(), shardedPod(h.c, 2, n, ip)); err != nil {
+			t.Fatal(err)
+		}
+		h.ids[name] = nodeID(name + "-new")
+		h.engine.add(h.ids[name], ip)
+	}
+	h.reshard(3, 30)
+	h.checkSpread(3)
+	total := 0
+	for s := int32(0); s < 3; s++ {
+		total += slotCount(h.node(h.c.Status.Shards[s].MasterPod).slots)
+	}
+	if total != agentapi.TotalSlots {
+		t.Fatalf("%d slots assigned, want %d", total, agentapi.TotalSlots)
+	}
+	// The old shard 2 nodes are forgotten everywhere.
+	for _, n := range h.engine.nodes {
+		for _, old := range []string{nodeID("s-2-0"), nodeID("s-2-1")} {
+			if _, knows := n.seen[old]; knows {
+				t.Errorf("%s still knows the old node %s", n.ip, old[30:])
+			}
+		}
 	}
 }
 
@@ -268,6 +382,54 @@ func TestNewShardMasterIsItsFirstPod(t *testing.T) {
 	h.checkSpread(3)
 	if h.c.Status.LastFailoverTime != nil || strings.Contains(events(h.r), "ShardFailover") {
 		t.Fatal("adding a shard was recorded as a failover")
+	}
+}
+
+// During a change, a shard that was there before whose -0 came back
+// empty (its volume was lost) is not given that -0 as its master: its -1
+// still replicates the old node, which owns the shard's slots.
+func TestLostVolumeMasterIsNotANewShardsMaster(t *testing.T) {
+	c := shardedCluster("s", 4, 1)
+	c.Status.Cluster = &kividbv1alpha1.ClusterModeStatus{Shards: 3, Rebalance: &kividbv1alpha1.RebalanceStatus{From: 3, To: 4}}
+	old, fresh, replica, other := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40), strings.Repeat("d", 40)
+	pod := func(shard, index int32, id string, nodes ...string) *shardPod {
+		st := &agentapi.ClusterStatusResponse{MyID: id, Nodes: agentapi.ParseClusterNodes(strings.Join(nodes, "\n"))}
+		return &shardPod{pod: shardedPod(c, shard, index, "10.0.0.1"), shard: shard, index: index, ready: true, status: st}
+	}
+	pods := []*shardPod{
+		pod(0, 0, fresh, fresh+" 10.0.0.1:6380@16380 myself,master - 0 0 1 connected"),
+		pod(0, 1, replica,
+			replica+" 10.0.0.2:6380@16380 myself,slave "+old+" 0 0 1 connected",
+			old+" 10.0.0.9:6380@16380 master,fail - 0 0 1 disconnected 0-5461"),
+		pod(1, 0, other,
+			other+" 10.0.1.1:6380@16380 myself,master - 0 0 1 connected 5462-16383",
+			old+" 10.0.0.9:6380@16380 master,fail - 0 0 1 disconnected 0-5461"),
+	}
+	if m := buildView(c, pods).masters[0]; m != nil {
+		t.Fatalf("shard 0's master is %s, which owns nothing", m.pod.Name)
+	}
+}
+
+// The same, with the shard's master s-0-1 (after a failover) not
+// answering: it may own the shard's slots, so s-0-0 waits.
+func TestLostVolumeMasterWaitsForItsShardsOtherPods(t *testing.T) {
+	c := shardedCluster("s", 4, 1)
+	c.Status.Cluster = &kividbv1alpha1.ClusterModeStatus{Shards: 3, Rebalance: &kividbv1alpha1.RebalanceStatus{From: 3, To: 4}}
+	fresh, other := strings.Repeat("b", 40), strings.Repeat("d", 40)
+	pod := func(shard, index int32, id string, nodes ...string) *shardPod {
+		p := &shardPod{pod: shardedPod(c, shard, index, "10.0.0.1"), shard: shard, index: index}
+		if id != "" {
+			p.ready, p.status = true, &agentapi.ClusterStatusResponse{MyID: id, Nodes: agentapi.ParseClusterNodes(strings.Join(nodes, "\n"))}
+		}
+		return p
+	}
+	pods := []*shardPod{
+		pod(0, 0, fresh, fresh+" 10.0.0.1:6380@16380 myself,master - 0 0 1 connected"),
+		pod(0, 1, ""), // not ready: not asked
+		pod(1, 0, other, other+" 10.0.1.1:6380@16380 myself,master - 0 0 1 connected 5462-16383"),
+	}
+	if m := buildView(c, pods).masters[0]; m != nil {
+		t.Fatalf("shard 0's master is %s, which owns nothing", m.pod.Name)
 	}
 }
 

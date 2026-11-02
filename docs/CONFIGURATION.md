@@ -37,7 +37,7 @@ All fields below are under `spec:` unless stated otherwise.
 | `imagePullSecrets` | `[]LocalObjectReference` | — | Standard Kubernetes image pull secrets. |
 | `agentImage` | string | the operator's bundled agent image | Override only if you build your own agent image. |
 | `exporterImage` | string | `oliver006/redis_exporter:v1.66.0` | Only used when `monitoring.enabled: true`. See [`monitoring`](#monitoring). |
-| `port` | int32 | `6380` | RESP port. Also written into the rendered `kividb.conf` as `port`. |
+| `port` | int32 | `6380` | RESP port, 1-65535 (0 or unset: 6380). Also written into the rendered `kividb.conf` as `port`. Not the agent's port (8081), nor the exporter's (9121) when `monitoring.enabled`; at most 55535 in a sharded cluster, whose cluster bus listens on `port` + 10000. |
 | `terminationGracePeriodSeconds` | int64 | `60` | kividb snapshots on SIGTERM; keep this comfortably above your data size's `SAVE` time. A stopping master first uses up to a third of it (5 to 30 s) to hand its role to a replica, see [Switchovers](#switchovers-and-stopping-a-master). |
 
 ### Image and variant
@@ -153,10 +153,16 @@ namespace):
   local/dev, not for anything reachable outside the cluster.
 - Omit `snapshotConfigRef` to disable scheduled backups entirely.
 
-If a reference names an object that doesn't exist, reconciliation fails
-with a clear error surfaced on `status.conditions` — the cluster does not
-silently fall back to defaults for a *typo'd* reference (only for an
-*absent* one).
+If a reference names an object that doesn't exist (or a Secret it names
+does not), the cluster's objects are left as they are, with a clear error
+on `status.conditions` (`Ready` `False`, reason `ReconcileError`) — the
+cluster does not silently fall back to defaults for a *typo'd* reference
+(only for an *absent* one). The same holds for an input the cluster
+cannot run with, such as a `port` or TLS port that another listener of
+the pod already has, or a backup schedule that is not valid cron
+(reason `InvalidSpec`, plus a Warning Event). Failover, role labels and status keep running meanwhile, and
+creating or fixing the object is picked up at once: the operator watches
+the kinds a cluster references.
 
 ### `storage`
 
@@ -586,11 +592,17 @@ spec:
   slot is served and every other pod is ready and in sync; a wait is
   shown on the `RolloutProgressing` condition, and one of more than 2
   minutes by a `RolloutWaiting` Warning Event, as in a replicated
-  cluster (see [Image and variant](#image-and-variant)). A shard's
-  master is never restarted while it is the master: its most caught-up
-  replica takes over first with `CLUSTER FAILOVER`, which the engine runs
-  without losing a write, and the old master is restarted as a replica
-  (a `ShardSwitchover` Event, not a `ShardFailover`). The same happens
+  cluster (see [Image and variant](#image-and-variant)). The
+  `KividbDbOps` restarts of one cluster run one at a time, oldest first;
+  the others stay `Pending` (condition `Queued`). A restart that waits
+  more than 5 minutes for the rest of the cluster, or 60 for a pod it
+  restarted to be back and in sync, fails and names the pod; the pod
+  still comes back on its own, and a new restart restarts every pod
+  again. A shard's master is never restarted while it is the master: its
+  most caught-up replica takes over first with `CLUSTER FAILOVER`, which
+  the engine runs without losing a write, and the old master is
+  restarted as a replica (a `ShardSwitchover` Event, not a
+  `ShardFailover`). The same happens
   when a shard master's pod is deleted (by hand, a drain, an eviction):
   its `preStop` hook holds the engine while the replica takes over (see
   [Stopping a master](#switchovers-and-stopping-a-master)). A shard with
@@ -808,7 +820,7 @@ spec:
     slowlog-log-slower-than: "10000"
   tls:
     enabled: true
-    port: 6443                      # default shown
+    port: 6443                      # default shown (0 or unset: 6443); 1-65535, see below
     certSecretRef:
       name: my-cluster-tls
       certKey: tls.crt              # default shown
@@ -869,11 +881,16 @@ spec:
   directive `tls-auth-clients: optional` (verify a certificate when one is
   sent) or `"no"` (never ask). The Services carry the TLS port too (named
   `tls`; see [`services`](#services--master-and-replica-exposure)).
+  With TLS enabled, `port` must differ from every other port of the pod:
+  the cluster's `spec.port`, the agent's (8081), the exporter's (9121)
+  when monitoring is on, and in a sharded cluster the cluster bus port
+  (`spec.port` + 10000). A clash is refused before anything is applied.
 
 A `KividbConfig` is standalone: create it once, reference it from as many
 `KividbCluster`s as share the same tuning/TLS needs via `spec.configRef`.
 Deleting one while a cluster still references it surfaces as a reconcile
-error on that cluster (see [ROADMAP.md](ROADMAP.md) for planned
+error on that cluster, which keeps failing over but is not applied until
+the KividbConfig is back (see [ROADMAP.md](ROADMAP.md) for planned
 usage-tracking to catch this earlier).
 
 ## KividbAclConfig
@@ -986,8 +1003,12 @@ spec:
     limits: {cpu: "250m", memory: "256Mi"}
 ```
 
-`schedule` and `s3` are required. Any S3-compatible endpoint works: AWS
-S3, MinIO, Ceph RGW, Backblaze B2, Cloudflare R2, etc.
+`schedule` and `s3` are required. `schedule` is checked the way
+Kubernetes checks a CronJob's (five fields, or a descriptor such as
+`@hourly`); one it would refuse is reported on each referencing cluster
+as `InvalidSpec`, and nothing of that cluster is applied until it is
+fixed. Any S3-compatible endpoint works: AWS S3, MinIO, Ceph RGW,
+Backblaze B2, Cloudflare R2, etc.
 
 ### `source`: master or replica
 

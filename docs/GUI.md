@@ -45,7 +45,9 @@ listing the dashboard is still one `List` of `KividbCluster`s.
 
 - **Actions**: add or remove a replica, promote a replica, take a snapshot,
   a rolling restart, delete. Each asks first, in a dialog; deleting asks for
-  the cluster's name.
+  the cluster's name. Each rolling restart is a `KividbDbOps`; a second one
+  of the same cluster stays `Pending` (condition `Queued`) and starts when
+  the one ahead completes, fails or is deleted.
 - **Overview**: the **topology** (the master and its replicas, with each
   one's readiness, memory, keys, replication offset and node, and how far
   each replica is behind the master), the pods (restart or promote one),

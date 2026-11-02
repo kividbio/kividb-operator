@@ -169,3 +169,39 @@ func TestClusterEnabledIsRefused(t *testing.T) {
 		t.Error("refused no KividbConfig")
 	}
 }
+
+func TestTLSPortClashIsRefused(t *testing.T) {
+	cfg := func(enabled bool, port int32) *kividbv1alpha1.KividbConfig {
+		return &kividbv1alpha1.KividbConfig{ObjectMeta: metav1.ObjectMeta{Name: "cfg"},
+			Spec: kividbv1alpha1.KividbConfigSpec{TLS: &kividbv1alpha1.KividbTLSSpec{Enabled: enabled, Port: port}}}
+	}
+	plain := &kividbv1alpha1.KividbCluster{}
+	monitored := &kividbv1alpha1.KividbCluster{}
+	monitored.Spec.Monitoring.Enabled = true
+	sharded := &kividbv1alpha1.KividbCluster{}
+	sharded.Spec.Shards = int32p(3)
+	for _, tc := range []struct {
+		name string
+		c    *kividbv1alpha1.KividbCluster
+		cfg  *kividbv1alpha1.KividbConfig
+		want string // "" for accepted
+	}{
+		{"default port", plain, cfg(true, 0), ""},
+		{"own port", plain, cfg(true, 6390), ""},
+		{"disabled, on the cluster port", plain, cfg(false, 6380), ""},
+		{"the exporter's, without exporter", plain, cfg(true, ExporterPort), ""},
+		{"the cluster port", plain, cfg(true, 6380), "tls.port 6380 is also the cluster's port"},
+		{"the agent's", plain, cfg(true, AgentPort), "is also the agent's port"},
+		{"the exporter's", monitored, cfg(true, ExporterPort), "is also the metrics exporter's port"},
+		{"out of range", plain, cfg(true, 70000), "between 1 and 65535"},
+		{"the bus port", sharded, cfg(true, 16380), "the cluster bus port"},
+	} {
+		err := validateKividbConfig(tc.c, tc.cfg)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%s: refused: %v", tc.name, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%s: %v, want %q", tc.name, err, tc.want)
+		}
+	}
+}

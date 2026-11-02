@@ -13,9 +13,15 @@ type KividbTLSSpec struct {
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
-	// Port is the TLS listener port. Defaults to 6443.
+	// Port is the TLS listener port. Defaults to 6443 (0 means the default
+	// too). Must differ from every other port of the pod: the cluster's
+	// spec.port, the agent's (8081), the exporter's (9121) when monitoring
+	// is on, and in a sharded cluster the cluster bus port (spec.port +
+	// 10000).
 	// +optional
 	// +kubebuilder:default=6443
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port,omitempty"`
 
 	// CertSecretRef points at a Secret holding the certificate, private

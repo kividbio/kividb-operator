@@ -169,10 +169,13 @@ func buildView(c *kividbv1alpha1.KividbCluster, pods []*shardPod) clusterView {
 	// master is its -0 pod, once that is up (the others wait, so the
 	// choice never changes under them). Only a new shard's: in any other,
 	// a master owning nothing is a pod whose volume was lost, and must
-	// follow the shard's master (down, maybe, and failing over).
+	// follow the shard's master (down, maybe, and failing over). A shard
+	// made again with no slot anywhere in it counts as new too: one whose
+	// removal finished, but whose status was lost before spec.shards was
+	// raised back.
 	if cl := c.Status.Cluster; cl != nil && cl.Rebalance != nil && cl.Shards > 0 {
 		for _, p := range pods {
-			if me, ok := p.myself(); ok && me.IsMaster() && p.shard >= cl.Shards && p.index == 0 && v.masters[p.shard] == nil {
+			if me, ok := p.myself(); ok && me.IsMaster() && (p.shard >= cl.Shards || !shardHoldsSlots(pods, p.shard)) && p.index == 0 && v.masters[p.shard] == nil {
 				v.masters[p.shard] = p
 			}
 		}
@@ -193,6 +196,28 @@ func buildView(c *kividbv1alpha1.KividbCluster, pods []*shardPod) clusterView {
 		}
 	}
 	return v
+}
+
+// shardHoldsSlots: a pod of shard s owns slots, or replicates a node that
+// does in its own view (its master, down maybe, whose volume was lost), or
+// did not answer (it may be the shard's master).
+func shardHoldsSlots(pods []*shardPod, s int32) bool {
+	for _, p := range pods {
+		if p.shard != s {
+			continue
+		}
+		me, ok := p.myself()
+		if !ok {
+			return true
+		}
+		if me.SlotCount() > 0 {
+			return true
+		}
+		if m, known := p.status.Node(me.MasterID); me.MasterID != "" && known && m.SlotCount() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // mustOwnNothing: the pod's node is a master owning no slots.
