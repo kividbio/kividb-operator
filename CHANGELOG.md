@@ -180,10 +180,15 @@ rules that match the old keys (see Fixed).
 
 - **A master that restarted with the append-only file on was failed over
   to a replica behind it** (new in this release). A killed engine starts a
-  new stream, which was taken as lost writes; a master holding at least as
-  many keys as the replica now stays the master, and the replicas resync
-  from it. Key counts miss a lost overwrite or delete; the replicas resync
-  without it.
+  new stream, which was taken as lost writes. On engine 1.2.0 or later
+  with `aof-ack-after-write yes` (its default), which acknowledges a write
+  only once it is in the file, a master holding at least as many keys as
+  the replica now stays the master, and the replicas resync from it. Key
+  counts miss a lost overwrite or delete; the replicas resync without it.
+  Any other master is still failed over, as is one whose agent does not
+  report the engine's version and that setting (the agent's `/status` now
+  carries both): engine 1.1.x acknowledges a write before it is in the
+  file, so a killed master can lack writes its replica holds.
 - **A `KividbDbOps` restart deleted a master in place when its replica was
   not in sync at that moment, and did not wait for the other pods or ops**
   (also in 0.6.x), so two restarts of one cluster could take two pods

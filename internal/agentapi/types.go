@@ -71,6 +71,17 @@ type StatusResponse struct {
 	// the field at all.
 	KeyCount      int64 `json:"keyCount"`
 	KeyCountKnown bool  `json:"keyCountKnown,omitempty"`
+	// EngineVersion is the engine's kividb_version (INFO server), such as
+	// "1.1.3" or "1.2.0-rc7". Absent from agents before 0.7.0.
+	EngineVersion string `json:"engineVersion,omitempty"`
+	// AofAckAfterWrite is the engine's aof-ack-after-write setting (CONFIG
+	// GET): "yes" when, with the append-only file on, a write is
+	// acknowledged only once its record is in the file. Engines before
+	// 1.2.0 have no such setting, but remember whatever CONFIG SET gives
+	// one they do not know, so it means something only with an
+	// EngineVersion of 1.2.0 or later. Absent when the engine reports
+	// none, and from agents before 0.7.0.
+	AofAckAfterWrite string `json:"aofAckAfterWrite,omitempty"`
 }
 
 // PreStopTimeoutEnv names the agent's environment variable holding how
