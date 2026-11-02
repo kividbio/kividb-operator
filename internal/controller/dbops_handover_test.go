@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -372,7 +373,428 @@ func TestDbOpsRestartWaitTimesOut(t *testing.T) {
 	if got.Status.Phase != kividbv1alpha1.DbOpsFailed || !strings.Contains(got.Status.Error, "c1-1 is not Ready") {
 		t.Fatalf("phase %s, error %q: want Failed naming c1-1", got.Status.Phase, got.Status.Error)
 	}
+	if cond := meta.FindStatusCondition(got.Status.Conditions, DbOpsWaitingCondition); cond != nil {
+		t.Fatalf("failed op still shows %v", cond)
+	}
 	if podExists(t, r, "c1-2") == nil {
 		t.Fatal("c1-2 deleted")
+	}
+}
+
+// The wait ends when the cluster is healthy again, and a later wait (for
+// another pod) starts its own 5 minutes rather than inheriting the first.
+func TestDbOpsWaitEndsWhenTheClusterIsHealthy(t *testing.T) {
+	c, pods, op := replicatedForRestart(2, "c1-1", "c1-2")
+	long := metav1.NewTime(time.Now().Add(-dbOpsHandoverTimeout - time.Second))
+	op.Status.Conditions = []metav1.Condition{{Type: DbOpsWaitingCondition, Status: metav1.ConditionTrue, Reason: "PodNotHealthy", LastTransitionTime: long}}
+	r := newDbOpsReconciler(t, c, pods[0], pods[1], pods[2], op)
+	reconcileOp(t, r, op)
+	if podExists(t, r, "c1-1") != nil {
+		t.Fatal("c1-1 not restarted with every other pod healthy")
+	}
+
+	// c1-1 comes back; then the master falls out of sync before c1-2.
+	ctx := context.Background()
+	fresh := pods[1].DeepCopy()
+	fresh.ResourceVersion, fresh.UID = "", "new"
+	if err := r.Create(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	reconcileOp(t, r, op)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(c), c); err != nil {
+		t.Fatal(err)
+	}
+	c.Status.Pods[0].Synced = false
+	if err := r.Status().Update(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	reconcileOp(t, r, op)
+	var got kividbv1alpha1.KividbDbOps
+	if err := r.Get(ctx, client.ObjectKeyFromObject(op), &got); err != nil {
+		t.Fatal(err)
+	}
+	cond := meta.FindStatusCondition(got.Status.Conditions, DbOpsWaitingCondition)
+	if got.Status.Phase != kividbv1alpha1.DbOpsRunning || cond == nil || !cond.LastTransitionTime.After(long.Time) {
+		t.Fatalf("phase %s, error %q, condition %v: want Running and a new wait", got.Status.Phase, got.Status.Error, cond)
+	}
+}
+
+// restartOpAt is a fresh restart of cluster, created at created.
+func restartOpAt(name, cluster string, created time.Time) *kividbv1alpha1.KividbDbOps {
+	return &kividbv1alpha1.KividbDbOps{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", CreationTimestamp: metav1.NewTime(created)},
+		Spec:       kividbv1alpha1.KividbDbOpsSpec{ClusterRef: corev1.LocalObjectReference{Name: cluster}, Op: kividbv1alpha1.DbOpsRestart},
+	}
+}
+
+// One restart per cluster at a time: an op that has started goes on, then
+// the oldest (by creation, then name); the others wait without starting.
+func TestDbOpsOneOpPerCluster(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	op := func(name, cluster string, created time.Duration, phase kividbv1alpha1.DbOpsPhase) *kividbv1alpha1.KividbDbOps {
+		o := restartOpAt(name, cluster, now.Add(created))
+		o.Status.Phase = phase
+		return o
+	}
+	tests := []struct {
+		name  string
+		other *kividbv1alpha1.KividbDbOps
+		waits bool
+	}{
+		{"an older op running", op("restart-1", "c1", -3*time.Second, kividbv1alpha1.DbOpsRunning), true},
+		{"an older op not started yet", op("restart-1", "c1", -3*time.Second, ""), true},
+		{"an op of the same second, earlier by name", op("restart-1", "c1", 0, ""), true},
+		{"an op of the same second, later by name", op("restart-3", "c1", 0, ""), false},
+		{"a younger op that has started", op("restart-3", "c1", 3*time.Second, kividbv1alpha1.DbOpsRunning), true},
+		{"an older op completed", op("restart-1", "c1", -3*time.Second, kividbv1alpha1.DbOpsCompleted), false},
+		{"an older op failed", op("restart-1", "c1", -3*time.Second, kividbv1alpha1.DbOpsFailed), false},
+		{"an older op of another cluster", op("restart-1", "c2", -3*time.Second, kividbv1alpha1.DbOpsRunning), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, pods, _ := replicatedForRestart(2)
+			mine := restartOpAt("restart-2", "c1", now)
+			r := newDbOpsReconciler(t, c, pods[0], pods[1], pods[2], tt.other, mine)
+			reconcileOp(t, r, mine)
+			var got kividbv1alpha1.KividbDbOps
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(mine), &got); err != nil {
+				t.Fatal(err)
+			}
+			cond := meta.FindStatusCondition(got.Status.Conditions, DbOpsQueuedCondition)
+			if !tt.waits {
+				if got.Status.Phase != kividbv1alpha1.DbOpsRunning || cond != nil {
+					t.Fatalf("phase %s, condition %v: want Running", got.Status.Phase, cond)
+				}
+				return
+			}
+			if got.Status.Phase != kividbv1alpha1.DbOpsPending || got.Status.StartTime != nil || got.Status.Restart != nil {
+				t.Fatalf("phase %s, start %v, restart %v: want Pending and not started", got.Status.Phase, got.Status.StartTime, got.Status.Restart)
+			}
+			if cond == nil || cond.Status != metav1.ConditionTrue || !strings.Contains(cond.Message, tt.other.Name) || !strings.Contains(got.Status.Message, tt.other.Name) {
+				t.Fatalf("condition %v, message %q: want both to name %s", cond, got.Status.Message, tt.other.Name)
+			}
+		})
+	}
+}
+
+// Two ops already running on one cluster (started by an operator without
+// the queue): the younger stops, and its waits start over when it goes on
+// rather than failing it at once.
+func TestDbOpsQueuedOpKeepsNoTimers(t *testing.T) {
+	c, pods, mine := replicatedForRestart(2, "c1-2", "c1-0")
+	now := time.Now()
+	long := metav1.NewTime(now.Add(-dbOpsHandoverTimeout - time.Second))
+	mine.CreationTimestamp = metav1.NewTime(now)
+	mine.Status.Restart.HandoverStartTime = &long
+	mine.Status.Conditions = []metav1.Condition{{Type: DbOpsWaitingCondition, Status: metav1.ConditionTrue, Reason: "PodNotHealthy", LastTransitionTime: long}}
+	older := restartOpAt("restart-0", "c1", now.Add(-time.Minute))
+	older.Status.Phase = kividbv1alpha1.DbOpsRunning
+	r := newDbOpsReconciler(t, c, pods[0], pods[1], pods[2], older, mine)
+	reconcileOp(t, r, mine)
+	var got kividbv1alpha1.KividbDbOps
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(mine), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != kividbv1alpha1.DbOpsRunning || podExists(t, r, "c1-2") == nil {
+		t.Fatalf("phase %s, c1-2 deleted %v: want it to wait for restart-0", got.Status.Phase, podExists(t, r, "c1-2") == nil)
+	}
+	if got.Status.Restart.HandoverStartTime != nil || meta.FindStatusCondition(got.Status.Conditions, DbOpsWaitingCondition) != nil {
+		t.Fatalf("handover start %v, conditions %v: want both cleared while queued", got.Status.Restart.HandoverStartTime, got.Status.Conditions)
+	}
+}
+
+// An op whose cluster is gone fails at once, as before, whatever else is
+// queued for that cluster.
+func TestDbOpsQueuedOpOfAMissingCluster(t *testing.T) {
+	now := time.Now()
+	a := restartOpAt("restart-1", "gone", now.Add(-3*time.Second))
+	a.Status.Phase = kividbv1alpha1.DbOpsRunning
+	b := restartOpAt("restart-2", "gone", now)
+	r := newDbOpsReconciler(t, a, b)
+	for _, op := range []*kividbv1alpha1.KividbDbOps{b, a} {
+		reconcileOp(t, r, op)
+		var got kividbv1alpha1.KividbDbOps
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(op), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status.Phase != kividbv1alpha1.DbOpsFailed || !strings.Contains(got.Status.Error, `cluster "gone" not found`) {
+			t.Fatalf("%s: phase %s, error %q: want Failed, cluster not found", op.Name, got.Status.Phase, got.Status.Error)
+		}
+	}
+}
+
+// Restart clicked twice in the GUI, 3 s apart: the second op starts when
+// the first has completed, and each restarts every pod once, in turn. The
+// loop stands in for the StatefulSet (a deleted pod comes back) and the
+// cluster controller (a master asked to step down hands over).
+func TestDbOpsDoubleClickRestartsOneAfterTheOther(t *testing.T) {
+	c, pods, _ := replicatedForRestart(2)
+	now := time.Now().Truncate(time.Second)
+	a := restartOpAt("c1-restart-1", "c1", now.Add(-3*time.Second))
+	b := restartOpAt("c1-restart-2", "c1", now)
+	r := newDbOpsReconciler(t, c, pods[0], pods[1], pods[2], a, b)
+	ctx := context.Background()
+	handOver := func(from *corev1.Pod) {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(c), c); err != nil {
+			t.Fatal(err)
+		}
+		to := "c1-1"
+		if from.Name == to {
+			to = "c1-2"
+		}
+		c.Status.MasterPod = to
+		for i := range c.Status.Pods {
+			c.Status.Pods[i].Role = kividbv1alpha1.RoleReplica
+			if c.Status.Pods[i].Name == to {
+				c.Status.Pods[i].Role = kividbv1alpha1.RoleMaster
+			}
+		}
+		if err := r.Status().Update(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		delete(from.Annotations, StepDownAnnotation)
+		from.Labels[kividbv1alpha1.RoleLabel] = string(kividbv1alpha1.RoleReplica)
+		if err := r.Update(ctx, from); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finished := func(op *kividbv1alpha1.KividbDbOps) *kividbv1alpha1.KividbDbOps {
+		var got kividbv1alpha1.KividbDbOps
+		if err := r.Get(ctx, client.ObjectKeyFromObject(op), &got); err != nil {
+			t.Fatal(err)
+		}
+		return &got
+	}
+	var restarts []string // "op/pod", in order
+	for i := 0; i < 100 && finished(b).Status.CompletionTime == nil; i++ {
+		for _, op := range []*kividbv1alpha1.KividbDbOps{a, b} {
+			reconcileOp(t, r, op)
+			for _, p := range pods {
+				switch cur := podExists(t, r, p.Name); {
+				case cur == nil:
+					restarts = append(restarts, op.Name+"/"+p.Name)
+					fresh := p.DeepCopy()
+					fresh.ResourceVersion, fresh.UID = "", types.UID(fmt.Sprint(len(restarts)))
+					if err := r.Create(ctx, fresh); err != nil {
+						t.Fatal(err)
+					}
+				case cur.Annotations[StepDownAnnotation] == "true":
+					handOver(cur)
+				}
+			}
+		}
+	}
+	for _, op := range []*kividbv1alpha1.KividbDbOps{a, b} {
+		if got := finished(op); got.Status.Phase != kividbv1alpha1.DbOpsCompleted {
+			t.Fatalf("%s: phase %s, error %q; restarts %v", op.Name, got.Status.Phase, got.Status.Error, restarts)
+		}
+	}
+	if len(restarts) != 6 {
+		t.Fatalf("restarts %v: want each of 3 pods once per op", restarts)
+	}
+	for i, x := range restarts {
+		want := a.Name
+		if i >= 3 {
+			want = b.Name
+		}
+		if !strings.HasPrefix(x, want+"/") || slices.Contains(restarts[:i], x) {
+			t.Fatalf("restarts %v: want %s's 3 pods, then %s's", restarts, a.Name, b.Name)
+		}
+	}
+}
+
+// A restarted pod that does not come back fails the op after
+// dbOpsRestartTimeout, naming it, and the next op of the cluster goes on.
+func TestDbOpsRestartedPodNotBackTimesOut(t *testing.T) {
+	// A pod the kubelet still lets start must not fail the op.
+	probe := kividbStartupProbe()
+	if ceiling := time.Duration(probe.PeriodSeconds*probe.FailureThreshold) * time.Second; dbOpsRestartTimeout <= ceiling {
+		t.Fatalf("dbOpsRestartTimeout %s is not above the startup probe's %s", dbOpsRestartTimeout, ceiling)
+	}
+	c, pods, op := replicatedForRestart(2, "c1-1", "c1-2", "c1-0")
+	now := time.Now()
+	op.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
+	pods[1].UID = "deleted"
+	op.Status.Restart.CurrentPod, op.Status.Restart.CurrentPodUID = "c1-1", "deleted"
+	next := restartOpAt("restart-next", "c1", now)
+	r := newDbOpsReconciler(t, c, pods[0], pods[1], pods[2], op, next)
+	reconcileOp(t, r, op)
+
+	ctx := context.Background()
+	var got kividbv1alpha1.KividbDbOps
+	if err := r.Get(ctx, client.ObjectKeyFromObject(op), &got); err != nil {
+		t.Fatal(err)
+	}
+	cond := meta.FindStatusCondition(got.Status.Conditions, DbOpsWaitingCondition)
+	if got.Status.Phase != kividbv1alpha1.DbOpsRunning || cond == nil {
+		t.Fatalf("phase %s, condition %v: want Running and the wait recorded", got.Status.Phase, cond)
+	}
+	cond.LastTransitionTime = metav1.NewTime(now.Add(-dbOpsRestartTimeout - time.Second))
+	if err := r.Status().Update(ctx, &got); err != nil {
+		t.Fatal(err)
+	}
+	reconcileOp(t, r, op)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(op), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != kividbv1alpha1.DbOpsFailed || !strings.Contains(got.Status.Error, "c1-1") || !strings.Contains(got.Status.Error, "to terminate") {
+		t.Fatalf("phase %s, error %q: want Failed naming c1-1", got.Status.Phase, got.Status.Error)
+	}
+	reconcileOp(t, r, next)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(next), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != kividbv1alpha1.DbOpsRunning {
+		t.Fatalf("next op: phase %s, message %q: want Running", got.Status.Phase, got.Status.Message)
+	}
+}
+
+// The wait for a restarted pod ends when it is back: a wait of the health
+// gate after it starts its own 5 minutes.
+func TestDbOpsRestartWaitIsNotTheGateWait(t *testing.T) {
+	c, pods, op := replicatedForRestart(2, "c1-1", "c1-2")
+	ten := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	op.Status.Restart.CurrentPod, op.Status.Restart.CurrentPodUID = "c1-1", "deleted"
+	op.Status.Conditions = []metav1.Condition{{Type: DbOpsWaitingCondition, Status: metav1.ConditionTrue, Reason: "PodRestarting", LastTransitionTime: ten}}
+	c.Status.Pods[0].Synced = false // the master, so the gate holds c1-2
+	r := newDbOpsReconciler(t, c, pods[0], pods[1], pods[2], op)
+	for range 2 {
+		reconcileOp(t, r, op)
+	}
+	var got kividbv1alpha1.KividbDbOps
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(op), &got); err != nil {
+		t.Fatal(err)
+	}
+	cond := meta.FindStatusCondition(got.Status.Conditions, DbOpsWaitingCondition)
+	if got.Status.Phase != kividbv1alpha1.DbOpsRunning || !slices.Contains(got.Status.Restart.CompletedPods, "c1-1") || cond == nil || !cond.LastTransitionTime.After(ten.Time) {
+		t.Fatalf("phase %s, error %q, completed %v, condition %v: want c1-1 done and a new wait", got.Status.Phase, got.Status.Error, got.Status.Restart.CompletedPods, cond)
+	}
+}
+
+// The wait for a restarted pod starts when the op deletes it, not when an
+// earlier wait of the gate began.
+func TestDbOpsRestartWaitStartsWhenThePodIsDeleted(t *testing.T) {
+	c, pods, op := replicatedForRestart(2, "c1-1", "c1-2")
+	c.Status.Pods[0].Synced = false
+	r := newDbOpsReconciler(t, c, pods[0], pods[1], pods[2], op)
+	reconcileOp(t, r, op) // the gate waits for c1-0
+
+	ctx := context.Background()
+	var got kividbv1alpha1.KividbDbOps
+	if err := r.Get(ctx, client.ObjectKeyFromObject(op), &got); err != nil {
+		t.Fatal(err)
+	}
+	cond := meta.FindStatusCondition(got.Status.Conditions, DbOpsWaitingCondition)
+	if cond == nil || cond.Reason != "PodNotHealthy" {
+		t.Fatalf("condition %v: want the gate waiting", cond)
+	}
+	gateStart := metav1.NewTime(time.Now().Add(-4 * time.Minute))
+	cond.LastTransitionTime = gateStart
+	if err := r.Status().Update(ctx, &got); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(c), c); err != nil {
+		t.Fatal(err)
+	}
+	c.Status.Pods[0].Synced = true
+	if err := r.Status().Update(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	deleted := time.Now().Add(-time.Second) // LastTransitionTime has 1 s resolution
+	reconcileOp(t, r, op)                   // the gate passes; c1-1 is deleted
+	if podExists(t, r, "c1-1") != nil {
+		t.Fatal("c1-1 not restarted once the cluster was healthy")
+	}
+	reconcileOp(t, r, op) // waits for c1-1 to be recreated
+	if err := r.Get(ctx, client.ObjectKeyFromObject(op), &got); err != nil {
+		t.Fatal(err)
+	}
+	cond = meta.FindStatusCondition(got.Status.Conditions, DbOpsWaitingCondition)
+	if cond == nil || cond.Reason != "PodRestarting" || cond.LastTransitionTime.Time.Before(deleted) {
+		t.Fatalf("condition %v: want PodRestarting since the delete, not since the gate wait at %s", cond, gateStart.Format(time.RFC3339))
+	}
+}
+
+// A gate wait that ends because next became the master (a failover
+// meanwhile) does not carry its start into the gate after the handover.
+func TestDbOpsGateWaitDoesNotSpanAHandover(t *testing.T) {
+	c, pods, op := replicatedForRestart(2, "c1-1")
+	old := metav1.NewTime(time.Now().Add(-dbOpsHandoverTimeout - 30*time.Second))
+	op.Status.Conditions = []metav1.Condition{{Type: DbOpsWaitingCondition, Status: metav1.ConditionTrue, Reason: "PodNotHealthy", LastTransitionTime: old}}
+	c.Status.MasterPod = "c1-1"
+	c.Status.Pods[0].Role, c.Status.Pods[1].Role = kividbv1alpha1.RoleReplica, kividbv1alpha1.RoleMaster
+	r := newDbOpsReconciler(t, c, pods[0], pods[1], pods[2], op)
+	reconcileOp(t, r, op) // handover requested
+	ctx := context.Background()
+	var cl kividbv1alpha1.KividbCluster
+	if err := r.Get(ctx, client.ObjectKeyFromObject(c), &cl); err != nil {
+		t.Fatal(err)
+	}
+	cl.Status.MasterPod = "c1-2"
+	cl.Status.Pods[1].Role, cl.Status.Pods[2].Role = kividbv1alpha1.RoleReplica, kividbv1alpha1.RoleMaster
+	cl.Status.Pods[0].Synced = false
+	if err := r.Status().Update(ctx, &cl); err != nil {
+		t.Fatal(err)
+	}
+	reconcileOp(t, r, op)
+	var got kividbv1alpha1.KividbDbOps
+	if err := r.Get(ctx, client.ObjectKeyFromObject(op), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != kividbv1alpha1.DbOpsRunning {
+		t.Fatalf("phase %s, error %q: want Running, a new gate wait", got.Status.Phase, got.Status.Error)
+	}
+}
+
+// An op that finds no pod to restart waits, but not forever.
+func TestDbOpsNoPodsTimesOut(t *testing.T) {
+	c := testCluster("c1")
+	c.Spec.Replicas = 1
+	op := restartOpAt("restart", "c1", time.Now())
+	op.Status.Phase = kividbv1alpha1.DbOpsRunning
+	r := newDbOpsReconciler(t, c, op)
+	reconcileOp(t, r, op)
+	ctx := context.Background()
+	var got kividbv1alpha1.KividbDbOps
+	if err := r.Get(ctx, client.ObjectKeyFromObject(op), &got); err != nil {
+		t.Fatal(err)
+	}
+	cond := meta.FindStatusCondition(got.Status.Conditions, DbOpsWaitingCondition)
+	if got.Status.Phase != kividbv1alpha1.DbOpsRunning || cond == nil {
+		t.Fatalf("phase %s, condition %v: want Running and the wait recorded", got.Status.Phase, cond)
+	}
+	cond.LastTransitionTime = metav1.NewTime(time.Now().Add(-dbOpsRestartTimeout - time.Second))
+	if err := r.Status().Update(ctx, &got); err != nil {
+		t.Fatal(err)
+	}
+	reconcileOp(t, r, op)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(op), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != kividbv1alpha1.DbOpsFailed || !strings.Contains(got.Status.Error, "no pods to restart") {
+		t.Fatalf("phase %s, error %q: want Failed, no pods", got.Status.Phase, got.Status.Error)
+	}
+}
+
+// Two ops running at once, created the same second (both started before
+// the queue, or in the start race): the later by name, reconciled first,
+// waits, and the earlier goes on.
+func TestDbOpsTwoRunningOpsOfTheSameSecond(t *testing.T) {
+	c, pods, a := replicatedForRestart(2, "c1-1", "c1-2", "c1-0")
+	a.Name, a.CreationTimestamp = "restart-1", metav1.NewTime(time.Now().Truncate(time.Second))
+	b := a.DeepCopy()
+	b.Name = "restart-2"
+	r := newDbOpsReconciler(t, c, pods[0], pods[1], pods[2], a, b)
+	reconcileOp(t, r, b)
+	var got kividbv1alpha1.KividbDbOps
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(b), &got); err != nil {
+		t.Fatal(err)
+	}
+	if cond := meta.FindStatusCondition(got.Status.Conditions, DbOpsQueuedCondition); cond == nil || !strings.Contains(cond.Message, "restart-1") || podExists(t, r, "c1-1") == nil {
+		t.Fatalf("restart-2: condition %v, c1-1 deleted %v: want it queued behind restart-1", cond, podExists(t, r, "c1-1") == nil)
+	}
+	reconcileOp(t, r, a)
+	if podExists(t, r, "c1-1") != nil {
+		t.Fatal("restart-1 did not go on")
 	}
 }
