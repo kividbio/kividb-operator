@@ -62,6 +62,8 @@ spec:
               x-kubernetes-validations:
                 - rule: "has(self.shards) == has(oldSelf.shards)"
                   message: "spec.shards cannot be added or removed after creation: a cluster is sharded, or not, for good"
+                - rule: "!has(self.bootstrapFromSnapshot) || has(oldSelf.bootstrapFromSnapshot)"
+                  message: "spec.bootstrapFromSnapshot cannot be added after creation: it seeds a new cluster, and on a running one would overwrite pod-0's data"
               properties:
                 shards:
                   type: integer

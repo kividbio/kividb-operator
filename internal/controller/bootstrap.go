@@ -6,12 +6,14 @@ import (
 	"strings"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -35,11 +37,59 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 		return false, nil
 	}
 	if c.Spec.BootstrapFromSnapshot == nil {
+		if b := c.Status.Bootstrap; b != nil && b.Phase == kividbv1alpha1.BootstrapPending && b.Message == bootstrapWaitMessage {
+			c.Status.Bootstrap = nil // removed while waiting: nothing was restored
+		}
 		return false, nil
 	}
 
 	snapName := c.Spec.BootstrapFromSnapshot.SnapshotRef.Name
-	if c.Status.Bootstrap == nil {
+	if c.Status.Bootstrap == nil || bootstrapWaiting(c) {
+		// The bootstrap's own StatefulSet is only created after this status
+		// is saved, so one of ours that exists now belongs to a running
+		// cluster: restoring would scale it to 0 and overwrite pod-0's data.
+		// One not ours, or being deleted, is left from an earlier cluster
+		// with this name: wait until it is gone.
+		var sts appsv1.StatefulSet
+		err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: statefulSetName(c)}, &sts)
+		earlier := err == nil && (!metav1.IsControlledBy(&sts, c) || sts.DeletionTimestamp != nil)
+		if apierrors.IsNotFound(err) {
+			// No StatefulSet of ours yet, so a pod with this cluster's
+			// labels is the earlier cluster's, possibly still on pod-0's PVC.
+			var pods corev1.PodList
+			if err := r.List(ctx, &pods, client.InNamespace(c.Namespace), client.MatchingLabels(selectorLabels(c))); err != nil {
+				return true, err
+			}
+			earlier = len(pods.Items) > 0
+		}
+		if earlier {
+			if !bootstrapWaiting(c) {
+				r.event(c, corev1.EventTypeWarning, "BootstrapWaiting",
+					"spec.bootstrapFromSnapshot (%s) waits: StatefulSet %s or its pods are left from an earlier cluster with this name, and the restore starts once they are deleted", snapName, statefulSetName(c))
+			}
+			c.Status.Bootstrap = &kividbv1alpha1.BootstrapStatus{
+				Phase:        kividbv1alpha1.BootstrapPending,
+				SnapshotName: snapName,
+				Message:      bootstrapWaitMessage,
+			}
+			return true, nil
+		}
+		if err == nil {
+			r.event(c, corev1.EventTypeWarning, "BootstrapSkipped",
+				"spec.bootstrapFromSnapshot (%s) ignored: the cluster is already running, and bootstrap only seeds a new cluster", snapName)
+			c.Status.Bootstrap = &kividbv1alpha1.BootstrapStatus{
+				Phase:        kividbv1alpha1.BootstrapCompleted,
+				Completed:    true,
+				SnapshotName: snapName,
+				Message:      "skipped: the cluster was already running",
+			}
+			return false, nil
+		}
+		if !apierrors.IsNotFound(err) {
+			return true, err
+		}
+	}
+	if c.Status.Bootstrap == nil || bootstrapWaiting(c) {
 		c.Status.Bootstrap = &kividbv1alpha1.BootstrapStatus{
 			Phase:        kividbv1alpha1.BootstrapPending,
 			SnapshotName: snapName,
@@ -274,6 +324,17 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 		return nil, err
 	}
 	return job, nil
+}
+
+// bootstrapWaitMessage is persisted state: bootstrapWaiting keys on it, so
+// changing the text strands clusters already waiting.
+const bootstrapWaitMessage = "waiting for the StatefulSet and pods of an earlier cluster with this name to be deleted"
+
+// bootstrapWaiting is true while the bootstrap waits for the StatefulSet or
+// pods of an earlier cluster with this name to be deleted.
+func bootstrapWaiting(c *kividbv1alpha1.KividbCluster) bool {
+	b := c.Status.Bootstrap
+	return c.Spec.BootstrapFromSnapshot != nil && b != nil && b.Phase == kividbv1alpha1.BootstrapPending && b.Message == bootstrapWaitMessage
 }
 
 // bootstrapSeededPod names the pod whose volume reconcileBootstrap seeded

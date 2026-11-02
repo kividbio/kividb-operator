@@ -150,10 +150,57 @@ func TestReconcileRoles_FailoverSkipsEmptiedReplicas(t *testing.T) {
 		h.assertLabels(map[string]string{"c1-0": "master", "c1-1": "replica", "c1-2": "replica"})
 	})
 
+	t.Run("every replica emptied: still no failover on the next pass", func(t *testing.T) {
+		h := setup(t, emptied("10.0.0.1"), emptied("10.0.0.1"))
+		for i := range h.cluster.Status.Pods {
+			h.cluster.Status.Pods[i].Ready = true // as last seen, before the master went down
+		}
+		h.withClusterInClient()
+		ctx := context.Background()
+		for pass := 1; pass <= 2; pass++ {
+			statuses, m, failover, err := h.r.reconcileRoles(ctx, h.cluster, h.list())
+			if err == nil {
+				t.Fatalf("pass %d: promoted %q, want the failover to be refused", pass, m)
+			}
+			// What Reconcile writes after a failed pass; updateStatus
+			// updates h.cluster in place, as Reconcile's next Get would.
+			if err := h.r.updateStatus(ctx, h.cluster, statuses, m, h.cluster.Status.MasterPod, failover, err); err != nil {
+				t.Fatal(err)
+			}
+			for _, ps := range h.cluster.Status.Pods {
+				if ps.Ready {
+					t.Errorf("pass %d: %s still reported Ready after a pass that could not observe it", pass, ps.Name)
+				}
+				if ps.Name == "c1-0" && ps.Keys == 0 {
+					t.Errorf("pass %d: the master's key count was not kept", pass)
+				}
+			}
+		}
+		if len(h.agents.calls) != 0 {
+			t.Fatalf("unexpected agent calls: %v", h.agents.calls)
+		}
+	})
+
 	t.Run("one replica still holds data: it is promoted", func(t *testing.T) {
 		h := setup(t, emptied("10.0.0.1"), holding("10.0.0.1", 261704))
 		if m, err := tryReconcile(h); err != nil || m != "c1-2" {
 			t.Fatalf("master=%q err=%v, want c1-2", m, err)
+		}
+	})
+
+	t.Run("the promoted replica goes down too: no failover to the emptied one", func(t *testing.T) {
+		h := setup(t, emptied("10.0.0.1"), holding("10.0.0.1", 261704))
+		if m, failover := h.pass(); m != "c1-2" || !failover {
+			t.Fatalf("master=%q failover=%v, want a failover to c1-2", m, failover)
+		}
+		h.setReady("c1-2", false)
+		delete(h.agents.status, "10.0.0.3")
+		h.agents.calls = nil
+		if m, err := tryReconcile(h); err == nil {
+			t.Fatalf("promoted %q, want the failover to be refused: c1-2 held 261704 keys", m)
+		}
+		if len(h.agents.calls) != 0 {
+			t.Fatalf("unexpected agent calls: %v", h.agents.calls)
 		}
 	})
 

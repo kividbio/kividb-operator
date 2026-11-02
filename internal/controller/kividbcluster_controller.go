@@ -197,7 +197,13 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ConfigHashAnnotation:     configHash(renderKividbConf(&c, kdbConfig))[:16],
 		AuthGenerationAnnotation: generations.auth,
 	}
+	// While the bootstrap waits, the StatefulSet with this name is not
+	// ours. Updating it would take it over (SetControllerReference matches
+	// owners by name, not UID) and scale it to 0.
 	steps.run("reconciling statefulset", func() error {
+		if bootstrapWaiting(&c) {
+			return nil
+		}
 		return r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg, rollout)
 	})
 	steps.run("reconciling disruption budget", func() error { return r.applyPDB(ctx, &c, desiredPDB(&c)) })
@@ -617,7 +623,17 @@ func (r *KividbClusterReconciler) updateStatus(ctx context.Context, c *kividbv1a
 	failoverObserved := failoverHappened || masterChanged
 	logf.FromContext(ctx).V(1).Info("updateStatus", "previousMasterPod", previousMasterPod, "masterPod", masterPod, "failoverHappened", failoverHappened, "masterChanged", masterChanged, "failoverObserved", failoverObserved)
 
-	c.Status.Pods = statuses
+	// A failed reconcileRoles returns no statuses. Keep the last ones, for as
+	// long as passes fail: the failover checks read them (the master's key
+	// count, which replicas were in sync), and empty would switch them off.
+	// This pass has no fresh status for any pod, so none is kept Ready.
+	if statuses != nil || roleErr == nil {
+		c.Status.Pods = statuses
+	} else {
+		for i := range c.Status.Pods {
+			c.Status.Pods[i].Ready = false
+		}
+	}
 	c.Status.MasterPod = masterPod
 	c.Status.ObservedGeneration = c.Generation
 	c.Status.Phase = computePhase(desiredPods, statuses, masterPod, failoverObserved)
