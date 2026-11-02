@@ -14,6 +14,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -410,6 +411,7 @@ func (r *KividbClusterReconciler) reconcileBusSecret(ctx context.Context, c *kiv
 // after it. Either way the pods are still looked after where that needs
 // none of it, and the error shows on the Ready condition.
 func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig, aclContent, defaultPassword string, generations authGenerations, held *heldError) (ctrl.Result, error) {
+	read := c.Status.DeepCopy()
 	log := logf.FromContext(ctx)
 	var steps applySteps
 	if held != nil {
@@ -524,7 +526,11 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	if held == nil {
 		r.notePersistence(c, kdbConfig)
 	}
-	phase, err := r.updateShardedStatus(ctx, c, observed, topoErr, applyErr)
+	phase, err := r.updateShardedStatus(ctx, c, read, observed, topoErr, applyErr)
+	if errors.Is(err, errStaleStatus) {
+		logf.FromContext(ctx).V(1).Info("status changed since this pass read it; looking again")
+		return ctrl.Result{RequeueAfter: shardedFormingInterval}, nil
+	}
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
@@ -566,7 +572,7 @@ func (r *KividbClusterReconciler) applyPDB(ctx context.Context, c *kividbv1alpha
 
 // applyErr is why the cluster's objects were not all applied: the cluster
 // is not Ready then, even if its pods are.
-func (r *KividbClusterReconciler) updateShardedStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []*shardPod, topoErr, applyErr error) (kividbv1alpha1.ClusterPhase, error) {
+func (r *KividbClusterReconciler) updateShardedStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus, pods []*shardPod, topoErr, applyErr error) (kividbv1alpha1.ClusterPhase, error) {
 	before := append([]kividbv1alpha1.ShardStatus(nil), c.Status.Shards...)
 	phase, reason, message := shardedStatus(c, pods)
 	r.noteShardFailovers(c, before, pods)
@@ -598,19 +604,28 @@ func (r *KividbClusterReconciler) updateShardedStatus(ctx context.Context, c *ki
 		cond.Message = topoErr.Error()
 	}
 	setCondition(&c.Status.Conditions, cond)
-	return phase, r.writeStatus(ctx, c)
+	return phase, r.writeStatus(ctx, c, read)
 }
 
-// writeStatus writes c's status. The operator is its only writer, so a
-// conflict (the object read from the cache was a version behind) is
-// settled by writing the same status onto the latest version.
-func (r *KividbClusterReconciler) writeStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster) error {
+// errStaleStatus: a newer pass wrote the status after this one read it.
+var errStaleStatus = errors.New("the status changed since this pass read it")
+
+// writeStatus writes c's status, worked out from read. On a conflict, if
+// the latest status is still read (the spec or a label changed), the same
+// status goes onto the latest version. If a newer pass wrote the status
+// meanwhile (the object read from the cache was a version behind), this
+// one is stale, and writing it would undo that pass's work, a finished
+// rebalance say: errStaleStatus, and the next pass starts from the new one.
+func (r *KividbClusterReconciler) writeStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus) error {
 	err := r.Status().Update(ctx, c)
 	for try := 0; try < 3 && apierrors.IsConflict(err); try++ {
 		time.Sleep(time.Duration(try+1) * 100 * time.Millisecond) // the cache catching up
 		var latest kividbv1alpha1.KividbCluster
 		if err = r.Get(ctx, client.ObjectKeyFromObject(c), &latest); err != nil {
 			return err
+		}
+		if !equality.Semantic.DeepEqual(latest.Status, *read) {
+			return errStaleStatus
 		}
 		latest.Status = *c.Status.DeepCopy()
 		if err = r.Status().Update(ctx, &latest); err == nil {

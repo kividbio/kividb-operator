@@ -202,6 +202,15 @@ rules that match the old keys (see Fixed).
   exporter's 9121) and backup schedules that are not valid cron are refused
   before anything is written. The referenced kinds are watched, so a fix
   takes effect at once.
+- **Removing a shard could stay in `Rebalancing` for good** (new in this
+  release). On a status conflict, a pass that had read the cluster a
+  version behind wrote its status over the latest one, and could bring
+  back a change that was already finished. The removed shard's
+  StatefulSet was gone by then, so later passes waited for pods that never
+  came back. Now a status that changed since the pass read it is not
+  written over, a removed shard whose StatefulSet is gone is not waited
+  for, and a shard made again with no slots, when `spec.shards` was
+  raised back meanwhile, gets its master and its share.
 - **Backup retention deleted other clusters' backups** (also in 0.6.x). A
   cluster pruned everything under `<pathPrefix>/<cluster>/`, which also
   held the backups of a same-named cluster in another namespace, or of a

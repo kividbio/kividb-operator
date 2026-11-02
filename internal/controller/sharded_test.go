@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -564,5 +565,73 @@ func TestReconcileSharded_RebalanceWaitsOnlyForTheWorkloads(t *testing.T) {
 				t.Errorf("slots moved: %v, want %v (%d slots; engine calls %v)", moved, tc.wantMoves, h.engine.moved, h.engine.calls)
 			}
 		})
+	}
+}
+
+// A pass that read the cluster from a cache a version behind, before the
+// pass that finished a 3 -> 2 wrote its status, must not write its own
+// over it: that brought the finished rebalance back.
+func TestStaleStatusDoesNotUndoANewerOne(t *testing.T) {
+	ctx := context.Background()
+	c := shardedCluster("s", 2, 1)
+	c.Status.Cluster = &kividbv1alpha1.ClusterModeStatus{Shards: 3, Rebalance: &kividbv1alpha1.RebalanceStatus{From: 3, To: 2, Phase: kividbv1alpha1.RebalanceMovingSlots}}
+	r := shardedReconciler(t, c)
+	var stale kividbv1alpha1.KividbCluster
+	if err := r.Get(ctx, client.ObjectKeyFromObject(c), &stale); err != nil {
+		t.Fatal(err)
+	}
+	read := stale.Status.DeepCopy()
+
+	var finished kividbv1alpha1.KividbCluster
+	_ = r.Get(ctx, client.ObjectKeyFromObject(c), &finished)
+	finished.Status.Cluster.Shards, finished.Status.Cluster.Rebalance = 2, nil
+	if err := r.Status().Update(ctx, &finished); err != nil {
+		t.Fatal(err)
+	}
+
+	stale.Status.Phase = kividbv1alpha1.PhaseRebalancing
+	if err := r.writeStatus(ctx, stale.DeepCopy(), read); !errors.Is(err, errStaleStatus) {
+		t.Errorf("stale status written: %v", err)
+	}
+	// A whole pass from the stale object: no error, looked at again soon.
+	res, err := r.reconcileSharded(ctx, &stale, nil, nil, nil, "", "", authGenerations{auth: "1"}, nil)
+	if err != nil || res.RequeueAfter != shardedFormingInterval {
+		t.Errorf("stale pass: %+v, %v", res, err)
+	}
+	var got kividbv1alpha1.KividbCluster
+	_ = r.Get(ctx, client.ObjectKeyFromObject(c), &got)
+	if rb := rebalanceOf(&got); rb != nil || got.Status.Cluster.Shards != 2 {
+		t.Fatalf("the finished rebalance came back: %+v, %d shards", rb, got.Status.Cluster.Shards)
+	}
+}
+
+// A conflict from a change outside the status (a label, spec.shards) is
+// settled as before: the status still lands on the latest version.
+func TestStatusLandsAfterAConflictOutsideIt(t *testing.T) {
+	ctx := context.Background()
+	c := shardedCluster("s", 3, 1)
+	c.Status.Cluster = &kividbv1alpha1.ClusterModeStatus{Shards: 3}
+	r := shardedReconciler(t, c)
+	var stale kividbv1alpha1.KividbCluster
+	if err := r.Get(ctx, client.ObjectKeyFromObject(c), &stale); err != nil {
+		t.Fatal(err)
+	}
+	read := stale.Status.DeepCopy()
+
+	var edited kividbv1alpha1.KividbCluster
+	_ = r.Get(ctx, client.ObjectKeyFromObject(c), &edited)
+	edited.Labels = map[string]string{"team": "a"}
+	if err := r.Update(ctx, &edited); err != nil {
+		t.Fatal(err)
+	}
+
+	stale.Status.Phase = kividbv1alpha1.PhaseRunning
+	if err := r.writeStatus(ctx, &stale, read); err != nil {
+		t.Fatal(err)
+	}
+	var got kividbv1alpha1.KividbCluster
+	_ = r.Get(ctx, client.ObjectKeyFromObject(c), &got)
+	if got.Status.Phase != kividbv1alpha1.PhaseRunning || got.Labels["team"] != "a" {
+		t.Fatalf("phase %q, labels %v", got.Status.Phase, got.Labels)
 	}
 }

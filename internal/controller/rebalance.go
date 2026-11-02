@@ -250,7 +250,17 @@ func (r *KividbClusterReconciler) reconcileRebalance(ctx context.Context, c *kiv
 		rb.Phase = kividbv1alpha1.RebalanceAddingShards
 		return true
 	}
-	want := int(shardCount(c) * (c.Spec.Replicas + 1))
+	want := 0
+	for s := int32(0); s < shardCount(c); s++ {
+		// A removed shard whose StatefulSet is gone or being deleted has no
+		// pods to wait for, e.g. finishRebalance ran but its status was lost.
+		if s >= targetShards(c) {
+			if keep, err := r.removedShardStillThere(ctx, c, s); err == nil && !keep {
+				continue
+			}
+		}
+		want += int(c.Spec.Replicas + 1)
+	}
 	up := 0
 	for _, p := range pods {
 		if p.ready && p.status != nil && p.pod.DeletionTimestamp == nil {
