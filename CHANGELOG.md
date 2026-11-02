@@ -174,6 +174,13 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 
 ### Fixed
 
+- **`FailoverBlocked` held for one pass, then an empty replica was
+  promoted** (also in 0.6.x). The blocked pass emptied `status.pods`, so
+  the next one no longer knew the master had held keys, and the old
+  master later resynced from the empty replica. A failed pass now keeps
+  the last `status.pods` (with no pod `Ready`), and a newly promoted
+  master keeps its key count.
+
 Found by a third end-to-end test on AKS (operator master 853cd01 on an
 engine 1.2.0 candidate):
 
