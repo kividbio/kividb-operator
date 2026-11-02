@@ -454,6 +454,81 @@ func TestReconcileRoles_MasterRestartedBehindInItsOwnStream(t *testing.T) {
 	}
 }
 
+// With the append-only file on, a killed master reloads it but comes back
+// in a new stream. Holding at least as many keys as the best replica, it
+// stays the master; with fewer, or either count unknown, it is failed
+// away from, as is a master without the append-only file, whatever its
+// key count. Equal counts keep the master: nothing says the replica holds
+// more. All this only on an engine that acknowledges a write once it is in
+// the file (1.2.0 or later, a release candidate too, with
+// aof-ack-after-write yes): any other, or one whose agent does not say,
+// may have lost acknowledged writes its replica holds, and is failed away
+// from. A 1.1.3 engine answers yes for the setting if a client set it.
+func TestReconcileRoles_MasterRestartedInANewStreamWithTheAOF(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		aof                bool
+		version, ack       string
+		keys               int64
+		keysKnown          bool
+		replicaKeysUnknown bool
+		wantFailover       bool
+	}{
+		{"aof, more keys", true, "1.2.0", "yes", 1000, true, false, false},
+		{"aof, equal keys", true, "1.2.0", "yes", 900, true, false, false},
+		{"aof, fewer keys", true, "1.2.0", "yes", 0, true, false, true},
+		{"aof, keys unknown", true, "1.2.0", "yes", 1000, false, false, true},
+		{"aof, replica's keys unknown", true, "1.2.0", "yes", 1000, true, true, true},
+		{"no aof", false, "1.2.0", "yes", 1000, true, false, true},
+		{"aof, equal keys, release candidate", true, "1.2.0-rc7", "yes", 900, true, false, false},
+		{"aof, equal keys, later engine", true, "1.10.0", "yes", 900, true, false, false},
+		{"aof, equal keys, engine 1.1.3 answering yes", true, "1.1.3", "yes", 900, true, false, true},
+		{"aof, more keys, acks before the write", true, "1.2.0", "no", 1000, true, false, true},
+		{"aof, more keys, agent reports neither", true, "", "", 1000, true, false, true},
+		{"aof, more keys, no version reported", true, "", "yes", 1000, true, false, true},
+		{"aof, more keys, no setting reported", true, "1.2.0", "", 1000, true, false, true},
+		{"aof, more keys, unknown version", true, "1.2", "yes", 1000, true, false, true},
+		{"aof, more keys, garbage version", true, "1.x.0-rc1", "yes", 1000, true, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restarted := keyed(masterRun(0, "stream-b", "run-2"), tc.keys)
+			restarted.AofEnabled, restarted.KeyCountKnown = tc.aof, tc.keysKnown
+			restarted.EngineVersion, restarted.AofAckAfterWrite = tc.version, tc.ack
+			replica := keyed(linkDown(replicaOf("10.0.0.1", 900)), 900)
+			replica.KeyCountKnown = !tc.replicaKeysUnknown
+			h := newRolesHarness(t, "c1-0",
+				testPod{name: "c1-0", ip: "10.0.0.9", ready: true, agent: restarted},
+				testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replica},
+			)
+			h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+				{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 1000, ReplID: "stream-a", RunID: "run-1"},
+				{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 900},
+			}
+			want := "c1-0"
+			if tc.wantFailover {
+				want = "c1-1"
+			}
+			if m, failover := h.reconcile(); m != want || failover != tc.wantFailover {
+				t.Fatalf("master=%q failover=%v, want %s and failover=%v", m, failover, want, tc.wantFailover)
+			}
+		})
+	}
+}
+
+// A version is 1.2.0 or later only if it reads as one: anything else,
+// empty included, counts as older.
+func TestEngineAtLeast(t *testing.T) {
+	for v, want := range map[string]bool{
+		"1.2.0": true, "1.2.0-rc1": true, "1.2.3": true, "1.10.0": true, "2.0.0": true,
+		"1.1.3": false, "1.1.99-rc1": false, "0.9.0": false, "": false, "1.2": false,
+		"1.2.0.0": false, "v1.2.0": false, "1.+2.0": false, " 1.2.0": false, "1..0": false,
+	} {
+		if got := engineAtLeast(v, 1, 2); got != want {
+			t.Errorf("engineAtLeast(%q, 1, 2) = %v, want %v", v, got, want)
+		}
+	}
+}
+
 // A master that stopped cleanly goes on with its stream from where it was:
 // it lost nothing, whatever a replica read a moment later says.
 func TestReconcileRoles_CleanlyRestartedMasterIsLeftAlone(t *testing.T) {
@@ -615,6 +690,12 @@ func masterRun(offset int64, replID, runID string) *agentapi.StatusResponse {
 func linkDown(st *agentapi.StatusResponse) *agentapi.StatusResponse {
 	down := false
 	st.MasterLinkUp = &down
+	return st
+}
+
+// keyed sets the number of keys an agent reports.
+func keyed(st *agentapi.StatusResponse, keys int64) *agentapi.StatusResponse {
+	st.KeyCount, st.KeyCountKnown = keys, true
 	return st
 }
 

@@ -224,7 +224,9 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 		}
 	}
 	if info, err := c.Info("server"); err == nil {
-		out.RunID = respclient.ParseInfo(info)["run_id"]
+		fields := respclient.ParseInfo(info)
+		out.RunID = fields["run_id"]
+		out.EngineVersion = fields["kividb_version"]
 	}
 	if lastSave, err := c.LastSave(); err == nil {
 		out.LastSaveUnix = lastSave
@@ -232,6 +234,9 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 	if info, err := c.Info("persistence"); err == nil {
 		fields := respclient.ParseInfo(info)
 		out.AofEnabled = fields["aof_enabled"] == "1"
+	}
+	if v, err := c.Do("CONFIG", "GET", "aof-ack-after-write"); err == nil && len(v.Array) == 2 {
+		out.AofAckAfterWrite = v.Array[1].Str
 	}
 	if info, err := c.Info("keyspace"); err == nil {
 		out.KeyCount = keyspaceKeyCount(info)

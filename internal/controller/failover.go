@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -447,8 +448,9 @@ func regressedMaster(last kividbv1alpha1.KividbPodStatus, pod *corev1.Pod, st *a
 		return "", 0 // no offset recorded as this stream's master to compare with
 	}
 	floor := st.ReplicationOffset
+	newStream := streams && st.MasterReplID != last.ReplID
 	switch {
-	case streams && st.MasterReplID != last.ReplID:
+	case newStream:
 		floor = 0 // a new stream: its offset is no position in the old one
 	case st.ReplicationOffset >= last.ReplicationOffset:
 		return "", 0 // it went on from where it was
@@ -465,7 +467,56 @@ func regressedMaster(last kividbv1alpha1.KividbPodStatus, pod *corev1.Pod, st *a
 			best, bestOffset = name, o
 		}
 	}
+	// With the append-only file on, a killed engine reloads it but still
+	// starts a new stream. If it acknowledged writes only once they were in
+	// the file, a master holding at least as many keys as the replica is
+	// kept: it may still have lost an overwrite or a delete, but nothing
+	// says the replica holds more.
+	if best != "" && newStream && aofHoldsAckedWrites(st) && st.KeyCountKnown {
+		if b := views[best].status; b.KeyCountKnown && b.KeyCount <= st.KeyCount {
+			return "", 0
+		}
+	}
 	return best, bestOffset
+}
+
+// aofHoldsAckedWrites reports whether st's engine, killed, comes back
+// from its append-only file with every write it acknowledged: the file is
+// on, and the engine acknowledges a write only once its record is in it
+// (aof-ack-after-write yes, from engine 1.2.0). An engine before 1.2.0
+// acknowledges a write once it is queued for the file, so a kill loses the
+// last few, which its replicas may hold. It also remembers whatever
+// CONFIG SET gives a setting it does not know, so the setting is trusted
+// only with the version. Anything not reported or not understood counts
+// as no, and the master is failed away from as before.
+func aofHoldsAckedWrites(st *agentapi.StatusResponse) bool {
+	return st.AofEnabled && st.AofAckAfterWrite == "yes" && engineAtLeast(st.EngineVersion, 1, 2)
+}
+
+// engineAtLeast reports whether version, a kividb_version such as "1.2.0"
+// or "1.2.0-rc7", is major.minor.0 or later. A pre-release counts as its
+// release. An empty or unparsable version counts as older.
+func engineAtLeast(version string, major, minor int) bool {
+	core, _, _ := strings.Cut(version, "-")
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	var n [3]int
+	for i, p := range parts {
+		if p == "" || strings.Trim(p, "0123456789") != "" {
+			return false
+		}
+		v, err := strconv.Atoi(p)
+		if err != nil {
+			return false
+		}
+		n[i] = v
+	}
+	if n[0] != major {
+		return n[0] > major
+	}
+	return n[1] >= minor
 }
 
 // engineRestarted reports whether pod's engine has restarted since last
