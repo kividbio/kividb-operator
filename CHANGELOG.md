@@ -10,6 +10,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 `<cluster>-master` and `<cluster>-replicas` Services, and the agent's API
 needs a token. Anything that called an agent through those Services, other
 than the operator's own backup Jobs, has to change. The pods roll once.
+New backups go to `<pathPrefix>/<namespace>.<cluster>/` instead of
+`<pathPrefix>/<cluster>/`: widen any IAM or bucket policy that limits the
+backup credentials to the old folder, and adjust scripts and lifecycle
+rules that match the old keys (see Fixed).
 
 **Read before upgrading: 0.7.0 targets kividb engine 1.2.0.**
 
@@ -105,13 +109,13 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   its master is up; `status.pods[].synced` is set for sharded clusters.
 - **Backups of sharded clusters.** A run backs up every shard at once,
   each from a pod with the configured role, under
-  `<cluster>/<run>/shard-<i>-<pod>.tar.gz`. A `manifest.json` names each
-  shard's object, source, master node ID and slots, and is written only
-  when every shard succeeded. Retention counts complete runs and prunes
-  whole runs. `KividbSnapshot.status.shards[]` lists the shards, and
-  `objectKey` is the manifest. The agent has `/backup/manifest`, and
-  `/backup` takes a run and shard. Restoring a sharded cluster is not
-  supported yet.
+  `<namespace>.<cluster>/<run>/shard-<i>-<pod>.tar.gz`. A `manifest.json`
+  names each shard's object, source, master node ID and slots, and is
+  written only when every shard succeeded. Retention counts complete runs
+  and prunes whole runs. `KividbSnapshot.status.shards[]` lists the
+  shards, and `objectKey` is the manifest. The agent has
+  `/backup/manifest`, and `/backup` takes a run and shard. Restoring a
+  sharded cluster is not supported yet.
 - **Changing a sharded cluster's shard count.** Edit `spec.shards` and
   the operator adds shards, or drains and removes them, moving only the
   slots it has to: one move at a time, each an atomic `CLUSTER MIGRATION
@@ -180,6 +184,25 @@ than the operator's own backup Jobs, has to change. The pods roll once.
   master later resynced from the empty replica. A failed pass now keeps
   the last `status.pods` (with no pod `Ready`), and a newly promoted
   master keeps its key count.
+- **Backup retention deleted other clusters' backups** (also in 0.6.x). A
+  cluster pruned everything under `<pathPrefix>/<cluster>/`, which also
+  held the backups of a same-named cluster in another namespace, or of a
+  cluster nested under it by `pathPrefix`; two such clusters could even
+  write the same key. Backups now go to
+  `<pathPrefix>/<namespace>.<cluster>/` (the agent gets `POD_NAMESPACE`),
+  and retention deletes only this cluster's own archives or runs there.
+  Older backups still restore but are no longer pruned (see
+  [BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md) before deleting them), and a
+  0.6.x agent, until upgraded, still prunes all of its
+  `<pathPrefix>/<cluster>/`, which holds new keys only of a cluster whose
+  `pathPrefix` is that folder or lies under it.
+- **A new agent token stalled the rollout of every cluster with 2+ pods**
+  (new in this release). The agent read `AGENT_TOKEN` once, at start, so
+  the running pods answered the operator's new token with 401 and the
+  rollout that was to give it to them waited for good. The agent now reads
+  `agent-token` from the auth Secret it already mounts, on each request,
+  falling back to `AGENT_TOKEN`; the pods take a new token once the kubelet
+  refreshes the mount (a minute or two), so a rollout may wait that long.
 
 Found by a third end-to-end test on AKS (operator master 853cd01 on an
 engine 1.2.0 candidate):

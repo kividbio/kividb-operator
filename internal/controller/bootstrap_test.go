@@ -55,3 +55,27 @@ func TestBootstrapFromAShardedBackupIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Issue #33 put the namespace in backup keys (<ns>.<cluster>/). A
+// snapshot taken before still restores: the restore Job reads the key the
+// snapshot recorded, never one rebuilt from today's layout.
+func TestBootstrapRestoresAnOldLayoutSnapshotByItsStoredKey(t *testing.T) {
+	ctx := context.Background()
+	const key = "prod/cache/cache-1-20261001T000000Z.tar.gz"
+	snap := &kividbv1alpha1.KividbSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "cache-old", Namespace: "default"},
+		Status:     kividbv1alpha1.KividbSnapshotStatus{Phase: kividbv1alpha1.SnapshotSucceeded, ObjectKey: key},
+	}
+	cfg := &kividbv1alpha1.KividbSnapshotConfig{ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: "default"}}
+	cfg.Spec.S3.PathPrefix = "prod"
+	c := testCluster("cache")
+	c.Spec.Storage = kividbv1alpha1.StorageSpec{Size: "1Gi"}
+	job, err := shardedReconciler(t, c).ensureBootstrapJob(ctx, c, snap, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
+	if !strings.Contains(args, "--object-key "+key+" ") {
+		t.Fatalf("restore args %q, want --object-key %s", args, key)
+	}
+}

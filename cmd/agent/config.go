@@ -19,6 +19,7 @@ type agentConfig struct {
 	AgentPort    int    // AGENT_PORT
 	DataDir      string // DATA_DIR
 	ClusterName  string // CLUSTER_NAME
+	Namespace    string // POD_NAMESPACE
 	PodName      string // POD_NAME
 	PodIP        string // POD_IP
 	AclFile      string // ACL_FILE
@@ -49,6 +50,7 @@ func loadConfig() agentConfig {
 		AgentPort:    getEnvInt("AGENT_PORT", 8081),
 		DataDir:      getEnv("DATA_DIR", "/data"),
 		ClusterName:  os.Getenv("CLUSTER_NAME"),
+		Namespace:    os.Getenv("POD_NAMESPACE"),
 		PodName:      os.Getenv("POD_NAME"),
 		PodIP:        os.Getenv("POD_IP"),
 		AclFile:      os.Getenv("ACL_FILE"),
