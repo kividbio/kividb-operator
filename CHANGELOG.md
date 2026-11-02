@@ -174,6 +174,14 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 
 ### Fixed
 
+- **A new agent token stalled the rollout of every cluster with 2+ pods**
+  (new in this release). The agent read `AGENT_TOKEN` once, at start, so
+  the running pods answered the operator's new token with 401 and the
+  rollout that was to give it to them waited for good. The agent now reads
+  `agent-token` from the auth Secret it already mounts, on each request,
+  falling back to `AGENT_TOKEN`; the pods take a new token once the kubelet
+  refreshes the mount (a minute or two), so a rollout may wait that long.
+
 Found by a third end-to-end test on AKS (operator master 853cd01 on an
 engine 1.2.0 candidate):
 
