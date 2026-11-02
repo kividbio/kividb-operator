@@ -140,22 +140,25 @@ func (s *server) s3Client() (*minio.Client, error) {
 }
 
 func (s *server) objectKey() string {
-	prefix := strings.Trim(s.cfg.S3PathPrefix, "/")
 	ts := time.Now().UTC().Format("20060102T150405Z")
-	parts := []string{}
-	if prefix != "" {
-		parts = append(parts, prefix)
-	}
-	parts = append(parts, s.cfg.ClusterName, fmt.Sprintf("%s-%s.tar.gz", s.cfg.PodName, ts))
-	return strings.Join(parts, "/")
+	return s.backupPrefix() + fmt.Sprintf("%s-%s.tar.gz", s.cfg.PodName, ts)
 }
 
+// backupPrefix is [<pathPrefix>/]<namespace>.<cluster>/. The namespace
+// keeps same-named clusters apart. The dot (no namespace, cluster name or
+// run ID has one) keeps the folder from being any other cluster's, old
+// layout or new, so older agents, which prune their folder recursively,
+// do not reach it. Old-layout backups are not pruned. Without
+// POD_NAMESPACE the old layout is kept.
 func (s *server) backupPrefix() string {
-	prefix := strings.Trim(s.cfg.S3PathPrefix, "/")
-	if prefix == "" {
-		return s.cfg.ClusterName + "/"
+	dir := s.cfg.ClusterName
+	if s.cfg.Namespace != "" {
+		dir = s.cfg.Namespace + "." + dir
 	}
-	return prefix + "/" + s.cfg.ClusterName + "/"
+	if p := strings.Trim(s.cfg.S3PathPrefix, "/"); p != "" {
+		dir = p + "/" + dir
+	}
+	return dir + "/"
 }
 
 // streamUpload tars+gzips DataDir's persistence files directly into S3
@@ -252,6 +255,9 @@ func (s *server) pruneOldBackups(ctx context.Context, client *minio.Client) (int
 		if info.Err != nil {
 			return 0, info.Err
 		}
+		if !s.isOwnArchive(strings.TrimPrefix(info.Key, s.backupPrefix())) {
+			continue
+		}
 		objects = append(objects, obj{key: info.Key, modified: info.LastModified})
 	}
 	if len(objects) <= s.cfg.S3Retention {
@@ -266,4 +272,24 @@ func (s *server) pruneOldBackups(ctx context.Context, client *minio.Client) (int
 		}
 	}
 	return len(toDelete), nil
+}
+
+// isOwnArchive reports whether name, a key less backupPrefix(), is
+// one objectKey() writes for a pod of this cluster. A deeper key is a
+// sharded run, or another cluster's backup under a nested path prefix.
+func (s *server) isOwnArchive(name string) bool {
+	rest, ok := strings.CutPrefix(name, s.cfg.ClusterName+"-")
+	if !ok {
+		return false
+	}
+	ordinal, ts, ok := strings.Cut(rest, "-")
+	if !ok || ordinal == "" || strings.Trim(ordinal, "0123456789") != "" {
+		return false
+	}
+	ts, ok = strings.CutSuffix(ts, ".tar.gz")
+	if !ok {
+		return false
+	}
+	_, err := time.Parse("20060102T150405Z", ts)
+	return err == nil
 }

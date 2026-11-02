@@ -1032,7 +1032,7 @@ status:
   completionTime: "2026-07-21T00:00:41Z"
   sourcePod: my-cluster-1
   sourceRole: master
-  objectKey: "prod/my-cluster/my-cluster-1-20260721T000004Z.tar.gz"
+  objectKey: "prod/default.my-cluster/my-cluster-1-20260721T000004Z.tar.gz"
   sizeBytes: 483920104
   durationMs: 37211
   error: ""                      # populated only when phase is Failed
