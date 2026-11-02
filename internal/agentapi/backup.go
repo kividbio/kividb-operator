@@ -8,8 +8,8 @@ import (
 // Backups of a sharded cluster. One backup run takes a snapshot of every
 // shard, each from one of the shard's pods, under one run ID:
 //
-//	<prefix>/<cluster>/<run>/shard-<i>-<pod>.tar.gz   one per shard
-//	<prefix>/<cluster>/<run>/manifest.json            BackupManifest, written last
+//	<prefix>/<namespace>.<cluster>/<run>/shard-<i>-<pod>.tar.gz   one per shard
+//	<prefix>/<namespace>.<cluster>/<run>/manifest.json            BackupManifest, written last
 //
 // A run without a manifest is incomplete. Retention counts complete runs,
 // not objects, so a run is kept or pruned whole.

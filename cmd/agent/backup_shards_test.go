@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -243,5 +244,55 @@ func TestBackupRequestChecks(t *testing.T) {
 	// A valid manifest gets past the checks, to the missing S3 config.
 	if code := do("/backup/manifest", good); code != http.StatusInternalServerError {
 		t.Errorf("valid manifest: %d", code)
+	}
+}
+
+// Issue #33 for sharded clusters: "cache" in team-a and in team-b keep
+// their runs apart, so one's retention leaves the other's runs, and one's
+// agent refuses a manifest of the other's run.
+func TestPruneRuns_SameClusterNameInTwoNamespaces(t *testing.T) {
+	fs := &fakeS3{objects: map[string]time.Time{}}
+	a, client := s3Server(t, fs, "team-a", 1)
+	b, _ := s3Server(t, fs, "team-b", 1)
+	run := func(s *server, ts string) []string {
+		var keys []string
+		for _, f := range []string{"shard-0-cache-0-0.tar.gz", agentapi.ManifestName} {
+			k := s.backupPrefix() + ts + "/" + f
+			fs.objects[k] = time.Now()
+			keys = append(keys, k)
+		}
+		return keys
+	}
+	run(a, "20261003T000000Z")
+	doomed := run(a, "20261001T000000Z")
+	theirs := append(run(b, "20261002T000000Z"), run(b, "20261004T000000Z")...)
+
+	pruned, err := a.pruneRuns(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != 1 {
+		t.Fatalf("pruned %d runs, want 1; left %v", pruned, fs.objects)
+	}
+	for _, k := range doomed {
+		if _, ok := fs.objects[k]; ok {
+			t.Fatalf("%s was not pruned", k)
+		}
+	}
+	for _, k := range theirs {
+		if _, ok := fs.objects[k]; !ok {
+			t.Fatalf("team-b's %s was pruned", k)
+		}
+	}
+
+	a.cfg.AgentToken, a.cfg.KividbAddr = "tok", "127.0.0.1:1"
+	body := fmt.Sprintf(`{"cluster":"cache","run":"20261025T101500Z","shards":[{"index":0,"objectKey":%q}]}`,
+		b.backupPrefix()+"20261025T101500Z/shard-0-cache-0-0.tar.gz")
+	req := httptest.NewRequest(http.MethodPost, "/backup/manifest", strings.NewReader(body))
+	agentapi.SetToken(req, "tok")
+	rec := httptest.NewRecorder()
+	a.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("team-a's agent took a manifest of team-b's run: %d %s", rec.Code, rec.Body)
 	}
 }
