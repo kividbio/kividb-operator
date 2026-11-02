@@ -175,12 +175,14 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 ### Fixed
 
 - **Removing a shard could stay in `Rebalancing` for good** (new in this
-  release). The pass that finishes the change deletes the removed shard's
-  StatefulSet first, and if its status write was then lost, later passes
-  waited for that shard's pods, which never came back. A removed shard
-  whose StatefulSet is gone is no longer waited for, so the change is
-  finished again while `spec.shards` is unchanged. Raising `spec.shards`
-  back before that still leaves it in `Rebalancing`.
+  release). On a status conflict, a pass that had read the cluster a
+  version behind wrote its status over the latest one, and could bring
+  back a change that was already finished. The removed shard's
+  StatefulSet was gone by then, so later passes waited for pods that never
+  came back. Now a status that changed since the pass read it is not
+  written over, a removed shard whose StatefulSet is gone is not waited
+  for, and a shard made again with no slots, when `spec.shards` was
+  raised back meanwhile, gets its master and its share.
 
 Found by a third end-to-end test on AKS (operator master 853cd01 on an
 engine 1.2.0 candidate):

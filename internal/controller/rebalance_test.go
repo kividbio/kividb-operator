@@ -145,7 +145,7 @@ func (h *formingHarness) checkSpread(to int32) {
 			h.t.Errorf("shard %d (%s) owns %d slots, want %d", s, m, got, shareOf(s, to))
 		}
 		for n := int32(0); n <= h.c.Spec.Replicas; n++ {
-			if p := shardPodName(h.c, s, n); p != m && h.node(p).master != nodeID(m) {
+			if p := shardPodName(h.c, s, n); p != m && h.node(p).master != h.node(m).id {
 				h.t.Errorf("%s follows %q, not its shard's master %s", p, h.node(p).master, m)
 			}
 		}
@@ -275,6 +275,43 @@ func TestRemovedShardWithItsStatefulSetIsWaitedFor(t *testing.T) {
 	}
 }
 
+// The same lost finish, but spec.shards is raised back to 3 before a pass
+// sees it: the change becomes {3 -> 3}, and shard 2 is made again, owning
+// nothing, though the status counts it among the shards the slots are
+// spread over. Its -0 is still named its master and given its share.
+func TestRaiseBackAfterALostFinish(t *testing.T) {
+	h := newFormingHarness(t, 3, 1)
+	h.loseShard2sFinish()
+	// Shard 2's pods come back on new volumes and addresses, as new nodes;
+	// the others still know the old ones.
+	h.ids = map[string]string{}
+	for n := int32(0); n <= h.c.Spec.Replicas; n++ {
+		name, ip := shardPodName(h.c, 2, n), fmt.Sprintf("10.0.2.%d", n+11)
+		if err := h.r.Create(context.Background(), shardedPod(h.c, 2, n, ip)); err != nil {
+			t.Fatal(err)
+		}
+		h.ids[name] = nodeID(name + "-new")
+		h.engine.add(h.ids[name], ip)
+	}
+	h.reshard(3, 30)
+	h.checkSpread(3)
+	total := 0
+	for s := int32(0); s < 3; s++ {
+		total += slotCount(h.node(h.c.Status.Shards[s].MasterPod).slots)
+	}
+	if total != agentapi.TotalSlots {
+		t.Fatalf("%d slots assigned, want %d", total, agentapi.TotalSlots)
+	}
+	// The old shard 2 nodes are forgotten everywhere.
+	for _, n := range h.engine.nodes {
+		for _, old := range []string{nodeID("s-2-0"), nodeID("s-2-1")} {
+			if _, knows := n.seen[old]; knows {
+				t.Errorf("%s still knows the old node %s", n.ip, old[30:])
+			}
+		}
+	}
+}
+
 func TestFailedMoveIsRetried(t *testing.T) {
 	h := newFormingHarness(t, 2, 0)
 	for i := 0; i < 4; i++ {
@@ -345,6 +382,54 @@ func TestNewShardMasterIsItsFirstPod(t *testing.T) {
 	h.checkSpread(3)
 	if h.c.Status.LastFailoverTime != nil || strings.Contains(events(h.r), "ShardFailover") {
 		t.Fatal("adding a shard was recorded as a failover")
+	}
+}
+
+// During a change, a shard that was there before whose -0 came back
+// empty (its volume was lost) is not given that -0 as its master: its -1
+// still replicates the old node, which owns the shard's slots.
+func TestLostVolumeMasterIsNotANewShardsMaster(t *testing.T) {
+	c := shardedCluster("s", 4, 1)
+	c.Status.Cluster = &kividbv1alpha1.ClusterModeStatus{Shards: 3, Rebalance: &kividbv1alpha1.RebalanceStatus{From: 3, To: 4}}
+	old, fresh, replica, other := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40), strings.Repeat("d", 40)
+	pod := func(shard, index int32, id string, nodes ...string) *shardPod {
+		st := &agentapi.ClusterStatusResponse{MyID: id, Nodes: agentapi.ParseClusterNodes(strings.Join(nodes, "\n"))}
+		return &shardPod{pod: shardedPod(c, shard, index, "10.0.0.1"), shard: shard, index: index, ready: true, status: st}
+	}
+	pods := []*shardPod{
+		pod(0, 0, fresh, fresh+" 10.0.0.1:6380@16380 myself,master - 0 0 1 connected"),
+		pod(0, 1, replica,
+			replica+" 10.0.0.2:6380@16380 myself,slave "+old+" 0 0 1 connected",
+			old+" 10.0.0.9:6380@16380 master,fail - 0 0 1 disconnected 0-5461"),
+		pod(1, 0, other,
+			other+" 10.0.1.1:6380@16380 myself,master - 0 0 1 connected 5462-16383",
+			old+" 10.0.0.9:6380@16380 master,fail - 0 0 1 disconnected 0-5461"),
+	}
+	if m := buildView(c, pods).masters[0]; m != nil {
+		t.Fatalf("shard 0's master is %s, which owns nothing", m.pod.Name)
+	}
+}
+
+// The same, with the shard's master s-0-1 (after a failover) not
+// answering: it may own the shard's slots, so s-0-0 waits.
+func TestLostVolumeMasterWaitsForItsShardsOtherPods(t *testing.T) {
+	c := shardedCluster("s", 4, 1)
+	c.Status.Cluster = &kividbv1alpha1.ClusterModeStatus{Shards: 3, Rebalance: &kividbv1alpha1.RebalanceStatus{From: 3, To: 4}}
+	fresh, other := strings.Repeat("b", 40), strings.Repeat("d", 40)
+	pod := func(shard, index int32, id string, nodes ...string) *shardPod {
+		p := &shardPod{pod: shardedPod(c, shard, index, "10.0.0.1"), shard: shard, index: index}
+		if id != "" {
+			p.ready, p.status = true, &agentapi.ClusterStatusResponse{MyID: id, Nodes: agentapi.ParseClusterNodes(strings.Join(nodes, "\n"))}
+		}
+		return p
+	}
+	pods := []*shardPod{
+		pod(0, 0, fresh, fresh+" 10.0.0.1:6380@16380 myself,master - 0 0 1 connected"),
+		pod(0, 1, ""), // not ready: not asked
+		pod(1, 0, other, other+" 10.0.1.1:6380@16380 myself,master - 0 0 1 connected 5462-16383"),
+	}
+	if m := buildView(c, pods).masters[0]; m != nil {
+		t.Fatalf("shard 0's master is %s, which owns nothing", m.pod.Name)
 	}
 }
 

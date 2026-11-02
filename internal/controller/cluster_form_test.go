@@ -351,6 +351,7 @@ type formingHarness struct {
 	r       *KividbClusterReconciler
 	engine  *fakeEngine
 	exposed map[string]exposure
+	ids     map[string]string // pod -> node ID, for a pod that came back as a new node
 }
 
 func newFormingHarness(t *testing.T, shards, replicas int32) *formingHarness {
@@ -393,7 +394,12 @@ func (h *formingHarness) pass() []*shardPod {
 	return observed
 }
 
-func (h *formingHarness) node(pod string) *fakeNode { return h.engine.nodes[nodeID(pod)] }
+func (h *formingHarness) node(pod string) *fakeNode {
+	if id, ok := h.ids[pod]; ok {
+		return h.engine.nodes[id]
+	}
+	return h.engine.nodes[nodeID(pod)]
+}
 
 func TestEvenSlotRanges(t *testing.T) {
 	got := evenSlotRanges(3)
