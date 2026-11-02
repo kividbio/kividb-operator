@@ -22,8 +22,10 @@ via its own `agent` sidecar: `BGSAVE`, wait for `LASTSAVE` to advance,
 `tar.gz` `dump.kdb` (+ `appendonly.aof`, which the operator turns on by
 default from 0.7.0, see
 [CONFIGURATION.md](CONFIGURATION.md#persistence-the-append-only-file)), stream it
-straight into your S3-compatible bucket, then delete objects beyond
-`spec.retention`.
+straight into your S3-compatible bucket, then delete the cluster's own
+archives beyond `spec.retention`. Only its pods'
+`<pod-name>-<timestamp>.tar.gz` objects directly under its prefix count;
+anything else there is left alone.
 
 Objects are stored at:
 
@@ -32,6 +34,10 @@ s3://<bucket>/<pathPrefix>/<cluster-name>/<pod-name>-<UTC timestamp>.tar.gz
 ```
 
 e.g. `s3://my-kividb-backups/prod/my-cluster/my-cluster-1-20260721T000004Z.tar.gz`.
+
+The key does not include the namespace yet, so keep bucket + `pathPrefix` +
+cluster name unique per cluster, also across namespaces: two clusters that
+share all three prune each other's backups.
 
 Every run — success or failure — produces a
 [`KividbSnapshot`](CONFIGURATION.md#kividbsnapshot-read-only) object

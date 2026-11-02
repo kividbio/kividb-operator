@@ -252,6 +252,9 @@ func (s *server) pruneOldBackups(ctx context.Context, client *minio.Client) (int
 		if info.Err != nil {
 			return 0, info.Err
 		}
+		if !s.isOwnArchive(strings.TrimPrefix(info.Key, s.backupPrefix())) {
+			continue
+		}
 		objects = append(objects, obj{key: info.Key, modified: info.LastModified})
 	}
 	if len(objects) <= s.cfg.S3Retention {
@@ -266,4 +269,24 @@ func (s *server) pruneOldBackups(ctx context.Context, client *minio.Client) (int
 		}
 	}
 	return len(toDelete), nil
+}
+
+// isOwnArchive reports whether name, a key relative to backupPrefix(), is
+// one objectKey() writes for a pod of this cluster. A deeper key is a
+// sharded run, or another cluster's backup under a nested path prefix.
+func (s *server) isOwnArchive(name string) bool {
+	rest, ok := strings.CutPrefix(name, s.cfg.ClusterName+"-")
+	if !ok {
+		return false
+	}
+	ordinal, ts, ok := strings.Cut(rest, "-")
+	if !ok || ordinal == "" || strings.Trim(ordinal, "0123456789") != "" {
+		return false
+	}
+	ts, ok = strings.CutSuffix(ts, ".tar.gz")
+	if !ok {
+		return false
+	}
+	_, err := time.Parse("20060102T150405Z", ts)
+	return err == nil
 }

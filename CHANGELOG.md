@@ -174,6 +174,13 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 
 ### Fixed
 
+- **Backup retention deleted other clusters' backups under a nested
+  prefix** (also in 0.6.x). A cluster pruned everything under
+  `<pathPrefix>/<cluster>/`, so cluster `prod` without a path prefix
+  deleted the backups of a cluster with `pathPrefix: prod`. It now prunes
+  only its own pods' `<cluster>-<ordinal>-<time>.tar.gz` archives directly
+  under that prefix, and other files there are no longer deleted.
+
 Found by a third end-to-end test on AKS (operator master 853cd01 on an
 engine 1.2.0 candidate):
 
