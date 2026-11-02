@@ -15,12 +15,18 @@ import (
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // fakeAgents stands in for every pod's agent sidecar, keyed by pod IP. It
@@ -682,5 +688,124 @@ func TestReconcileRoles_UnreachablePodKeepsItsLastOffset(t *testing.T) {
 	}
 	if s := statuses[0]; s.Name != "c1-0" || s.ReplicationOffset != 1000 || s.Keys != 42 {
 		t.Fatalf("status of the unreachable master: %+v", s)
+	}
+}
+
+// An object the API server refuses to apply -- a backup schedule with a
+// typo, Services with a port clash -- must not stop failover, nor leave
+// the cluster Ready. The steps after the refused one are skipped.
+func TestReconcile_RefusedApplyStepStillFailsOver(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refuse  func(client.Object) bool
+		wantMsg string
+		// noSTS: the StatefulSet, applied after the refused step, is not.
+		noSTS bool
+	}{
+		{"backup CronJob", func(obj client.Object) bool {
+			_, ok := obj.(*batchv1.CronJob)
+			return ok
+		}, "reconciling backup cronjob", false},
+		{"Services", func(obj client.Object) bool {
+			_, ok := obj.(*corev1.Service)
+			return ok
+		}, "reconciling services", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := clientgoscheme.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := kividbv1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			threshold := int32(20)
+			c := &kividbv1alpha1.KividbCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default", UID: "u1"},
+				Spec: kividbv1alpha1.KividbClusterSpec{Replicas: 1, Storage: kividbv1alpha1.StorageSpec{Size: "1Gi"},
+					SnapshotConfigRef: &corev1.LocalObjectReference{Name: "snap"}},
+			}
+			c.Spec.Failover.UnhealthyThresholdSeconds = &threshold
+			snap := &kividbv1alpha1.KividbSnapshotConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "default"},
+				Spec: kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: "0 2 * *",
+					S3: kividbv1alpha1.S3StorageSpec{Endpoint: "s3.example", Bucket: "b", CredentialsSecretRef: kividbv1alpha1.S3CredentialsSecretRef{Name: "s3"}}},
+			}
+			pod := func(name, ip, role string, ready bool) *corev1.Pod {
+				labels := selectorLabels(c)
+				labels[kividbv1alpha1.RoleLabel] = role
+				cond := corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue}
+				if !ready {
+					cond.Status = corev1.ConditionFalse
+					cond.LastTransitionTime = metav1.NewTime(time.Now().Add(-time.Minute))
+				}
+				return &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: c.Namespace, Labels: labels},
+					Status: corev1.PodStatus{PodIP: ip, Conditions: []corev1.PodCondition{cond},
+						ContainerStatuses: []corev1.ContainerStatus{{Name: kividbContainerName}}},
+				}
+			}
+			refuse := func(obj client.Object) error {
+				if tc.refuse(obj) {
+					return fmt.Errorf("%s is invalid", obj.GetName())
+				}
+				return nil
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(c, snap, pod("c1-0", "10.0.0.1", "master", false), pod("c1-1", "10.0.0.2", "replica", true)).
+				WithStatusSubresource(&kividbv1alpha1.KividbCluster{}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+						if err := refuse(obj); err != nil {
+							return err
+						}
+						return cl.Create(ctx, obj, opts...)
+					},
+					Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						if err := refuse(obj); err != nil {
+							return err
+						}
+						return cl.Update(ctx, obj, opts...)
+					},
+				}).Build()
+			agents := &fakeAgents{status: map[string]*agentapi.StatusResponse{
+				"10.0.0.1": master(100),
+				"10.0.0.2": replicaOf("10.0.0.1", 100),
+			}}
+			r := &KividbClusterReconciler{Client: cl, Scheme: scheme, Agent: &AgentClient{http: &http.Client{Transport: agents}}}
+			ctx := context.Background()
+			// The status subresource drops what WithObjects was given; set it.
+			c.Status.MasterPod = "c1-0"
+			c.Status.Phase = kividbv1alpha1.PhaseRunning
+			c.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "AllPodsReady", Message: "master=c1-0, 2 pod(s) ready", LastTransitionTime: metav1.Now()}}
+			if err := r.Status().Update(ctx, c); err != nil {
+				t.Fatal(err)
+			}
+
+			// An error return would put the retry on the rate limiter's
+			// backoff, which grows to minutes; the next look must come soon.
+			res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)})
+			if err != nil || res.RequeueAfter != 5*time.Second {
+				t.Errorf("Reconcile = %+v, %v; want a requeue in 5s and no error", res, err)
+			}
+
+			var got kividbv1alpha1.KividbCluster
+			if err := cl.Get(ctx, client.ObjectKeyFromObject(c), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Status.MasterPod != "c1-1" {
+				t.Errorf("status.masterPod = %q, want c1-1 promoted (agent calls %v)", got.Status.MasterPod, agents.calls)
+			}
+			ready := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+			if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ReconcileError" || !strings.Contains(ready.Message, tc.wantMsg) {
+				t.Errorf("Ready condition %+v, want False, ReconcileError, %q", ready, tc.wantMsg)
+			}
+			if tc.noSTS {
+				var sts appsv1.StatefulSet
+				if err := cl.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: statefulSetName(c)}, &sts); !apierrors.IsNotFound(err) {
+					t.Errorf("StatefulSet applied after the Services were refused (get: %v)", err)
+				}
+			}
+		})
 	}
 }

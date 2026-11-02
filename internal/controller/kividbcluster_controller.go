@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -161,12 +162,20 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if isSharded(&c) {
 		return r.reconcileSharded(ctx, &c, kdbConfig, aclConfig, snapCfg, aclContent, defaultPassword, generations)
 	}
-	if err := r.reconcileConfig(ctx, &c, kdbConfig, clusterSecrets{}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling config: %w", err)
+	// An object the API server refuses (a backup schedule with a typo, a
+	// port clash) skips the steps after it, but not failover: the error is
+	// reported on the Ready condition once the roles are reconciled.
+	var applyErr error
+	apply := func(what string, step func() error) {
+		if applyErr != nil {
+			return
+		}
+		if err := step(); err != nil {
+			applyErr = fmt.Errorf("%s: %w", what, err)
+		}
 	}
-	if err := r.reconcileServices(ctx, &c, kdbConfig); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling services: %w", err)
-	}
+	apply("reconciling config", func() error { return r.reconcileConfig(ctx, &c, kdbConfig, clusterSecrets{}) })
+	apply("reconciling services", func() error { return r.reconcileServices(ctx, &c, kdbConfig) })
 
 	blockSTS, bootErr := r.reconcileBootstrap(ctx, &c)
 	if bootErr != nil {
@@ -185,22 +194,19 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ConfigHashAnnotation:     configHash(renderKividbConf(&c, kdbConfig))[:16],
 		AuthGenerationAnnotation: generations.auth,
 	}
-	if err := r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg, rollout); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
-	}
-	if err := r.applyPDB(ctx, &c, desiredPDB(&c)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling disruption budget: %w", err)
-	}
-	if err := r.reconcileBackupCronJob(ctx, &c, snapCfg); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling backup cronjob: %w", err)
-	}
+	apply("reconciling statefulset", func() error {
+		return r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg, rollout)
+	})
+	apply("reconciling disruption budget", func() error { return r.applyPDB(ctx, &c, desiredPDB(&c)) })
+	apply("reconciling backup cronjob", func() error { return r.reconcileBackupCronJob(ctx, &c, snapCfg) })
 	if snapCfg != nil {
-		if err := r.reconcileSnapshots(ctx, &c, snapCfg.Name); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconciling snapshots: %w", err)
-		}
+		apply("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, &c, snapCfg.Name) })
 	}
 
 	if blockSTS || bootErr != nil {
+		if applyErr != nil {
+			return ctrl.Result{}, applyErr
+		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
@@ -222,6 +228,10 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// Fall through to still persist a status update reflecting the
 		// error so it is visible via `kubectl get kividbcluster`, but keep
 		// requeuing quickly to retry.
+	}
+	if applyErr != nil {
+		log.Error(applyErr, "applying the cluster's objects failed")
+		err = errors.Join(applyErr, err)
 	}
 
 	r.reconcileAclReload(ctx, &c, podList.Items, aclContent, generations)
