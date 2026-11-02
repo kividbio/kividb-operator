@@ -194,6 +194,14 @@ func agentEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbA
 		{Name: "ACL_FILE", Value: AclDir + "/" + AclFileName},
 		{Name: "CLUSTER_NAME", Value: c.Name},
 		{
+			// Part of backup keys: same-named clusters in two namespaces
+			// may share a bucket and path prefix.
+			Name: "POD_NAMESPACE",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
+			},
+		},
+		{
 			Name: "POD_NAME",
 			ValueFrom: &corev1.EnvVarSource{
 				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
