@@ -16,6 +16,7 @@ import (
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
+	"github.com/robfig/cron/v3"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -123,59 +124,61 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, r.rejectSpec(ctx, &c, err)
 	}
 
+	// From here on, an input the cluster cannot run with, or a referenced
+	// object that cannot be read, holds back every write but not
+	// failover: see reconcileHeld.
+	if err := validatePorts(&c); err != nil {
+		return r.reconcileHeld(ctx, &c, heldBack("InvalidSpec", err))
+	}
 	kdbConfig, err := r.resolveKividbConfig(ctx, &c)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("resolving configRef: %w", err)
+		return r.reconcileHeld(ctx, &c, heldBack("ReconcileError", fmt.Errorf("resolving configRef: %w", err)))
 	}
 	if err := validateKividbConfig(&c, kdbConfig); err != nil {
-		return ctrl.Result{}, r.rejectSpec(ctx, &c, err)
+		return r.reconcileHeld(ctx, &c, heldBack("InvalidSpec", err))
 	}
 	aclConfig, err := r.resolveAclConfig(ctx, &c)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("resolving aclConfigRef: %w", err)
+		return r.reconcileHeld(ctx, &c, heldBack("ReconcileError", fmt.Errorf("resolving aclConfigRef: %w", err)))
 	}
 	snapCfg, err := r.resolveSnapshotConfig(ctx, &c)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("resolving snapshotConfigRef: %w", err)
+		return r.reconcileHeld(ctx, &c, heldBack("ReconcileError", fmt.Errorf("resolving snapshotConfigRef: %w", err)))
+	}
+	if err := validateSnapshotConfig(snapCfg); err != nil {
+		return r.reconcileHeld(ctx, &c, heldBack("InvalidSpec", err))
 	}
 
 	r.emitVariantGuidance(&c, kdbConfig)
 
 	secretValues, err := r.resolveSecretValues(ctx, &c, aclConfig)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("resolving referenced secrets: %w", err)
+		return r.reconcileHeld(ctx, &c, heldBack("ReconcileError", fmt.Errorf("resolving referenced secrets: %w", err)))
 	}
 
 	aclContent, err := renderACLFile(aclConfig, secretValues)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("rendering ACL file: %w", err)
+		return r.reconcileHeld(ctx, &c, heldBack("ReconcileError", fmt.Errorf("rendering ACL file: %w", err)))
 	}
 
 	var defaultPassword string
 	if ref := defaultUserPasswordRef(aclConfig); ref != nil {
 		defaultPassword = secretValues[secretValueKey(ref)]
 	}
+	// Without the auth Secret there are no generations to roll the pods by.
 	generations, aclContent, err := r.reconcileSecret(ctx, &c, aclConfig, secretValues, aclContent, defaultPassword)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling secret: %w", err)
+		return r.reconcileHeld(ctx, &c, heldBack("ReconcileError", fmt.Errorf("reconciling secret: %w", err)))
 	}
 	if isSharded(&c) {
-		return r.reconcileSharded(ctx, &c, kdbConfig, aclConfig, snapCfg, aclContent, defaultPassword, generations)
+		return r.reconcileSharded(ctx, &c, kdbConfig, aclConfig, snapCfg, aclContent, defaultPassword, generations, nil)
 	}
 	// An object the API server refuses (a backup schedule with a typo, a
 	// port clash) skips the steps after it, but not failover: the error is
 	// reported on the Ready condition once the roles are reconciled.
-	var applyErr error
-	apply := func(what string, step func() error) {
-		if applyErr != nil {
-			return
-		}
-		if err := step(); err != nil {
-			applyErr = fmt.Errorf("%s: %w", what, err)
-		}
-	}
-	apply("reconciling config", func() error { return r.reconcileConfig(ctx, &c, kdbConfig, clusterSecrets{}) })
-	apply("reconciling services", func() error { return r.reconcileServices(ctx, &c, kdbConfig) })
+	var steps applySteps
+	steps.run("reconciling config", func() error { return r.reconcileConfig(ctx, &c, kdbConfig, clusterSecrets{}) })
+	steps.run("reconciling services", func() error { return r.reconcileServices(ctx, &c, kdbConfig) })
 
 	blockSTS, bootErr := r.reconcileBootstrap(ctx, &c)
 	if bootErr != nil {
@@ -194,14 +197,15 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ConfigHashAnnotation:     configHash(renderKividbConf(&c, kdbConfig))[:16],
 		AuthGenerationAnnotation: generations.auth,
 	}
-	apply("reconciling statefulset", func() error {
+	steps.run("reconciling statefulset", func() error {
 		return r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg, rollout)
 	})
-	apply("reconciling disruption budget", func() error { return r.applyPDB(ctx, &c, desiredPDB(&c)) })
-	apply("reconciling backup cronjob", func() error { return r.reconcileBackupCronJob(ctx, &c, snapCfg) })
+	steps.run("reconciling disruption budget", func() error { return r.applyPDB(ctx, &c, desiredPDB(&c)) })
+	steps.run("reconciling backup cronjob", func() error { return r.reconcileBackupCronJob(ctx, &c, snapCfg) })
 	if snapCfg != nil {
-		apply("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, &c, snapCfg.Name) })
+		steps.run("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, &c, snapCfg.Name) })
 	}
+	applyErr := steps.err
 
 	if blockSTS || bootErr != nil {
 		if applyErr != nil {
@@ -251,6 +255,107 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
+}
+
+// applySteps runs, in order, the steps that write a cluster's objects. The
+// first that fails skips the ones after it: applying the StatefulSet after
+// its config was refused would roll the pods onto a config never written.
+type applySteps struct{ err error }
+
+// run runs step, unless one before it failed. what, if set, prefixes its
+// error.
+func (a *applySteps) run(what string, step func() error) {
+	if a.err != nil {
+		return
+	}
+	if err := step(); err != nil && what != "" {
+		a.err = fmt.Errorf("%s: %w", what, err)
+	} else if err != nil {
+		a.err = err
+	}
+}
+
+// heldError is why a pass wrote none of the cluster's objects, with the
+// reason the Ready condition gives for it.
+type heldError struct {
+	reason string
+	err    error
+}
+
+func heldBack(reason string, err error) *heldError { return &heldError{reason: reason, err: err} }
+func (e *heldError) Error() string                 { return e.err.Error() }
+func (e *heldError) Unwrap() error                 { return e.err }
+
+// reconcileHeld is a pass that writes none of the cluster's objects: a
+// referenced object could not be read, or holds what the cluster cannot
+// run with. Rendered without it, they would open the default user, drop
+// every directive or delete the backup CronJob. The roles and handovers
+// need none of it, so they still run: a dead master is still replaced, and
+// the error shows on the Ready condition. The ACL reload, the password
+// overlap and the rollout need what could not be resolved, so they wait.
+func (r *KividbClusterReconciler) reconcileHeld(ctx context.Context, c *kividbv1alpha1.KividbCluster, held *heldError) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	log.Error(held.err, "not applying the cluster's objects")
+	requeue := 5 * time.Second
+	if held.reason == "InvalidSpec" {
+		// Once, not every pass: only an edit fixes it, and edits are watched.
+		if prev := findCondition(c.Status.Conditions, "Ready"); prev == nil || prev.Reason != held.reason || !strings.HasPrefix(prev.Message, held.Error()) {
+			r.event(c, corev1.EventTypeWarning, "InvalidSpec", "%v", held.err)
+		}
+		requeue = reconcileInterval
+	}
+	if isSharded(c) {
+		// Its own cadence (3 s while not Ready), not requeue: the sharded
+		// pass also races a restarted master's replicas (shard_restart.go).
+		return r.reconcileSharded(ctx, c, nil, nil, nil, "", "", authGenerations{}, held)
+	}
+
+	var podList corev1.PodList
+	if err := r.List(ctx, &podList, client.InNamespace(c.Namespace), client.MatchingLabels(selectorLabels(c))); err != nil {
+		return ctrl.Result{}, fmt.Errorf("listing pods: %w", err)
+	}
+	bootstrapping := c.Spec.BootstrapFromSnapshot != nil && (c.Status.Bootstrap == nil || !c.Status.Bootstrap.Completed)
+	if bootstrapping || !listensOn(podList.Items, getPort(c)) {
+		// Restoring a snapshot: no pods to fail over yet. Or spec.port
+		// changed, and the pods, never rolled onto it, are still on the
+		// old port, while the roles would point the replicas at the new.
+		setCondition(&c.Status.Conditions, metav1.Condition{
+			Type: "Ready", Status: metav1.ConditionFalse, Reason: held.reason, Message: held.Error(), ObservedGeneration: c.Generation,
+		})
+		if err := r.Status().Update(ctx, c); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+		}
+		return ctrl.Result{RequeueAfter: requeue}, nil
+	}
+
+	previousMasterPod := c.Status.MasterPod
+	statuses, masterPod, failoverHappened, err := r.reconcileRoles(ctx, c, podList.Items)
+	if err != nil {
+		log.Error(err, "role reconciliation failed")
+	}
+	r.reconcileHandover(ctx, c, podList.Items, statuses, masterPod)
+	if statusErr := r.updateStatus(ctx, c, statuses, masterPod, previousMasterPod, failoverHappened, errors.Join(held, err)); statusErr != nil {
+		return ctrl.Result{}, fmt.Errorf("updating status: %w", statusErr)
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
+}
+
+// listensOn reports whether the kividb container of every pod declares
+// port: a pod made before spec.port changed declares the old one.
+func listensOn(pods []corev1.Pod, port int32) bool {
+	for i := range pods {
+		for _, ct := range pods[i].Spec.Containers {
+			if ct.Name != kividbContainerName {
+				continue
+			}
+			for _, p := range ct.Ports {
+				if p.Name == KividbPortName && p.ContainerPort != port {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // emitVariantGuidance records Events surfacing the two ways spec.image and
@@ -531,6 +636,10 @@ func (r *KividbClusterReconciler) updateStatus(ctx context.Context, c *kividbv1a
 	}
 	if roleErr != nil {
 		readyCondition.Reason = "ReconcileError"
+		var held *heldError
+		if errors.As(roleErr, &held) {
+			readyCondition.Reason = held.reason
+		}
 		readyCondition.Message = roleErr.Error()
 	} else if c.Status.Phase == kividbv1alpha1.PhaseRunning {
 		readyCondition.Status = metav1.ConditionTrue
@@ -553,6 +662,80 @@ func validateSpec(c *kividbv1alpha1.KividbCluster) error {
 	if c.Spec.Replicas < 0 {
 		return fmt.Errorf("spec.replicas must not be negative, got %d", c.Spec.Replicas)
 	}
+	if p := c.Spec.Port; p < 0 || p > 65535 { // 0: the default, 6380
+		return fmt.Errorf("spec.port must be between 1 and 65535, got %d", p)
+	}
+	return nil
+}
+
+// validatePorts refuses a spec.port another listener of the pod has, or
+// that leaves no room for the cluster bus. Unlike validateSpec's checks
+// this needs no rejectSpec: the pods still listen on the port they were
+// made with, so their roles can still be looked after (see reconcileHeld).
+// Monitoring turned on for a cluster on 9121 is accepted by the API server.
+func validatePorts(c *kividbv1alpha1.KividbCluster) error {
+	p := c.Spec.Port
+	if p == 0 {
+		return nil
+	}
+	if other := portUser(c, p); other != "" {
+		return fmt.Errorf("spec.port %d is also %s", p, other)
+	}
+	// The engine's cluster bus listens on the client port + 10000.
+	if isSharded(c) && p > 65535-10000 {
+		return fmt.Errorf("spec.port must be at most %d in a sharded cluster, whose bus port is spec.port + 10000, got %d", 65535-10000, p)
+	}
+	return nil
+}
+
+// portUser names what else in a kividb pod listens on port, "" if nothing
+// does: the agent always, the exporter when monitoring is on.
+func portUser(c *kividbv1alpha1.KividbCluster, port int32) string {
+	switch {
+	case port == AgentPort:
+		return "the agent's port"
+	case port == ExporterPort && c.Spec.Monitoring.Enabled:
+		return "the metrics exporter's port (spec.monitoring)"
+	}
+	return ""
+}
+
+// validateTLSPort refuses a TLS listener port that is out of range or that
+// another listener of the pod already has. Only checked when TLS is on:
+// the port is not used otherwise.
+func validateTLSPort(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) error {
+	tls := kividbTLSSpec(kdbConfig)
+	if tls == nil || !tls.Enabled {
+		return nil
+	}
+	port := tls.Port
+	if port == 0 {
+		port = 6443
+	}
+	switch {
+	case port < 1 || port > 65535:
+		return fmt.Errorf("KividbConfig %s: tls.port must be between 1 and 65535, got %d", kdbConfig.Name, port)
+	case port == getPort(c):
+		return fmt.Errorf("KividbConfig %s: tls.port %d is also the cluster's port (spec.port)", kdbConfig.Name, port)
+	case portUser(c, port) != "":
+		return fmt.Errorf("KividbConfig %s: tls.port %d is also %s", kdbConfig.Name, port, portUser(c, port))
+	case isSharded(c) && port == getPort(c)+10000:
+		return fmt.Errorf("KividbConfig %s: tls.port %d is also the cluster bus port (spec.port + 10000)", kdbConfig.Name, port)
+	}
+	return nil
+}
+
+// validateSnapshotConfig refuses a backup schedule the API server would
+// refuse on the CronJob, parsed the way it parses one (robfig/cron's
+// standard parser), so the typo is named here rather than by a failing
+// CronJob update.
+func validateSnapshotConfig(snapCfg *kividbv1alpha1.KividbSnapshotConfig) error {
+	if snapCfg == nil {
+		return nil
+	}
+	if _, err := cron.ParseStandard(snapCfg.Spec.Schedule); err != nil {
+		return fmt.Errorf("KividbSnapshotConfig %s: spec.schedule %q is not a valid cron schedule: %w", snapCfg.Name, snapCfg.Spec.Schedule, err)
+	}
 	return nil
 }
 
@@ -565,6 +748,9 @@ func validateSpec(c *kividbv1alpha1.KividbCluster) error {
 func validateKividbConfig(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) error {
 	if kdbConfig == nil {
 		return nil
+	}
+	if err := validateTLSPort(c, kdbConfig); err != nil {
+		return err
 	}
 	if isSharded(c) {
 		var owned []string
@@ -666,7 +852,63 @@ func (r *KividbClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.CronJob{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(mapPodToCluster)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(mapAnnounceServiceToCluster)).
+		// What a cluster references: fixing or making one is picked up at
+		// once, not on the next retry.
+		Watches(&kividbv1alpha1.KividbConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
+		Watches(&kividbv1alpha1.KividbAclConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
+		Watches(&kividbv1alpha1.KividbSnapshotConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
 		Complete(r)
+}
+
+// mapReferenceToClusters enqueues the KividbClusters of obj's namespace
+// that reference it: as their KividbConfig, KividbAclConfig or
+// KividbSnapshotConfig, or for a Secret, as a password of their
+// KividbAclConfig or as spec.cluster.busSecretRef.
+func (r *KividbClusterReconciler) mapReferenceToClusters(ctx context.Context, obj client.Object) []reconcile.Request {
+	var clusters kividbv1alpha1.KividbClusterList
+	if err := r.List(ctx, &clusters, client.InNamespace(obj.GetNamespace())); err != nil {
+		logf.FromContext(ctx).Error(err, "listing the KividbClusters that may reference an object", "namespace", obj.GetNamespace(), "name", obj.GetName())
+		return nil
+	}
+	name := obj.GetName()
+	named := func(ref *corev1.LocalObjectReference) bool { return ref != nil && ref.Name == name }
+	var out []reconcile.Request
+	for i := range clusters.Items {
+		c := &clusters.Items[i]
+		var refers bool
+		switch obj.(type) {
+		case *kividbv1alpha1.KividbConfig:
+			refers = named(c.Spec.ConfigRef)
+		case *kividbv1alpha1.KividbAclConfig:
+			refers = named(c.Spec.AclConfigRef)
+		case *kividbv1alpha1.KividbSnapshotConfig:
+			refers = named(c.Spec.SnapshotConfigRef)
+		case *corev1.Secret:
+			refers = r.referencesSecret(ctx, c, name)
+		}
+		if refers {
+			out = append(out, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(c)})
+		}
+	}
+	return out
+}
+
+// referencesSecret reports whether c reads the Secret name itself.
+func (r *KividbClusterReconciler) referencesSecret(ctx context.Context, c *kividbv1alpha1.KividbCluster, name string) bool {
+	if c.Spec.Cluster != nil && c.Spec.Cluster.BusSecretRef != nil && c.Spec.Cluster.BusSecretRef.Name == name {
+		return true
+	}
+	acl, err := r.resolveAclConfig(ctx, c)
+	if err != nil {
+		return false // reconciled once the KividbAclConfig is there
+	}
+	for _, ref := range collectSecretRefs(acl) {
+		if ref.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // mapPodToCluster enqueues a reconcile for the KividbCluster named by a

@@ -306,9 +306,14 @@ type KividbClusterSpec struct {
 	// +optional
 	ExporterImage string `json:"exporterImage,omitempty"`
 
-	// Port is the RESP protocol port kividb listens on. Defaults to 6380.
+	// Port is the RESP protocol port kividb listens on. Defaults to 6380
+	// (0 means the default too). Not the agent's port (8081), nor the
+	// exporter's (9121) when spec.monitoring is on; at most 55535 in a
+	// sharded cluster, whose cluster bus listens on port + 10000.
 	// +optional
 	// +kubebuilder:default=6380
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port,omitempty"`
 
 	// ConfigRef names a KividbConfig in the same namespace, providing

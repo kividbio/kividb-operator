@@ -174,13 +174,15 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 
 ### Fixed
 
-- **A failed apply step turned off failover, with the cluster still
-  `Ready`** (also in 0.6.x). An object the API server refused, such as a
-  backup schedule with a typo or a `tls.port` equal to the cluster's port,
-  stopped the reconcile before failover. A refused step no longer stops
-  failover: the steps after it are skipped, `Ready` is `False`
-  (`ReconcileError`) and the reconcile is retried every 5 s. A missing referenced
-  object, and sharded clusters, are not covered yet.
+- **A failed reconcile step turned off failover, with the cluster still
+  `Ready`** (also in 0.6.x). A refused object or a missing referenced
+  KividbConfig, KividbAclConfig, KividbSnapshotConfig or Secret now holds
+  back the writes after it, not failover, role labels or status: `Ready`
+  is `False` (`ReconcileError`, or `InvalidSpec` with an Event), in sharded
+  clusters too. Port clashes (`spec.port`, `tls.port`, the agent's 8081, the
+  exporter's 9121) and backup schedules that are not valid cron are refused
+  before anything is written. The referenced kinds are watched, so a fix
+  takes effect at once.
 
 Found by a third end-to-end test on AKS (operator master 853cd01 on an
 engine 1.2.0 candidate):
