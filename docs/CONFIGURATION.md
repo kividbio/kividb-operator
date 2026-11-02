@@ -388,14 +388,22 @@ container restart), it came back below the offset it had reached in its
 stream or with a new stream, and a replica that was in sync is ahead --
 and fails over to the replica holding the most instead; the restarted pod
 becomes its replica (`MasterRestartedBehind` and `Failover` Events), with
-its writes held until it is. A master that never restarted is not failed
-away from on its offsets, however they compare. It works when the master
-pod is recreated, as its replicas then follow its old address until the
-operator points them anywhere. When only the container restarts, in
-place, with the same address, the replicas reconnect to it on their own
-within a second and the engine resyncs them before the operator can act:
-that case needs the engine to refuse such a resync (a replica asking to
-continue a stream from further than the master has it).
+its writes held until it is. With the append-only file on, a killed
+master comes back from it in a new stream; if it holds at least as many
+keys as that replica, it stays the master and the replicas resync from it,
+dropping anything only they held. Key counts catch only a lost write that
+created a key: one that overwrote or deleted a key the master holds -- in
+the last second of `appendfsync everysec` after a power loss, or
+acknowledged before it reached the file (kividbio/kividb#243) -- is lost.
+A master that never
+restarted is not failed away from on its offsets, however they compare.
+It works when the master pod is recreated, as its replicas then follow
+its old address until the operator points them anywhere. When only the
+container restarts, in place, with the same address, the replicas
+reconnect to it on their own within a second and the engine resyncs them
+before the operator can act: that case needs the engine to refuse such a
+resync (a replica asking to continue a stream from further than the master
+has it).
 
 ### Switchovers and stopping a master
 

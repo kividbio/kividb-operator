@@ -447,6 +447,52 @@ func TestReconcileRoles_MasterRestartedBehindInItsOwnStream(t *testing.T) {
 	}
 }
 
+// With the append-only file on, a killed master reloads it but comes back
+// in a new stream. Holding at least as many keys as the best replica, it
+// stays the master; with fewer, or either count unknown, it is failed
+// away from, as is a master without the append-only file, whatever its
+// key count. Equal counts keep the master: nothing says the replica holds
+// more.
+func TestReconcileRoles_MasterRestartedInANewStreamWithTheAOF(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		aof                bool
+		keys               int64
+		keysKnown          bool
+		replicaKeysUnknown bool
+		wantFailover       bool
+	}{
+		{"aof, more keys", true, 1000, true, false, false},
+		{"aof, equal keys", true, 900, true, false, false},
+		{"aof, fewer keys", true, 0, true, false, true},
+		{"aof, keys unknown", true, 1000, false, false, true},
+		{"aof, replica's keys unknown", true, 1000, true, true, true},
+		{"no aof", false, 1000, true, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restarted := keyed(masterRun(0, "stream-b", "run-2"), tc.keys)
+			restarted.AofEnabled, restarted.KeyCountKnown = tc.aof, tc.keysKnown
+			replica := keyed(linkDown(replicaOf("10.0.0.1", 900)), 900)
+			replica.KeyCountKnown = !tc.replicaKeysUnknown
+			h := newRolesHarness(t, "c1-0",
+				testPod{name: "c1-0", ip: "10.0.0.9", ready: true, agent: restarted},
+				testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replica},
+			)
+			h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+				{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 1000, ReplID: "stream-a", RunID: "run-1"},
+				{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 900},
+			}
+			want := "c1-0"
+			if tc.wantFailover {
+				want = "c1-1"
+			}
+			if m, failover := h.reconcile(); m != want || failover != tc.wantFailover {
+				t.Fatalf("master=%q failover=%v, want %s and failover=%v", m, failover, want, tc.wantFailover)
+			}
+		})
+	}
+}
+
 // A master that stopped cleanly goes on with its stream from where it was:
 // it lost nothing, whatever a replica read a moment later says.
 func TestReconcileRoles_CleanlyRestartedMasterIsLeftAlone(t *testing.T) {
@@ -608,6 +654,12 @@ func masterRun(offset int64, replID, runID string) *agentapi.StatusResponse {
 func linkDown(st *agentapi.StatusResponse) *agentapi.StatusResponse {
 	down := false
 	st.MasterLinkUp = &down
+	return st
+}
+
+// keyed sets the number of keys an agent reports.
+func keyed(st *agentapi.StatusResponse, keys int64) *agentapi.StatusResponse {
+	st.KeyCount, st.KeyCountKnown = keys, true
 	return st
 }
 

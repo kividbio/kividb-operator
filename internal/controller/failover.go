@@ -441,8 +441,9 @@ func regressedMaster(last kividbv1alpha1.KividbPodStatus, pod *corev1.Pod, st *a
 		return "", 0 // no offset recorded as this stream's master to compare with
 	}
 	floor := st.ReplicationOffset
+	newStream := streams && st.MasterReplID != last.ReplID
 	switch {
-	case streams && st.MasterReplID != last.ReplID:
+	case newStream:
 		floor = 0 // a new stream: its offset is no position in the old one
 	case st.ReplicationOffset >= last.ReplicationOffset:
 		return "", 0 // it went on from where it was
@@ -457,6 +458,15 @@ func regressedMaster(last kividbv1alpha1.KividbPodStatus, pod *corev1.Pod, st *a
 		}
 		if o := v.status.ReplicationOffset; o > bestOffset || (o == bestOffset && best != "" && name < best) {
 			best, bestOffset = name, o
+		}
+	}
+	// With the append-only file on, a killed engine reloads it but still
+	// starts a new stream. A master holding at least as many keys as the
+	// replica is kept: it may still have lost an overwrite or a delete,
+	// but nothing says the replica holds more.
+	if best != "" && newStream && st.AofEnabled && st.KeyCountKnown {
+		if b := views[best].status; b.KeyCountKnown && b.KeyCount <= st.KeyCount {
+			return "", 0
 		}
 	}
 	return best, bestOffset

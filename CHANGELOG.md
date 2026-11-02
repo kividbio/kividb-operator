@@ -174,6 +174,13 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 
 ### Fixed
 
+- **A master that restarted with the append-only file on was failed over
+  to a replica behind it** (new in this release). A killed engine starts a
+  new stream, which was taken as lost writes; a master holding at least as
+  many keys as the replica now stays the master, and the replicas resync
+  from it. Key counts miss a lost overwrite or delete; the replicas resync
+  without it.
+
 Found by a third end-to-end test on AKS (operator master 853cd01 on an
 engine 1.2.0 candidate):
 
