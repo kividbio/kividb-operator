@@ -69,6 +69,28 @@ func TestBothContainersWaitForTheHandoverBeforeStopping(t *testing.T) {
 	}
 }
 
+// Issue #33: the agent puts its namespace in backup keys, so that
+// same-named clusters in two namespaces do not share them. Replicated and
+// sharded pods both get it.
+func TestTheAgentKnowsItsNamespace(t *testing.T) {
+	c := testCluster("c1")
+	c.Spec.Storage.Size = "1Gi"
+	for name, tmpl := range map[string]corev1.PodTemplateSpec{
+		"replicated": desiredStatefulSet(c, nil, nil, nil).Spec.Template,
+		"shard 0":    desiredShardStatefulSet(c, 0, nil, nil, nil).Spec.Template,
+	} {
+		var ref string
+		for _, e := range container(t, tmpl, "agent").Env {
+			if e.Name == "POD_NAMESPACE" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil {
+				ref = e.ValueFrom.FieldRef.FieldPath
+			}
+		}
+		if ref != "metadata.namespace" {
+			t.Errorf("%s: POD_NAMESPACE from %q, want the downward API's metadata.namespace", name, ref)
+		}
+	}
+}
+
 func TestReplicatedClusterHasADisruptionBudget(t *testing.T) {
 	c := testCluster("c1")
 	pdb := desiredPDB(c)
