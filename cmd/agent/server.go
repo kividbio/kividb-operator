@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +33,7 @@ func runServe(args []string) error {
 
 	addr := fmt.Sprintf(":%d", cfg.AgentPort)
 	log.Printf("kividb-operator agent listening on %s (kividb at %s)", addr, cfg.KividbAddr)
-	if cfg.AgentToken == "" {
+	if s.token() == "" {
 		log.Printf("no %s set: every endpoint but the probes and /metrics will answer 503", agentapi.TokenEnv)
 	}
 	return http.ListenAndServe(addr, s.routes())
@@ -74,16 +75,33 @@ func (s *server) routes() http.Handler {
 // run any command through /exec.
 func (s *server) withToken(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.AgentToken == "" {
+		token := s.token()
+		if token == "" {
 			writeError(w, http.StatusServiceUnavailable, fmt.Errorf("this agent has no %s: it refuses everything but the probes and /metrics", agentapi.TokenEnv))
 			return
 		}
-		if !agentapi.TokenMatches(r, s.cfg.AgentToken) {
+		if !agentapi.TokenMatches(r, token) {
 			writeError(w, http.StatusUnauthorized, fmt.Errorf("missing or wrong agent token"))
 			return
 		}
 		h(w, r)
 	}
+}
+
+// token is the agent token from the cluster's auth Secret, mounted next to
+// the ACL file. The kubelet updates the mount when the operator's token
+// changes, while AGENT_TOKEN keeps the value the container started with,
+// so the agent would otherwise refuse the operator that is to roll it.
+func (s *server) token() string {
+	if s.cfg.AclFile != "" {
+		if b, err := os.ReadFile(filepath.Join(filepath.Dir(s.cfg.AclFile), agentapi.TokenSecretKey)); err == nil {
+			if t := strings.TrimSpace(string(b)); t != "" {
+				return t
+			}
+		}
+	}
+	// Missing, empty or unreadable: AGENT_TOKEN, as before the mount was read.
+	return s.cfg.AgentToken
 }
 
 func (s *server) dial() (*respclient.Client, error) {
