@@ -178,6 +178,12 @@ rules that match the old keys (see Fixed).
 
 ### Fixed
 
+- **`FailoverBlocked` held for one pass, then an empty replica was
+  promoted** (also in 0.6.x). The blocked pass emptied `status.pods`, so
+  the next one no longer knew the master had held keys, and the old
+  master later resynced from the empty replica. A failed pass now keeps
+  the last `status.pods` (with no pod `Ready`), and a newly promoted
+  master keeps its key count.
 - **Backup retention deleted other clusters' backups** (also in 0.6.x). A
   cluster pruned everything under `<pathPrefix>/<cluster>/`, which also
   held the backups of a same-named cluster in another namespace, or of a
