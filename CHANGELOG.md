@@ -174,6 +174,14 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 
 ### Fixed
 
+- **Removing a shard could stay in `Rebalancing` for good** (new in this
+  release). The pass that finishes the change deletes the removed shard's
+  StatefulSet first, and if its status write was then lost, later passes
+  waited for that shard's pods, which never came back. A removed shard
+  whose StatefulSet is gone is no longer waited for, so the change is
+  finished again while `spec.shards` is unchanged. Raising `spec.shards`
+  back before that still leaves it in `Rebalancing`.
+
 Found by a third end-to-end test on AKS (operator master 853cd01 on an
 engine 1.2.0 candidate):
 

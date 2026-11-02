@@ -9,6 +9,7 @@ import (
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -195,6 +196,82 @@ func TestRemoveAShard(t *testing.T) {
 	}
 	if len(h.c.Status.Cluster.StaleNodeIDs) != 0 {
 		t.Errorf("stale IDs left: %v", h.c.Status.Cluster.StaleNodeIDs)
+	}
+}
+
+// loseShard2sFinish runs a 3 -> 2 to its end, then puts back the status
+// from before the pass that finished it (that status write was lost) and
+// takes shard 2's pods away, as its StatefulSet's deletion does.
+func (h *formingHarness) loseShard2sFinish() {
+	for i := 0; i < 4; i++ {
+		h.pass()
+	}
+	h.c.Spec.Shards = int32p(2)
+	before := h.c.Status.DeepCopy()
+	for i := 0; i < 20 && (i == 0 || rebalanceOf(h.c) != nil); i++ {
+		before = h.c.Status.DeepCopy()
+		h.reshardPass()
+	}
+	if rebalanceOf(h.c) != nil {
+		h.t.Fatalf("the 3 -> 2 did not finish: %+v", rebalanceOf(h.c))
+	}
+	h.c.Status = *before
+	for _, p := range h.pods() {
+		if p.Labels[ShardLabel] == "2" {
+			pod := p
+			_ = h.r.Delete(context.Background(), &pod)
+			delete(h.engine.nodes, h.engine.byIP[p.Status.PodIP])
+			delete(h.engine.byIP, p.Status.PodIP)
+		}
+	}
+}
+
+// rebalancePass is reshardPass without its StatefulSet controller's part:
+// no pod is made or taken away.
+func (h *formingHarness) rebalancePass() {
+	ctx := context.Background()
+	h.r.startRebalance(h.c)
+	observed := h.r.observeShardedPods(ctx, h.c, h.pods())
+	if _, err := h.r.reconcileClusterTopology(ctx, h.c, observed, h.exposed); err != nil {
+		h.t.Log(err)
+	}
+	h.r.reconcileRebalance(ctx, h.c, observed)
+	h.c.Status.Phase, _, _ = shardedStatus(h.c, observed)
+}
+
+// The pass that finished a 3 -> 2 deleted shard 2's StatefulSet, but its
+// status write was lost (a stale pass's write won, or the operator
+// restarted). The change is seen again, with shard 2's pods gone for good:
+// it is finished again, not waited on for ever.
+func TestRemoveAShardWhoseFinishWasLost(t *testing.T) {
+	h := newFormingHarness(t, 3, 1)
+	h.loseShard2sFinish()
+	for i := 0; i < 10 && rebalanceOf(h.c) != nil; i++ {
+		h.rebalancePass()
+	}
+	if rb := rebalanceOf(h.c); rb != nil {
+		t.Fatalf("still rebalancing: %+v, phase %s", *rb, h.c.Status.Phase)
+	}
+	for i := 0; i < 4; i++ {
+		h.reshardPass()
+	}
+	h.checkSpread(2)
+}
+
+// While a removed shard's StatefulSet is there, its pods are waited for,
+// even when it owns no slots any more.
+func TestRemovedShardWithItsStatefulSetIsWaitedFor(t *testing.T) {
+	h := newFormingHarness(t, 3, 1)
+	h.loseShard2sFinish()
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: shardStatefulSetName(h.c, 2), Namespace: h.c.Namespace}}
+	if err := h.r.Create(context.Background(), sts); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		h.rebalancePass()
+	}
+	if rb := rebalanceOf(h.c); rb == nil || rb.Phase != kividbv1alpha1.RebalanceAddingShards {
+		t.Fatalf("shard 2's pods were not waited for: %+v", rb)
 	}
 }
 
