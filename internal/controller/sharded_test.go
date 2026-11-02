@@ -10,14 +10,18 @@ import (
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func int32p(n int32) *int32 { return &n }
@@ -234,7 +238,7 @@ func TestReconcileShardedCreatesTheShards(t *testing.T) {
 	c := shardedCluster("s", 3, 1)
 	r := shardedReconciler(t, c)
 	ctx := context.Background()
-	if _, err := r.reconcileSharded(ctx, c, nil, nil, nil, "", "", authGenerations{auth: "1"}); err != nil {
+	if _, err := r.reconcileSharded(ctx, c, nil, nil, nil, "", "", authGenerations{auth: "1"}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -269,7 +273,7 @@ func TestReconcileShardedCreatesTheShards(t *testing.T) {
 
 	// Again: the bus secret is kept, not regenerated.
 	firstBus := string(bus.Data[busSecretKey])
-	if _, err := r.reconcileSharded(ctx, &got, nil, nil, nil, "", "", authGenerations{auth: "1"}); err != nil {
+	if _, err := r.reconcileSharded(ctx, &got, nil, nil, nil, "", "", authGenerations{auth: "1"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	_ = r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "s-bus"}, &bus)
@@ -288,7 +292,7 @@ func TestReconcileShardedCreatesTheShards(t *testing.T) {
 	}
 	_ = r.Get(ctx, client.ObjectKeyFromObject(c), &got)
 	got.Spec.Replicas = 0
-	if _, err := r.reconcileSharded(ctx, &got, nil, nil, nil, "", "", authGenerations{auth: "1"}); err != nil {
+	if _, err := r.reconcileSharded(ctx, &got, nil, nil, nil, "", "", authGenerations{auth: "1"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	var after corev1.ServiceList
@@ -338,6 +342,232 @@ func TestLegacyConfigMapIsRemovedOnceNoPodMountsIt(t *testing.T) {
 	}
 }
 
+// formedForReconcile is a formed, Running sharded cluster, stored so that
+// Reconcile can read it, whose API server refuses the objects refuse
+// names.
+func formedForReconcile(t *testing.T, refuse func(client.Object) bool, objs ...client.Object) *formingHarness {
+	t.Helper()
+	h := newFormingHarness(t, 2, 1)
+	for i := 0; i < 4; i++ {
+		h.pass()
+	}
+	if h.c.Status.Phase != kividbv1alpha1.PhaseRunning {
+		t.Fatalf("phase %s, want a formed cluster", h.c.Status.Phase)
+	}
+	ctx := context.Background()
+	status := *h.c.Status.DeepCopy()
+	for _, o := range append(objs, h.c) {
+		if err := h.r.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.c.Status = status
+	h.c.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Formed", LastTransitionTime: metav1.Now()}}
+	if err := h.r.Status().Update(ctx, h.c); err != nil {
+		t.Fatal(err)
+	}
+	refused := func(obj client.Object) error {
+		if refuse != nil && refuse(obj) {
+			return fmt.Errorf("%s is invalid", obj.GetName())
+		}
+		return nil
+	}
+	h.r.Client = interceptor.NewClient(h.r.Client.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if err := refused(obj); err != nil {
+				return err
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+		Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if err := refused(obj); err != nil {
+				return err
+			}
+			return cl.Update(ctx, obj, opts...)
+		},
+	})
+	// A role label the pass must set again: it still looks after the pods.
+	var pod corev1.Pod
+	_ = h.r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "s-1-1"}, &pod)
+	delete(pod.Labels, kividbv1alpha1.RoleLabel)
+	if err := h.r.Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// reconcileFormed runs Reconcile on h's cluster and checks the pods were
+// still looked after and that Ready is False for reason, saying msg.
+func reconcileFormed(t *testing.T, h *formingHarness, reason, msg string) {
+	t.Helper()
+	ctx := context.Background()
+	res, err := h.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(h.c)})
+	if err != nil || res.RequeueAfter != shardedFormingInterval {
+		t.Errorf("Reconcile = %+v, %v; want a requeue in %s and no error", res, err, shardedFormingInterval)
+	}
+	var got kividbv1alpha1.KividbCluster
+	if err := h.r.Get(ctx, client.ObjectKeyFromObject(h.c), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != kividbv1alpha1.PhaseRunning || len(got.Status.Shards) != 2 {
+		t.Errorf("status: phase %s, %d shards", got.Status.Phase, len(got.Status.Shards))
+	}
+	ready := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != reason || !strings.Contains(ready.Message, msg) {
+		t.Errorf("Ready condition %+v, want False, %s, %q", ready, reason, msg)
+	}
+	var pod corev1.Pod
+	_ = h.r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "s-1-1"}, &pod)
+	if pod.Labels[kividbv1alpha1.RoleLabel] != "replica" {
+		t.Errorf("s-1-1 role label %q, want replica set again", pod.Labels[kividbv1alpha1.RoleLabel])
+	}
+}
+
+// A step of a sharded cluster the API server refuses does not stop the
+// pods from being looked after, and the cluster is not Ready, though all
+// its pods are.
+func TestReconcileSharded_RefusedApplyStepIsNotReady(t *testing.T) {
+	snap := &kividbv1alpha1.KividbSnapshotConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "hourly", Namespace: "default"},
+		Spec: kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: "0 * * * *",
+			S3: kividbv1alpha1.S3StorageSpec{Endpoint: "https://s3.example.com", Bucket: "b"}},
+	}
+	h := formedForReconcile(t, func(obj client.Object) bool {
+		_, ok := obj.(*batchv1.CronJob)
+		return ok
+	}, snap)
+	h.c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "hourly"}
+	if err := h.r.Update(context.Background(), h.c); err != nil {
+		t.Fatal(err)
+	}
+	reconcileFormed(t, h, "ReconcileError", "reconciling backup cronjob: s-backup is invalid")
+}
+
+// A sharded cluster whose referenced object cannot be read has nothing
+// written, but its pods are still looked after, and it is not Ready.
+func TestReconcileSharded_UnreadableReferenceIsNotReady(t *testing.T) {
+	h := formedForReconcile(t, nil)
+	h.c.Spec.ConfigRef = &corev1.LocalObjectReference{Name: "conf"}
+	if err := h.r.Update(context.Background(), h.c); err != nil {
+		t.Fatal(err)
+	}
+	reconcileFormed(t, h, "ReconcileError", `resolving configRef: KividbConfig "conf"`)
+	var list appsv1.StatefulSetList
+	_ = h.r.List(context.Background(), &list, client.InNamespace("default"))
+	if len(list.Items) != 0 {
+		t.Errorf("%d StatefulSets written, want none", len(list.Items))
+	}
+}
+
+// Held back with spec.port changed, a sharded cluster's pods still listen
+// on the old port: the topology, which introduces nodes at spec.port, is
+// left alone; with the port unchanged it still runs.
+func TestReconcileSharded_HeldBackPortChangeLeavesTopologyAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		port     int32
+		wantMeet bool
+	}{{"port unchanged", 0, true}, {"port changed", 6390, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := formedForReconcile(t, nil)
+			ctx := context.Background()
+			for _, p := range h.pods() {
+				p.Spec.Containers = []corev1.Container{{Name: kividbContainerName,
+					Ports: []corev1.ContainerPort{{Name: KividbPortName, ContainerPort: 6380}}}}
+				if err := h.r.Update(ctx, &p); err != nil {
+					t.Fatal(err)
+				}
+				// s-1-1 came back with a new IP: the others must meet it again.
+				if p.Name == "s-1-1" {
+					n := h.node(p.Name)
+					delete(h.engine.byIP, n.ip)
+					n.ip, p.Status.PodIP = "10.0.9.9", "10.0.9.9"
+					h.engine.byIP[n.ip] = n.id
+					if err := h.r.Status().Update(ctx, &p); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			_ = h.r.Get(ctx, client.ObjectKeyFromObject(h.c), h.c)
+			h.c.Spec.ConfigRef = &corev1.LocalObjectReference{Name: "conf"}
+			h.c.Spec.Port = tc.port
+			if err := h.r.Update(ctx, h.c); err != nil {
+				t.Fatal(err)
+			}
+			h.engine.calls = nil
+			if _, err := h.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(h.c)}); err != nil {
+				t.Fatal(err)
+			}
+			met := false
+			for _, call := range h.engine.calls {
+				met = met || strings.HasPrefix(call, "/cluster/meet")
+			}
+			if met != tc.wantMeet {
+				t.Errorf("met: %v, want %v (engine calls %v)", met, tc.wantMeet, h.engine.calls)
+			}
+		})
+	}
+}
+
+// A shard added while a step is refused: moving slots waits only for the
+// shards' StatefulSets and budgets, not for a refused backup CronJob.
+func TestReconcileSharded_RebalanceWaitsOnlyForTheWorkloads(t *testing.T) {
+	snap := &kividbv1alpha1.KividbSnapshotConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "hourly", Namespace: "default"},
+		Spec: kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: "0 * * * *",
+			S3: kividbv1alpha1.S3StorageSpec{Endpoint: "https://s3.example.com", Bucket: "b"}},
+	}
+	for _, tc := range []struct {
+		name      string
+		refuse    func(client.Object) bool
+		wantMoves bool
+	}{
+		{"nothing refused", nil, true},
+		{"backup CronJob refused", func(obj client.Object) bool {
+			_, ok := obj.(*batchv1.CronJob)
+			return ok
+		}, true},
+		{"StatefulSets refused", func(obj client.Object) bool {
+			_, ok := obj.(*appsv1.StatefulSet)
+			return ok
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := formedForReconcile(t, tc.refuse, snap.DeepCopy())
+			ctx := context.Background()
+			// The new shard's pods, as its StatefulSet made them on an
+			// earlier pass.
+			for n := int32(0); n <= h.c.Spec.Replicas; n++ {
+				ip := fmt.Sprintf("10.0.2.%d", n+1)
+				p := shardedPod(h.c, 2, n, ip)
+				if err := h.r.Create(ctx, p); err != nil {
+					t.Fatal(err)
+				}
+				h.engine.add(nodeID(p.Name), ip)
+			}
+			_ = h.r.Get(ctx, client.ObjectKeyFromObject(h.c), h.c)
+			h.c.Spec.Shards = int32p(3)
+			h.c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "hourly"}
+			if err := h.r.Update(ctx, h.c); err != nil {
+				t.Fatal(err)
+			}
+			h.engine.calls = nil
+			for i := 0; i < 8; i++ {
+				if _, err := h.r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(h.c)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			moved := false
+			for _, call := range h.engine.calls {
+				moved = moved || strings.HasPrefix(call, "/cluster/migration/import")
+			}
+			if moved != tc.wantMoves {
+				t.Errorf("slots moved: %v, want %v (%d slots; engine calls %v)", moved, tc.wantMoves, h.engine.moved, h.engine.calls)
+			}
+		})
+	}
+}
+
 // A pass that read the cluster from a cache a version behind, before the
 // pass that finished a 3 -> 2 wrote its status, must not write its own
 // over it: that brought the finished rebalance back.
@@ -364,7 +594,7 @@ func TestStaleStatusDoesNotUndoANewerOne(t *testing.T) {
 		t.Errorf("stale status written: %v", err)
 	}
 	// A whole pass from the stale object: no error, looked at again soon.
-	res, err := r.reconcileSharded(ctx, &stale, nil, nil, nil, "", "", authGenerations{auth: "1"})
+	res, err := r.reconcileSharded(ctx, &stale, nil, nil, nil, "", "", authGenerations{auth: "1"}, nil)
 	if err != nil || res.RequeueAfter != shardedFormingInterval {
 		t.Errorf("stale pass: %+v, %v", res, err)
 	}

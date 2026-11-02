@@ -178,6 +178,30 @@ rules that match the old keys (see Fixed).
 
 ### Fixed
 
+- **`spec.bootstrapFromSnapshot` added to a running cluster scaled it to 0
+  and restored the snapshot over pod-0's data** (also in 0.6.x). The CRD
+  now refuses the field after creation, and a cluster whose StatefulSet
+  already exists skips the bootstrap with a `BootstrapSkipped` Event. A
+  StatefulSet and its pods left from an earlier cluster with the same name
+  are waited for (`BootstrapWaiting`), not skipped and not touched;
+  removing the field cancels the wait. Helm does not upgrade CRDs: until
+  the new `kividbclusters` CRD is applied, the API server still accepts the
+  field, and only the skip protects the cluster.
+- **`FailoverBlocked` held for one pass, then an empty replica was
+  promoted** (also in 0.6.x). The blocked pass emptied `status.pods`, so
+  the next one no longer knew the master had held keys, and the old
+  master later resynced from the empty replica. A failed pass now keeps
+  the last `status.pods` (with no pod `Ready`), and a newly promoted
+  master keeps its key count.
+- **A failed reconcile step turned off failover, with the cluster still
+  `Ready`** (also in 0.6.x). A refused object or a missing referenced
+  KividbConfig, KividbAclConfig, KividbSnapshotConfig or Secret now holds
+  back the writes after it, not failover, role labels or status: `Ready`
+  is `False` (`ReconcileError`, or `InvalidSpec` with an Event), in sharded
+  clusters too. Port clashes (`spec.port`, `tls.port`, the agent's 8081, the
+  exporter's 9121) and backup schedules that are not valid cron are refused
+  before anything is written. The referenced kinds are watched, so a fix
+  takes effect at once.
 - **Removing a shard could stay in `Rebalancing` for good** (new in this
   release). On a status conflict, a pass that had read the cluster a
   version behind wrote its status over the latest one, and could bring

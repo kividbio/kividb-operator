@@ -20,7 +20,7 @@ func TestRemovedShardStatefulSetIsNotMadeAgain(t *testing.T) {
 	c := shardedCluster("s", 3, 1)
 	c.Status.Cluster = &kividbv1alpha1.ClusterModeStatus{Shards: 4, Rebalance: &kividbv1alpha1.RebalanceStatus{From: 4, To: 3}}
 	r := shardedReconciler(t, c)
-	if _, err := r.reconcileSharded(ctx, c, nil, nil, nil, "", "", authGenerations{auth: "1"}); err != nil {
+	if _, err := r.reconcileSharded(ctx, c, nil, nil, nil, "", "", authGenerations{auth: "1"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	var sts appsv1.StatefulSet
@@ -43,7 +43,7 @@ func TestRemovedShardStatefulSetIsNotMadeAgain(t *testing.T) {
 	old := desiredShardStatefulSet(c2, 3, nil, nil, nil)
 	old.Spec.Template.Annotations = map[string]string{"stale": "yes"}
 	r2 := shardedReconciler(t, c2, old)
-	if _, err := r2.reconcileSharded(ctx, c2, nil, nil, nil, "", "", authGenerations{auth: "1"}); err != nil {
+	if _, err := r2.reconcileSharded(ctx, c2, nil, nil, nil, "", "", authGenerations{auth: "1"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := r2.Get(ctx, client.ObjectKey{Namespace: "default", Name: "t-3"}, &sts); err != nil || sts.Spec.Template.Annotations["stale"] != "" {

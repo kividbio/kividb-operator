@@ -405,60 +405,75 @@ func (r *KividbClusterReconciler) reconcileBusSecret(ctx context.Context, c *kiv
 // It creates the shards' workloads and Services, forms the cluster and
 // looks after it (see cluster_form.go). Rollouts and backups of sharded
 // clusters come in the next steps of 0.7.0.
-func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig, aclContent, defaultPassword string, generations authGenerations) (ctrl.Result, error) {
+//
+// held, when set, is why nothing may be written (see reconcileHeld): the
+// configs are nil then. A step the API server refuses skips the ones
+// after it. Either way the pods are still looked after where that needs
+// none of it, and the error shows on the Ready condition.
+func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig, aclContent, defaultPassword string, generations authGenerations, held *heldError) (ctrl.Result, error) {
 	read := c.Status.DeepCopy()
-	bus, err := r.reconcileBusSecret(ctx, c)
-	if err != nil {
-		return ctrl.Result{}, err
+	log := logf.FromContext(ctx)
+	var steps applySteps
+	if held != nil {
+		steps.err = held
 	}
-	secrets := clusterSecrets{busSecret: bus, masterAuth: defaultPassword}
-	if err := r.reconcileConfig(ctx, c, kdbConfig, secrets); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling config: %w", err)
-	}
-	if err := r.reconcileShardedServices(ctx, c, kdbConfig); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling services: %w", err)
-	}
-
-	r.startRebalance(c)
-	rollout := map[string]string{
-		ConfigHashAnnotation:     configHash(renderKividbConfWith(c, kdbConfig, secrets))[:16],
-		AuthGenerationAnnotation: generations.auth,
-	}
-	for s := int32(0); s < shardCount(c); s++ {
-		if s >= targetShards(c) {
-			// A shard being removed: kept up to date while it drains, never
-			// made again. Its StatefulSet is deleted once its slots are out,
-			// and a pass that read the cluster before that status landed
-			// would otherwise create it again, with new pods and new volumes
-			// (the AKS run's 4 -> 3).
-			if keep, err := r.removedShardStillThere(ctx, c, s); err != nil {
-				return ctrl.Result{}, err
-			} else if !keep {
-				continue
+	var secrets clusterSecrets
+	// "": the error already names the step (spec.cluster.busSecretRef,
+	// bus secret).
+	steps.run("", func() error {
+		bus, err := r.reconcileBusSecret(ctx, c)
+		secrets = clusterSecrets{busSecret: bus, masterAuth: defaultPassword}
+		return err
+	})
+	steps.run("reconciling config", func() error { return r.reconcileConfig(ctx, c, kdbConfig, secrets) })
+	steps.run("reconciling services", func() error { return r.reconcileShardedServices(ctx, c, kdbConfig) })
+	// "": the error already names the step and the shard.
+	steps.run("", func() error {
+		r.startRebalance(c)
+		rollout := map[string]string{
+			ConfigHashAnnotation:     configHash(renderKividbConfWith(c, kdbConfig, secrets))[:16],
+			AuthGenerationAnnotation: generations.auth,
+		}
+		for s := int32(0); s < shardCount(c); s++ {
+			if s >= targetShards(c) {
+				// A shard being removed: kept up to date while it drains, never
+				// made again. Its StatefulSet is deleted once its slots are out,
+				// and a pass that read the cluster before that status landed
+				// would otherwise create it again, with new pods and new volumes
+				// (the AKS run's 4 -> 3).
+				if keep, err := r.removedShardStillThere(ctx, c, s); err != nil {
+					return err
+				} else if !keep {
+					continue
+				}
+			}
+			if err := r.applyStatefulSet(ctx, c, desiredShardStatefulSet(c, s, kdbConfig, aclConfig, snapCfg), rollout); err != nil {
+				return fmt.Errorf("reconciling statefulset of shard %d: %w", s, err)
+			}
+			if err := r.applyPDB(ctx, c, desiredShardPDB(c, s)); err != nil {
+				return fmt.Errorf("reconciling disruption budget of shard %d: %w", s, err)
 			}
 		}
-		if err := r.applyStatefulSet(ctx, c, desiredShardStatefulSet(c, s, kdbConfig, aclConfig, snapCfg), rollout); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconciling statefulset of shard %d: %w", s, err)
-		}
-		if err := r.applyPDB(ctx, c, desiredShardPDB(c, s)); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconciling disruption budget of shard %d: %w", s, err)
-		}
-	}
-
-	if err := r.reconcileBackupCronJob(ctx, c, snapCfg); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling backup cronjob: %w", err)
-	}
+		return nil
+	})
+	// What moving slots waits for: the shards' workloads, not the backups.
+	workloadsErr := steps.err
+	steps.run("reconciling backup cronjob", func() error { return r.reconcileBackupCronJob(ctx, c, snapCfg) })
 	if snapCfg != nil {
-		if err := r.reconcileSnapshots(ctx, c, snapCfg.Name); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconciling snapshots: %w", err)
-		}
+		steps.run("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, c, snapCfg.Name) })
+	}
+	applyErr := steps.err
+	if applyErr != nil && held == nil {
+		log.Error(applyErr, "applying the cluster's objects failed")
 	}
 
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(c.Namespace), client.MatchingLabels(selectorLabels(c))); err != nil {
 		return ctrl.Result{}, fmt.Errorf("listing pods: %w", err)
 	}
-	r.reconcileAclReload(ctx, c, pods.Items, aclContent, generations)
+	if held == nil {
+		r.reconcileAclReload(ctx, c, pods.Items, aclContent, generations)
+	}
 
 	exposed, err := r.exposures(ctx, c)
 	if err != nil {
@@ -468,21 +483,28 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	// First: a master that restarted with less than its replica holds is a
 	// race against the replica's next full-sync attempt.
 	restarted := r.reconcileRestartedMasters(ctx, c, observed)
-	acted, topoErr := r.reconcileClusterTopology(ctx, c, observed, exposed)
+	var acted bool
+	var topoErr error
+	// The topology points nodes at spec.port: not while the pods, held
+	// back from rolling, are on another.
+	if held == nil || listensOn(pods.Items, getPort(c)) {
+		acted, topoErr = r.reconcileClusterTopology(ctx, c, observed, exposed)
+	}
 	acted = acted || restarted
 	if topoErr != nil {
-		logf.FromContext(ctx).Error(topoErr, "cluster topology")
+		log.Error(topoErr, "cluster topology")
 	}
 	r.labelShardedRoles(ctx, observed)
 	if r.reconcileShardStepDown(ctx, c, observed) {
 		acted = true
 	}
-	if r.reconcileRebalance(ctx, c, observed) {
+	// Moving slots waits for the shards' workloads to be applied.
+	if workloadsErr == nil && r.reconcileRebalance(ctx, c, observed) {
 		acted = true
 	}
 	// A password change restarts pods only once the ones still on the
 	// previous password accept the new one (see auth_overlap.go).
-	if !r.reconcileAuthOverlap(ctx, c, pods.Items, generations) || r.reconcileShardedRollout(ctx, c, observed) {
+	if held == nil && (!r.reconcileAuthOverlap(ctx, c, pods.Items, generations) || r.reconcileShardedRollout(ctx, c, observed)) {
 		acted = true
 	}
 
@@ -501,8 +523,10 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	} else {
 		removeCondition(&c.Status.Conditions, MasterRestartedEmptyCondition)
 	}
-	r.notePersistence(c, kdbConfig)
-	phase, err := r.updateShardedStatus(ctx, c, read, observed, topoErr)
+	if held == nil {
+		r.notePersistence(c, kdbConfig)
+	}
+	phase, err := r.updateShardedStatus(ctx, c, read, observed, topoErr, applyErr)
 	if errors.Is(err, errStaleStatus) {
 		logf.FromContext(ctx).V(1).Info("status changed since this pass read it; looking again")
 		return ctrl.Result{RequeueAfter: shardedFormingInterval}, nil
@@ -511,7 +535,7 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 	r.clearShardStepDowns(ctx, observed)
-	if acted || topoErr != nil || phase != kividbv1alpha1.PhaseRunning {
+	if acted || topoErr != nil || applyErr != nil || phase != kividbv1alpha1.PhaseRunning {
 		return ctrl.Result{RequeueAfter: shardedFormingInterval}, nil
 	}
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
@@ -546,7 +570,9 @@ func (r *KividbClusterReconciler) applyPDB(ctx context.Context, c *kividbv1alpha
 	return err
 }
 
-func (r *KividbClusterReconciler) updateShardedStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus, pods []*shardPod, topoErr error) (kividbv1alpha1.ClusterPhase, error) {
+// applyErr is why the cluster's objects were not all applied: the cluster
+// is not Ready then, even if its pods are.
+func (r *KividbClusterReconciler) updateShardedStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus, pods []*shardPod, topoErr, applyErr error) (kividbv1alpha1.ClusterPhase, error) {
 	before := append([]kividbv1alpha1.ShardStatus(nil), c.Status.Shards...)
 	phase, reason, message := shardedStatus(c, pods)
 	r.noteShardFailovers(c, before, pods)
@@ -563,7 +589,17 @@ func (r *KividbClusterReconciler) updateShardedStatus(ctx context.Context, c *ki
 	if phase == kividbv1alpha1.PhaseRunning {
 		cond.Status = metav1.ConditionTrue
 	}
-	if topoErr != nil && phase != kividbv1alpha1.PhaseRunning {
+	var held *heldError
+	switch {
+	case errors.As(applyErr, &held):
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = held.reason
+		cond.Message = applyErr.Error()
+	case applyErr != nil:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = "ReconcileError"
+		cond.Message = applyErr.Error()
+	case topoErr != nil && phase != kividbv1alpha1.PhaseRunning:
 		cond.Reason = "ReconcileError"
 		cond.Message = topoErr.Error()
 	}
