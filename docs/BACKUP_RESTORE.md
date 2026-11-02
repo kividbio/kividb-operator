@@ -237,7 +237,12 @@ until the Job finishes). Once `status.bootstrap.completed` is true, the
 field is ignored on later reconciles (immutable bootstrap). The field can
 only be set when the cluster is created: the API server refuses it on an
 existing cluster, and a cluster that is already running skips it with a
-`BootstrapSkipped` Event.
+`BootstrapSkipped` Event. If a StatefulSet with the cluster's name, or its
+pods, are left from an earlier cluster (still being garbage-collected, or
+orphaned with `--cascade=orphan`), the bootstrap waits in `Pending` with a
+`BootstrapWaiting` Event and starts once that StatefulSet and its pods are
+deleted (with `--cascade=orphan`, delete the pods too). Removing
+`spec.bootstrapFromSnapshot` while it waits cancels the bootstrap.
 
 This is **not** an in-place restore of a live cluster — that remains out of
 scope (see [ROADMAP.md](ROADMAP.md)).

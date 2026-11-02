@@ -181,10 +181,12 @@ rules that match the old keys (see Fixed).
 - **`spec.bootstrapFromSnapshot` added to a running cluster scaled it to 0
   and restored the snapshot over pod-0's data** (also in 0.6.x). The CRD
   now refuses the field after creation, and a cluster whose StatefulSet
-  already exists skips the bootstrap with a `BootstrapSkipped` Event. Helm
-  does not upgrade CRDs: until the new `kividbclusters` CRD is applied,
-  the API server still accepts the field, and only the skip protects the
-  cluster.
+  already exists skips the bootstrap with a `BootstrapSkipped` Event. A
+  StatefulSet and its pods left from an earlier cluster with the same name
+  are waited for (`BootstrapWaiting`), not skipped and not touched;
+  removing the field cancels the wait. Helm does not upgrade CRDs: until
+  the new `kividbclusters` CRD is applied, the API server still accepts the
+  field, and only the skip protects the cluster.
 - **Backup retention deleted other clusters' backups** (also in 0.6.x). A
   cluster pruned everything under `<pathPrefix>/<cluster>/`, which also
   held the backups of a same-named cluster in another namespace, or of a

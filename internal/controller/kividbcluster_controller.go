@@ -185,8 +185,13 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ConfigHashAnnotation:     configHash(renderKividbConf(&c, kdbConfig))[:16],
 		AuthGenerationAnnotation: generations.auth,
 	}
-	if err := r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg, rollout); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
+	// While the bootstrap waits, the StatefulSet with this name is not
+	// ours. Updating it would take it over (SetControllerReference matches
+	// owners by name, not UID) and scale it to 0.
+	if !bootstrapWaiting(&c) {
+		if err := r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg, rollout); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
+		}
 	}
 	if err := r.applyPDB(ctx, &c, desiredPDB(&c)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling disruption budget: %w", err)
