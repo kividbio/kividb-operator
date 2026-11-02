@@ -152,6 +152,8 @@ spec:
                 port:
                   type: integer
                   default: 6380
+                  minimum: 0
+                  maximum: 65535
                   description: RESP protocol port kividb listens on.
                 configRef:
                   type: object

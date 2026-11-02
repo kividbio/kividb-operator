@@ -139,3 +139,55 @@ func TestValidateSpec(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateSpecPorts(t *testing.T) {
+	t.Parallel()
+	cluster := func(port int32, monitoring bool) *kividbv1alpha1.KividbCluster {
+		c := &kividbv1alpha1.KividbCluster{}
+		c.Spec.Storage.Size = "1Gi"
+		c.Spec.Port = port
+		c.Spec.Monitoring.Enabled = monitoring
+		return c
+	}
+	sharded := func(port int32) *kividbv1alpha1.KividbCluster {
+		c := cluster(port, false)
+		c.Spec.Shards = int32p(3)
+		return c
+	}
+	for name, c := range map[string]*kividbv1alpha1.KividbCluster{
+		"default":                       cluster(0, false),
+		"6380":                          cluster(6380, true),
+		"exporter's, without exporter":  cluster(ExporterPort, false),
+		"65535":                         cluster(65535, false),
+		"sharded, bus port at the edge": sharded(55535),
+	} {
+		if err := validateSpec(c); err != nil {
+			t.Errorf("%s: validateSpec refused: %v", name, err)
+		}
+		if err := validatePorts(c); err != nil {
+			t.Errorf("%s: validatePorts refused: %v", name, err)
+		}
+	}
+	// Out of range: rejectSpec, nothing can run on it.
+	for name, c := range map[string]*kividbv1alpha1.KividbCluster{
+		"negative":    cluster(-1, false),
+		"above 65535": cluster(65536, false),
+	} {
+		if err := validateSpec(c); err == nil {
+			t.Errorf("%s: expected an error from validateSpec", name)
+		}
+	}
+	// Taken by another listener: held back, failover goes on.
+	for name, c := range map[string]*kividbv1alpha1.KividbCluster{
+		"the agent's":                 cluster(AgentPort, false),
+		"the exporter's":              cluster(ExporterPort, true),
+		"sharded, bus port too large": sharded(55536),
+	} {
+		if err := validateSpec(c); err != nil {
+			t.Errorf("%s: validateSpec refused: %v", name, err)
+		}
+		if err := validatePorts(c); err == nil {
+			t.Errorf("%s: expected an error from validatePorts", name)
+		}
+	}
+}
