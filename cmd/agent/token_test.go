@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -65,6 +67,83 @@ func TestAgentEndpointsNeedTheToken(t *testing.T) {
 		if code := do(noToken, "anything"); code != http.StatusServiceUnavailable {
 			t.Errorf("%s %s on an agent with no token: %d, want 503", tc.method, tc.path, code)
 		}
+	}
+}
+
+// The agent container mounts the cluster's auth Secret next to the ACL
+// file, and the kubelet updates that file when the operator's token
+// changes; AGENT_TOKEN keeps the value the container started with.
+func TestAgentTakesTheMountedTokenWhenItChanges(t *testing.T) {
+	dir := t.TempDir()
+	tokenFile := filepath.Join(dir, agentapi.TokenSecretKey)
+	if err := os.WriteFile(tokenFile, []byte("old-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := (&server{cfg: agentConfig{
+		AgentToken: "old-token",
+		AclFile:    filepath.Join(dir, "users.acl"),
+		KividbAddr: "127.0.0.1:1",
+	}}).routes()
+	status := func(token string) int {
+		req := httptest.NewRequest(http.MethodGet, "/status", nil)
+		agentapi.SetToken(req, token)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if code := status("old-token"); code == http.StatusUnauthorized {
+		t.Fatalf("the current token: %d", code)
+	}
+
+	if err := os.WriteFile(tokenFile, []byte("new-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := status("new-token"); code == http.StatusUnauthorized {
+		t.Errorf("the new token in the mounted Secret: %d, want it accepted", code)
+	}
+	if code := status("old-token"); code != http.StatusUnauthorized {
+		t.Errorf("the old token after the mounted Secret changed: %d, want 401", code)
+	}
+}
+
+func TestAgentFallsBackToTheTokenEnv(t *testing.T) {
+	cases := []struct {
+		name     string
+		file     string // "-": no file
+		env      string
+		token    string
+		wantCode int // 0: anything but 401 and 503
+	}{
+		{name: "no file, env token", file: "-", env: "env-token", token: "env-token"},
+		{name: "no file, wrong token", file: "-", env: "env-token", token: "other", wantCode: http.StatusUnauthorized},
+		{name: "empty file, env token", file: " \n", env: "env-token", token: "env-token"},
+		{name: "empty file, no env", file: "", token: "", wantCode: http.StatusServiceUnavailable},
+		{name: "no file, no env", file: "-", token: "", wantCode: http.StatusServiceUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.file != "-" {
+				if err := os.WriteFile(filepath.Join(dir, agentapi.TokenSecretKey), []byte(tc.file), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h := (&server{cfg: agentConfig{
+				AgentToken: tc.env,
+				AclFile:    filepath.Join(dir, "users.acl"),
+				KividbAddr: "127.0.0.1:1",
+			}}).routes()
+			req := httptest.NewRequest(http.MethodGet, "/status", nil)
+			agentapi.SetToken(req, tc.token)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			switch {
+			case tc.wantCode != 0 && rec.Code != tc.wantCode:
+				t.Errorf("%d, want %d", rec.Code, tc.wantCode)
+			case tc.wantCode == 0 && (rec.Code == http.StatusUnauthorized || rec.Code == http.StatusServiceUnavailable):
+				t.Errorf("%d, want the handler to run", rec.Code)
+			}
+		})
 	}
 }
 
