@@ -48,7 +48,7 @@ func TestReconcileShardedBackups(t *testing.T) {
 	ctx := context.Background()
 	var got kividbv1alpha1.KividbCluster
 	_ = r.Get(ctx, client.ObjectKeyFromObject(c), &got)
-	if _, err := r.reconcileSharded(ctx, &got, nil, nil, snap, "", "", authGenerations{auth: "1"}); err != nil {
+	if _, err := r.reconcileSharded(ctx, &got, nil, nil, snap, "", "", authGenerations{auth: "1"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	var cj batchv1.CronJob
