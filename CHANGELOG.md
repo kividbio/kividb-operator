@@ -174,6 +174,14 @@ than the operator's own backup Jobs, has to change. The pods roll once.
 
 ### Fixed
 
+- **`spec.bootstrapFromSnapshot` added to a running cluster scaled it to 0
+  and restored the snapshot over pod-0's data** (also in 0.6.x). The CRD
+  now refuses the field after creation, and a cluster whose StatefulSet
+  already exists skips the bootstrap with a `BootstrapSkipped` Event. Helm
+  does not upgrade CRDs: until the new `kividbclusters` CRD is applied,
+  the API server still accepts the field, and only the skip protects the
+  cluster.
+
 Found by a third end-to-end test on AKS (operator master 853cd01 on an
 engine 1.2.0 candidate):
 

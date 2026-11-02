@@ -242,6 +242,7 @@ type ClusterModeSpec struct {
 
 // KividbClusterSpec defines the desired state of a KividbCluster.
 // +kubebuilder:validation:XValidation:rule="has(self.shards) == has(oldSelf.shards)",message="spec.shards cannot be added or removed after creation: a cluster is sharded, or not, for good"
+// +kubebuilder:validation:XValidation:rule="!has(self.bootstrapFromSnapshot) || has(oldSelf.bootstrapFromSnapshot)",message="spec.bootstrapFromSnapshot cannot be added after creation: it seeds a new cluster, and on a running one would overwrite pod-0's data"
 type KividbClusterSpec struct {
 	// Shards turns the cluster into a sharded one: that many shards, each
 	// a master and Replicas replicas, in kividb's cluster mode, with the

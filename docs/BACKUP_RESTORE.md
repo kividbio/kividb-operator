@@ -207,7 +207,10 @@ spec:
 
 Watch progress on `status.bootstrap` / cluster conditions (`Bootstrapping`
 until the Job finishes). Once `status.bootstrap.completed` is true, the
-field is ignored on later reconciles (immutable bootstrap).
+field is ignored on later reconciles (immutable bootstrap). The field can
+only be set when the cluster is created: the API server refuses it on an
+existing cluster, and a cluster that is already running skips it with a
+`BootstrapSkipped` Event.
 
 This is **not** an in-place restore of a live cluster — that remains out of
 scope (see [ROADMAP.md](ROADMAP.md)).
