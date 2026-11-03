@@ -157,4 +157,26 @@ func TestValidateSnapshotConfigSchedule(t *testing.T) {
 	if validateSnapshotConfig(nil) != nil {
 		t.Error("refused no KividbSnapshotConfig")
 	}
+	// The cron library takes a time zone prefix; a CronJob does not.
+	// "TZ=", "CRON_TZ=" and "TZ=UTC" make the cron library panic.
+	for _, s := range []string{"TZ=UTC 0 2 * * *", "CRON_TZ=UTC 0 2 * * *", "CRON_TZ=Europe/Berlin @daily", "TZ=", "CRON_TZ=", "TZ=UTC"} {
+		err := validateSnapshotConfig(snap(s))
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("KividbSnapshotConfig nightly: spec.schedule %q", s)) || !strings.Contains(err.Error(), "sets a time zone") {
+			t.Errorf("%q: %v, want it refused, naming the config, the schedule and the time zone", s, err)
+		}
+	}
+}
+
+// The cron library panics on some schedules ("TZ=UTC", with no space):
+// parseCronSchedule turns that into an error, as Kubernetes does.
+func TestParseCronScheduleRecoversFromAPanic(t *testing.T) {
+	t.Parallel()
+	for _, s := range []string{"TZ=UTC", "CRON_TZ=", "TZ="} {
+		if err := parseCronSchedule(s); err == nil || !strings.Contains(err.Error(), "invalid schedule format") {
+			t.Errorf("%q: %v, want the panic as an error", s, err)
+		}
+	}
+	if err := parseCronSchedule("0 2 * * *"); err != nil {
+		t.Errorf("0 2 * * *: %v", err)
+	}
 }
