@@ -54,6 +54,11 @@ CRDs are attached to the GitHub Release.
   is still fatal. A rolling change stalls safely after the first pod; a new
   cluster or a cold restart has every pod down. See
   [CONFIGURATION.md](docs/CONFIGURATION.md#references-to-other-crds).
+- **A `KividbSnapshotConfig` whose `spec.schedule` has a `TZ=` or
+  `CRON_TZ=` prefix is now refused** as `InvalidSpec` (#47): a CronJob
+  does not accept one. Every cluster that references it holds back its
+  apply steps until it is fixed, though failover still runs. Remove the
+  prefix before upgrading.
 
 ### Security
 
@@ -218,6 +223,8 @@ CRDs are attached to the GitHub Release.
   restore onto a pod-0 volume older than the cluster says so in
   `status.bootstrap` and with a `BootstrapOverExistingVolume` Warning.
   (#46, by [SaiPisey2](https://github.com/SaiPisey2))
+  A pod-0 PVC that is being deleted is waited for too: the restore Job
+  starts once it is gone, on a new one.
 - **A bootstrap onto a kept PVC that still held the engine's `dump.kdb`
   failed and destroyed that file** (#44, also in 0.6.x). The restore Job
   runs as a different UID from the engine: it overwrote the file, then
@@ -229,6 +236,13 @@ CRDs are attached to the GitHub Release.
   not have is removed, so a log left from the earlier cluster is no
   longer replayed on top of the restored data.
   (#45, by [SaiPisey2](https://github.com/SaiPisey2))
+  The engine's other files from the earlier cluster are removed too, before
+  the restored files go in: `dump.kdb.gen`, its save number, made pod-0
+  refuse to start or skip the snapshot's log and lose its writes, and
+  `appendonly.aof.prev` (with `.prev.len` and `.rewrite.tmp`), from a
+  checkpoint that did not finish, was replayed on top of the restored dump.
+  `dump.kdb.repl` and `dump.kdb.clean` go as well. A restore that fails
+  before then still leaves them all in place, with the old dump and log.
 - **A master that restarted with the append-only file on was failed over
   to a replica behind it** (new in this release). A killed engine starts a
   new stream, which was taken as lost writes. On engine 1.2.0 or later

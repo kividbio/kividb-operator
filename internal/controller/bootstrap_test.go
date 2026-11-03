@@ -777,3 +777,46 @@ func TestBootstrapCompletesWithoutASkipThroughConflictsAndStaleReads(t *testing.
 		t.Fatalf("events:\n%s", ev)
 	}
 }
+
+// A PVC being deleted is not restored onto: the bootstrap waits, with no
+// restore Job, until it is gone, then creates pod-0's PVC again.
+func TestBootstrapWaitsForAPVCBeingDeleted(t *testing.T) {
+	ctx := context.Background()
+	c, objs := bootstrapFixture("again")
+	c.Status.Bootstrap = &kividbv1alpha1.BootstrapStatus{Phase: kividbv1alpha1.BootstrapPending, SnapshotName: "old-backup", Message: "bootstrap requested"}
+	now := metav1.Now()
+	going := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: bootstrapPVCName(c), Namespace: c.Namespace,
+		DeletionTimestamp: &now, Finalizers: []string{"kubernetes.io/pvc-protection"}}}
+	r := shardedReconciler(t, append(objs, c, going)...)
+	jobKey := types.NamespacedName{Namespace: c.Namespace, Name: bootstrapJobName(c)}
+
+	block, err := r.reconcileBootstrap(ctx, c)
+	if !block || err == nil || !strings.Contains(err.Error(), "being deleted") {
+		t.Fatalf("block %v, err %v; want blocked on the PVC being deleted", block, err)
+	}
+	var job batchv1.Job
+	if err := r.Get(ctx, jobKey, &job); !apierrors.IsNotFound(err) {
+		t.Fatalf("restore Job: err %v; want none while the PVC is being deleted", err)
+	}
+
+	// The last finalizer goes, and with it the PVC.
+	var pvc corev1.PersistentVolumeClaim
+	if err := r.Get(ctx, client.ObjectKeyFromObject(going), &pvc); err != nil {
+		t.Fatal(err)
+	}
+	pvc.Finalizers = nil
+	if err := r.Update(ctx, &pvc); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.reconcileBootstrap(ctx, c); err != nil {
+		t.Fatalf("after the PVC is gone: %v", err)
+	}
+	var fresh corev1.PersistentVolumeClaim
+	if err := r.Get(ctx, client.ObjectKeyFromObject(going), &fresh); err != nil || fresh.DeletionTimestamp != nil {
+		t.Fatalf("PVC %+v, err %v; want a new one", fresh.ObjectMeta, err)
+	}
+	if err := r.Get(ctx, jobKey, &job); err != nil {
+		t.Fatalf("restore Job: %v; want it created once the PVC is gone", err)
+	}
+}

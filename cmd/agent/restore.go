@@ -104,6 +104,34 @@ func runRestoreFromS3(args []string) error {
 // successful.
 const restoredFileMode = 0o660
 
+// engineStateFiles are the files the engine (1.2.0) keeps next to dump.kdb
+// and appendonly.aof that describe those two files. A snapshot has none of
+// them, and on a kept volume the earlier cluster's would be read with the
+// restored files:
+//
+//   - dump.kdb.gen holds the earlier dump's save number, and the engine
+//     reads it without checking that it is this dump's. Below the restored
+//     log's number, the engine refuses to start; above it, it skips the
+//     restored log as older than the dump, and the writes in it are lost.
+//   - appendonly.aof.prev is the log of a checkpoint that did not finish.
+//     The engine replays it on top of dump.kdb, before appendonly.aof.
+//   - appendonly.aof.prev.len and appendonly.aof.rewrite.tmp are the rest of
+//     such a checkpoint, which the engine puts right on top of .prev.
+//   - dump.kdb.repl (a resync point) and dump.kdb.clean (a clean stop) are
+//     checked against dump.kdb by its length and a hash of its first and
+//     last 64 KiB only. Two dumps of one dataset can match on that.
+//
+// The list is in the order they are removed (see extractSnapshotTarGz).
+// kividb.lock is not on it: a lock file no process holds does nothing.
+var engineStateFiles = []string{
+	"dump.kdb.gen",
+	"appendonly.aof.prev",
+	"appendonly.aof.prev.len",
+	"appendonly.aof.rewrite.tmp",
+	"dump.kdb.repl",
+	"dump.kdb.clean",
+}
+
 // extractSnapshotTarGz restores the archive's dump.kdb and appendonly.aof
 // into dataDir. The volume may already hold these files, written by the
 // engine as its own UID (a kept PVC re-used by a new cluster), which this
@@ -112,7 +140,9 @@ const restoredFileMode = 0o660
 // once the whole archive has been read: that needs write access to the
 // directory, not ownership of the file, and an archive that breaks part
 // way leaves the old files whole. The price is that the volume needs room
-// for the old files and the restored ones at once.
+// for the old files and the restored ones at once. The volume ends up with
+// the archive's files only: a dump.kdb or appendonly.aof the archive does
+// not have, and the engine's state files (engineStateFiles), are removed.
 func extractSnapshotTarGz(r io.Reader, dataDir string) error {
 	// The only files ever written, by fixed name. An entry's own name is
 	// used just to pick one of these and never becomes part of a path, so
@@ -185,21 +215,59 @@ func extractSnapshotTarGz(r io.Reader, dataDir string) error {
 		return fmt.Errorf("archive contained no dump.kdb or appendonly.aof")
 	}
 
-	// Rename the new files in before removing stale ones, so the old
-	// cluster's files are deleted only once the snapshot is in place. The
-	// renames and removals are not one atomic step: if one fails after
-	// another succeeded, the volume holds part of the snapshot next to old
-	// files. While spec.bootstrapFromSnapshot is set, the operator keeps
-	// the StatefulSet at 0 and the engine does not start on that; a cluster
-	// whose field is removed after a failed bootstrap starts on whatever
-	// is there. So that state is logged, to be restored again.
-	restored := map[string]bool{}
+	// Nothing on the volume has changed up to here: an archive that breaks,
+	// or a volume that fills, leaves the old files whole, the engine's
+	// state files with them.
+	//
+	// From here on the steps are not one atomic step: if one fails, or the
+	// Job is killed, after another succeeded, the volume holds part of the
+	// snapshot or part of the old files. While spec.bootstrapFromSnapshot
+	// is set, the operator keeps the StatefulSet at 0 and the engine does
+	// not start on that, and the Job's retry starts over and completes the
+	// restore; a cluster whose field is removed after a failed bootstrap
+	// starts on whatever is there. So that state is logged, to be restored
+	// again.
+	changed := false
 	partial := func(err error) error {
-		if len(restored) > 0 {
-			log.Printf("%s now holds a partial restore, part snapshot and part old files: restore it again before starting the engine on it", dataDir)
+		if changed {
+			log.Printf("%s now holds a partial restore, with some of the old files removed or replaced: restore it again before starting the engine on it", dataDir)
 		}
 		return err
 	}
+	// The engine's state files go first, before the restored files take
+	// their names, so that the restored dump.kdb and appendonly.aof are
+	// never next to them. The other way round, a Job killed between the
+	// renames and the removals would leave a volume that looks restored,
+	// and that the engine reads through the earlier cluster's save number
+	// and replays the earlier cluster's .prev log onto. Stopped here
+	// instead, the volume holds the earlier cluster's dump and log, whose
+	// data the restore replaces anyway.
+	//
+	// dump.kdb.gen goes first: the restored files need it gone, and without
+	// it the old ones still load (the engine starts with no save number on
+	// a new volume too). appendonly.aof.prev goes before .prev.len and
+	// .rewrite.tmp: an engine that finds those two without .prev refuses to
+	// start, rather than replaying half a checkpoint.
+	for _, name := range engineStateFiles {
+		stale := filepath.Join(dataDir, name)
+		if err := os.Remove(stale); err == nil {
+			changed = true
+			log.Printf("removed %s, the earlier cluster's, which the snapshot does not have", stale)
+		} else if !os.IsNotExist(err) {
+			return partial(fmt.Errorf("removing %s: %w", stale, err))
+		}
+	}
+	// A power cut must not keep a rename below and lose a removal above.
+	if changed {
+		if err := syncDir(dataDir); err != nil {
+			return partial(err)
+		}
+	}
+
+	// Rename the new files in before removing a stale dump.kdb or
+	// appendonly.aof, so those are deleted only once the snapshot is in
+	// place.
+	restored := map[string]bool{}
 	for _, name := range persistenceFiles {
 		tmp, ok := temps[name]
 		if !ok {
@@ -211,6 +279,7 @@ func extractSnapshotTarGz(r io.Reader, dataDir string) error {
 		}
 		delete(temps, name)
 		restored[name] = true
+		changed = true
 		log.Printf("wrote %s", dest)
 	}
 	// After a restore the volume holds the archive's persistence files and

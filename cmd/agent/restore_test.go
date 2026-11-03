@@ -399,3 +399,101 @@ func TestDirSyncUnsupported(t *testing.T) {
 		}
 	}
 }
+
+// restoreTestKeptVolume fills dir the way an earlier cluster's engine left
+// a kept PVC: its dump and log, the state files that describe them, and its
+// lock file. It returns every file name and the content each was given.
+func restoreTestKeptVolume(t *testing.T, dir string) map[string][]byte {
+	t.Helper()
+	old := map[string][]byte{
+		"dump.kdb":       []byte("old dump"),
+		"appendonly.aof": []byte("old log"),
+		"kividb.lock":    nil,
+	}
+	for _, name := range engineStateFiles {
+		old[name] = []byte("old " + name)
+	}
+	for name, body := range old {
+		restoreTestWriteFile(t, filepath.Join(dir, name), body, 0o660)
+	}
+	return old
+}
+
+// A kept volume holds the earlier cluster's save number (dump.kdb.gen) and
+// what a checkpoint it did not finish left (appendonly.aof.prev and the
+// rest). Read with the restored files, the save number makes the engine
+// refuse to start or skip the restored log, and .prev is replayed on top
+// of the restored dump. The restore leaves the snapshot's files only, and
+// the unheld lock file.
+func TestExtractSnapshot_KeptVolumeEndsWithTheSnapshotsFilesOnly(t *testing.T) {
+	dir := t.TempDir()
+	restoreTestKeptVolume(t, dir)
+
+	archive := restoreTestArchive(t,
+		restoreTestEntry{"dump.kdb", []byte("new dump")},
+		restoreTestEntry{"appendonly.aof", []byte("new log")},
+	)
+	if err := extractSnapshotTarGz(bytes.NewReader(archive), dir); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	restoreTestAssertFile(t, filepath.Join(dir, "dump.kdb"), []byte("new dump"))
+	restoreTestAssertFile(t, filepath.Join(dir, "appendonly.aof"), []byte("new log"))
+	for _, name := range engineStateFiles {
+		restoreTestAssertGone(t, filepath.Join(dir, name))
+	}
+	restoreTestAssertDir(t, dir, "dump.kdb", "appendonly.aof", "kividb.lock")
+}
+
+// An archive that breaks leaves the old set whole: the engine's state files
+// describe the old dump and log, and are kept with them.
+func TestExtractSnapshot_TruncatedArchiveKeepsEngineStateFiles(t *testing.T) {
+	dir := t.TempDir()
+	old := restoreTestKeptVolume(t, dir)
+
+	big := make([]byte, 256<<10)
+	if _, err := rand.Read(big); err != nil {
+		t.Fatal(err)
+	}
+	archive := restoreTestArchive(t, restoreTestEntry{"dump.kdb", []byte("new dump")}, restoreTestEntry{"appendonly.aof", big})
+	archive = archive[:len(archive)/2]
+
+	if err := extractSnapshotTarGz(bytes.NewReader(archive), dir); err == nil {
+		t.Fatal("extract of a truncated archive succeeded")
+	}
+	var names []string
+	for name, body := range old {
+		restoreTestAssertFile(t, filepath.Join(dir, name), body)
+		names = append(names, name)
+	}
+	restoreTestAssertDir(t, dir, names...)
+}
+
+// The state files go before the restored files take their names, so a
+// failure among them leaves the old dump and log in place, never the
+// restored ones next to the earlier cluster's state files.
+func TestExtractSnapshot_StateFileRemovalFailureKeepsOldDump(t *testing.T) {
+	dir := t.TempDir()
+	logged := restoreTestCaptureLog(t)
+	restoreTestKeptVolume(t, dir)
+	blocked := filepath.Join(dir, "appendonly.aof.prev.len")
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	restoreTestBlockPath(t, blocked)
+
+	archive := restoreTestArchive(t,
+		restoreTestEntry{"dump.kdb", []byte("new dump")},
+		restoreTestEntry{"appendonly.aof", []byte("new log")},
+	)
+	err := extractSnapshotTarGz(bytes.NewReader(archive), dir)
+	restoreTestAssertErr(t, err, "removing "+blocked)
+	restoreTestAssertFile(t, filepath.Join(dir, "dump.kdb"), []byte("old dump"))
+	restoreTestAssertFile(t, filepath.Join(dir, "appendonly.aof"), []byte("old log"))
+	restoreTestAssertGone(t, filepath.Join(dir, "dump.kdb.gen"))
+	restoreTestAssertGone(t, filepath.Join(dir, "appendonly.aof.prev"))
+	restoreTestAssertDir(t, dir, "dump.kdb", "appendonly.aof", "kividb.lock",
+		"appendonly.aof.prev.len", "appendonly.aof.rewrite.tmp", "dump.kdb.repl", "dump.kdb.clean")
+	if !strings.Contains(logged.String(), "partial restore") {
+		t.Fatalf("log %q does not say the volume holds a partial restore", logged)
+	}
+}
