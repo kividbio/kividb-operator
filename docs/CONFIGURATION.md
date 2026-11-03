@@ -31,26 +31,26 @@ All fields below are under `spec:` unless stated otherwise.
 |---|---|---|---|
 | `shards` | int32 | unset | Makes the cluster **sharded**: that many shards in kividb's cluster mode. See [Sharded clusters](#sharded-clusters-shards). Set or left unset only when the cluster is created. |
 | `replicas` | int32 | `2` | Replica pods **in addition to** each master: beside the single master (total pods = `replicas + 1`), or in each shard (total = `shards × (replicas + 1)`). |
-| `image` | string | `docker.io/kividb/kividb:v1.1.3` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.1.3` or `docker.io/kividb/kividb:v1.1.3-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
+| `image` | string | `docker.io/kividb/kividb:v1.2.0` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.2.0` or `docker.io/kividb/kividb:v1.2.0-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
 | `variant` | string | `standard` | One of `standard`, `tls`, `lua`, `full`. See [Image and variant](#image-and-variant) — informational only, does not affect which image gets pulled. |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
 | `imagePullSecrets` | `[]LocalObjectReference` | — | Standard Kubernetes image pull secrets. |
 | `agentImage` | string | the operator's bundled agent image | Override only if you build your own agent image. |
 | `exporterImage` | string | `oliver006/redis_exporter:v1.66.0` | Only used when `monitoring.enabled: true`. See [`monitoring`](#monitoring). |
 | `port` | int32 | `6380` | RESP port, 1-65535 (0 or unset: 6380). Also written into the rendered `kividb.conf` as `port`. Not the agent's port (8081), nor the exporter's (9121) when `monitoring.enabled`; at most 55535 in a sharded cluster, whose cluster bus listens on `port` + 10000. |
-| `terminationGracePeriodSeconds` | int64 | `60` | kividb snapshots on SIGTERM; keep this comfortably above your data size's `SAVE` time. A stopping master first uses up to a third of it (5 to 30 s) to hand its role to a replica, see [Switchovers](#switchovers-and-stopping-a-master). |
+| `terminationGracePeriodSeconds` | int64 | `60` | kividb snapshots on SIGTERM; keep this comfortably above your data size's `SAVE` time. A stopping master first uses up to a third of it (5 to 30 s) to hand its role to a replica, see [Switchovers](#switchovers-and-stopping-a-master). On engine 1.2, a master that still has replicas then waits up to `shutdown-timeout` (10 s) for them to read its last writes before it saves. |
 
 ### Image and variant
 
 `image` is the **only** field that determines which container actually
 runs — the operator uses it verbatim and never constructs, guesses, or
 modifies it. Leave it unset to use the release default
-(`docker.io/kividb/kividb:v1.1.3` for operator 0.6.0); set it explicitly
+(`docker.io/kividb/kividb:v1.2.0` for operator 0.7.0); set it explicitly
 to pin a different tag or variant:
 
 ```yaml
 spec:
-  image: docker.io/kividb/kividb:v1.1.3-tls
+  image: docker.io/kividb/kividb:v1.2.0-tls
 ```
 
 To move to a later version, just change this value — same as any other
@@ -97,7 +97,7 @@ a referenced [`KividbConfig`](#kividbconfig)'s `spec.tls`). It does
 **not** change which image tag gets pulled — there is no "tls variant
 tag" the operator appends or looks for. If you want a TLS-capable build,
 you set `image` to one yourself (e.g.
-`docker.io/kividb/kividb:v1.1.3-tls`) *and* set `variant: tls` to match;
+`docker.io/kividb/kividb:v1.2.0-tls`) *and* set `variant: tls` to match;
 the two aren't cross-validated by the API server, since only you know
 what a given `image` value actually contains.
 
@@ -204,8 +204,11 @@ unless the referenced [`KividbConfig`](#kividbconfig) sets `appendonly` (or
 the engine's own name for it, `aof`) itself. A pod then reloads its data
 from its volume however it stopped: every acknowledged write reaches the
 file before it is acknowledged (engine 1.2, `aof-ack-after-write yes`), and
-the file is synced to disk once a second, so a killed process loses nothing
-and a node that loses power up to about a second. `everysec` is the only
+the file is synced to disk once a second, so a killed process loses no
+acknowledged write and a node that loses power up to about a second. One
+exception: if the disk falls more than 5 seconds behind, the engine sends the
+reply anyway (counted in `INFO persistence` as `aof_acks_before_write`), and a
+process killed just after can lose that write. `everysec` is the only
 policy the engine applies.
 
 - **The cost.** Writes go through the file: fewer writes a second at high
@@ -285,7 +288,10 @@ much a pod needs, and pods packed onto one node can drive it out of
 memory together. A node's out-of-memory killer then picks a kividb, most
 likely the one using the most. Leave headroom above `maxmemory` for a full
 resync, a backup, and in a sharded cluster a slot move, which each hold
-extra copies for a while.
+extra copies for a while. On engine 1.2 a server with replicas keeps a
+64 MB replication backlog (`repl-backlog-size`), counted in `maxmemory`:
+with a `maxmemory` of tens of megabytes, set `repl-backlog-size: "1mb"`
+in the `KividbConfig`.
 
 ### `services` — master and replica exposure
 
@@ -905,7 +911,7 @@ usage-tracking to catch this earlier).
 > **On kividb before v1.0.5 the `default` user's password does not keep
 > unauthenticated clients out.** A client that never sends `AUTH` is
 > treated as `default` (see [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md),
-> issue 1). v1.0.5 and later enforce it, including v1.1.3, the default image of this release. If you
+> issue 1). v1.0.5 and later enforce it, including v1.2.0, the default image of this release. If you
 > pin an older engine with `spec.image`, limit who can reach the cluster's
 > Services with a NetworkPolicy.
 

@@ -6,6 +6,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-04
+
+Sharded clusters (`spec.shards`). The default engine is kividb **1.2.0**.
+
 **Read before upgrading:** the agent's port (8081) is no longer on the
 `<cluster>-master` and `<cluster>-replicas` Services, and the agent's API
 needs a token. Anything that called an agent through those Services, other
@@ -15,12 +19,18 @@ New backups go to `<pathPrefix>/<namespace>.<cluster>/` instead of
 backup credentials to the old folder, and adjust scripts and lifecycle
 rules that match the old keys (see Fixed).
 
+**Apply the new CRDs before `helm upgrade`:** Helm does not upgrade them,
+and the `KividbCluster`, `KividbConfig`, `KividbDbOps` and `KividbSnapshot`
+CRDs changed. Until they are applied, the API server drops the new fields
+(`spec.shards` among them) and the checks that read them never fire. The
+CRDs are attached to the GitHub Release.
+
 **Read before upgrading: 0.7.0 targets kividb engine 1.2.0.**
 
 - **A cluster without `spec.image` gets an engine upgrade** to the new
-  default image, as a rolling restart: replicas first, masters last, each
-  master only after an in-sync replica has taken over. Pin `spec.image`
-  to stay on 1.1.x for now.
+  default image, `docker.io/kividb/kividb:v1.2.0`, as a rolling restart:
+  replicas first, masters last, each master only after an in-sync replica
+  has taken over. Pin `spec.image` to stay on 1.1.x for now.
 - **No going back to 1.1.x** once a 1.2 pod has saved a snapshot that
   holds a time series with compaction rules: 1.1.x cannot read it. Take
   a backup before the upgrade if you may need to downgrade.
@@ -64,6 +74,63 @@ rules that match the old keys (see Fixed).
 
 ### Added
 
+- **`spec.shards`**: sharded clusters in kividb's cluster mode, one
+  StatefulSet per shard (`<cluster>-<shard>`), a PodDisruptionBudget per
+  shard, and ClusterIP Services only: one per pod, one per shard,
+  `<cluster>-replicas`, `<cluster>` for the whole cluster, and a headless
+  Service per shard. `spec.cluster` sets the node timeout, full coverage,
+  `min-replicas-to-write` and the bus secret (generated when unset). The
+  operator owns every cluster-mode directive. A cluster is sharded or not
+  from its creation; up to 24 nodes for now.
+- **Sharded clusters form and look after themselves.** The operator
+  introduces the nodes (`CLUSTER MEET`), assigns the slots evenly across the
+  shards once every pod is up, puts each shard's replicas behind its
+  master, and has every node announce its pod's DNS name. Failover is the
+  engine's: the operator reports it and moves the role labels, and never
+  promotes in cluster mode. It re-introduces nodes after IP changes (a
+  cold restart), and forgets the old ID of a pod that rejoined with a new
+  one, never a node that owns slots. The agent gains `/cluster/status`,
+  `/meet`, `/addslots`, `/replicate`, `/forget` and `/announce`, all behind
+  the agent token.
+- **Rolling restarts of sharded clusters**, for a template change or a
+  `KividbDbOps` restart: one pod at a time across the cluster, replicas
+  first, and each shard's master only after its most caught-up replica
+  has taken over with `CLUSTER FAILOVER`. The agent has a
+  `/cluster/failover` endpoint, and reports whether a replica's link to
+  its master is up; `status.pods[].synced` is set for sharded clusters.
+- **Changing a sharded cluster's shard count.** Edit `spec.shards` and
+  the operator adds shards, or drains and removes them, moving only the
+  slots it has to: one move at a time, each an atomic `CLUSTER MIGRATION
+  IMPORT` on the destination master (no `ASK` for clients). Phase
+  `Rebalancing`, with the plan, the move under way and the last error in
+  `status.cluster.rebalance`. `status.cluster.shards` is the count the
+  slots are spread over. Removed shards' PVCs are deleted once their
+  slots have all moved out. The agent has
+  `/cluster/migration/import` and `/cluster/migration/status`.
+- **Backups of sharded clusters.** A run backs up every shard at once,
+  each from a pod with the configured role, under
+  `<namespace>.<cluster>/<run>/shard-<i>-<pod>.tar.gz`. A `manifest.json`
+  names each shard's object, source, master node ID and slots, and is
+  written only when every shard succeeded. Retention counts complete runs
+  and prunes whole runs. `KividbSnapshot.status.shards[]` lists the
+  shards, and `objectKey` is the manifest. The agent has
+  `/backup/manifest`, and `/backup` takes a run and shard. Restoring a
+  sharded cluster is not supported yet.
+- **Access to a sharded cluster from outside Kubernetes.** Expose each pod
+  with a Service of your own (a LoadBalancer, a NodePort) labelled
+  `kividb.io/announce: "true"`, and the pod's node announces that
+  Service's address (its load-balancer address, or the
+  `kividb.io/announce-address` annotation) instead of its DNS name, so
+  cluster clients outside follow `MOVED` to an address they can reach.
+  The operator only reads these Services. The `ExternallyAccessible`
+  condition says whether every pod is exposed (`PartiallyExposed` when
+  only some are) and what is wrong with a Service that cannot be used.
+- **The console shows sharded clusters.**
+  - **Shards:** one card per shard, with its slots, master and replicas, and each replica's lag against its own shard's master.
+  - **Slot map:** the slots coloured by shard; the ones moving are striped.
+  - **Rebalance:** progress while the shard count changes.
+  - **Tiles:** slots and `cluster_state`.
+  - **Actions:** **+/− Shard**. **Promote** runs `CLUSTER FAILOVER` on the replica. **Take snapshot** starts a backup run of every shard, as a Job from the backup CronJob, so the GUI's ClusterRole gains `create` on `jobs`.
 - **`spec.cluster.replicaValidityFactor`**: `cluster-replica-validity-factor`,
   which engine 1.2 enforces: a replica whose link to its master has been
   down for longer than `nodeTimeoutMs × replicaValidityFactor` does not
@@ -85,65 +152,24 @@ rules that match the old keys (see Fixed).
   over.** After 5 minutes it fails, says where to look, and withdraws its
   step-down request. `status.restart.handoverStartTime` records when it
   started waiting.
-  StatefulSet per shard (`<cluster>-<shard>`), a PodDisruptionBudget per
-  shard, and ClusterIP Services only: one per pod, one per shard,
-  `<cluster>-replicas`, `<cluster>` for the whole cluster, and a headless
-  Service per shard. `spec.cluster` sets the node timeout, full coverage,
-  `min-replicas-to-write` and the bus secret (generated when unset). The
-  operator owns every cluster-mode directive. A cluster is sharded or not
-  from its creation; up to 24 nodes for now.
-- **Access to a sharded cluster from outside Kubernetes.** Expose each pod
-  with a Service of your own (a LoadBalancer, a NodePort) labelled
-  `kividb.io/announce: "true"`, and the pod's node announces that
-  Service's address (its load-balancer address, or the
-  `kividb.io/announce-address` annotation) instead of its DNS name, so
-  cluster clients outside follow `MOVED` to an address they can reach.
-  The operator only reads these Services. The `ExternallyAccessible`
-  condition says whether every pod is exposed (`PartiallyExposed` when
-  only some are) and what is wrong with a Service that cannot be used.
-- **Rolling restarts of sharded clusters**, for a template change or a
-  `KividbDbOps` restart: one pod at a time across the cluster, replicas
-  first, and each shard's master only after its most caught-up replica
-  has taken over with `CLUSTER FAILOVER`. The agent has a
-  `/cluster/failover` endpoint, and reports whether a replica's link to
-  its master is up; `status.pods[].synced` is set for sharded clusters.
-- **Backups of sharded clusters.** A run backs up every shard at once,
-  each from a pod with the configured role, under
-  `<namespace>.<cluster>/<run>/shard-<i>-<pod>.tar.gz`. A `manifest.json`
-  names each shard's object, source, master node ID and slots, and is
-  written only when every shard succeeded. Retention counts complete runs
-  and prunes whole runs. `KividbSnapshot.status.shards[]` lists the
-  shards, and `objectKey` is the manifest. The agent has
-  `/backup/manifest`, and `/backup` takes a run and shard. Restoring a
-  sharded cluster is not supported yet.
-- **Changing a sharded cluster's shard count.** Edit `spec.shards` and
-  the operator adds shards, or drains and removes them, moving only the
-  slots it has to: one move at a time, each an atomic `CLUSTER MIGRATION
-  IMPORT` on the destination master (no `ASK` for clients). Phase
-  `Rebalancing`, with the plan, the move under way and the last error in
-  `status.cluster.rebalance`. `status.cluster.shards` is the count the
-  slots are spread over. Removed shards' PVCs are deleted once their
-  slots have all moved out. The agent has
-  `/cluster/migration/import` and `/cluster/migration/status`.
-- **The console shows sharded clusters.**
-  - **Shards:** one card per shard, with its slots, master and replicas, and each replica's lag against its own shard's master.
-  - **Slot map:** the slots coloured by shard; the ones moving are striped.
-  - **Rebalance:** progress while the shard count changes.
-  - **Tiles:** slots and `cluster_state`.
-  - **Actions:** **+/− Shard**. **Promote** runs `CLUSTER FAILOVER` on the replica. **Take snapshot** starts a backup run of every shard, as a Job from the backup CronJob, so the GUI's ClusterRole gains `create` on `jobs`.
-- **Sharded clusters form and look after themselves.** The operator
-  introduces the nodes (`CLUSTER MEET`), assigns the slots evenly across the
-  shards once every pod is up, puts each shard's replicas behind its
-  master, and has every node announce its pod's DNS name. Failover is the
-  engine's: the operator reports it and moves the role labels, and never
-  promotes in cluster mode. It re-introduces nodes after IP changes (a
-  cold restart), and forgets the old ID of a pod that rejoined with a new
-  one, never a node that owns slots. The agent gains `/cluster/status`,
-  `/meet`, `/addslots`, `/replicate`, `/forget` and `/announce`, all behind
-  the agent token.
 
 ### Changed
 
+- **Default engine `docker.io/kividb/kividb:v1.2.0`** (it was `v1.1.3`):
+  in the controller, the CRD, the chart, the GUI, the samples and the docs.
+  The GUI's create form still adds `-tls`, `-lua` or `-full` for a variant.
+  See "Read before upgrading" above.
+- Default agent image **`docker.io/kividb/kividb-operator-agent:0.7.0`**.
+  A cluster that leaves `spec.agentImage` unset rolls to it in the same
+  rollout. Several fixes below need it.
+- The e2e suite tests kividb 1.2.0 by default.
+- CI runs the core e2e suites on a kind cluster for every pull request
+  (#20, by [nightmare-tech](https://github.com/nightmare-tech)).
+- The docs say what engine 1.2 adds to a pod's stop and memory: a master
+  with replicas waits up to `shutdown-timeout` (10 s) for them before its
+  final save, inside `terminationGracePeriodSeconds`; and the 64 MB
+  `repl-backlog-size` counts in `maxmemory`, so a `maxmemory` of tens of
+  megabytes needs `repl-backlog-size: "1mb"`.
 - **The rendered `kividb.conf` is a Secret** (`<cluster>-config`), not a
   ConfigMap, for every cluster: a sharded cluster's carries the bus secret
   and `masterauth`. The old ConfigMap is removed once no pod mounts it;
@@ -191,6 +217,7 @@ rules that match the old keys (see Fixed).
   cluster is waited for too, not taken for this cluster's restore, and a
   restore onto a pod-0 volume older than the cluster says so in
   `status.bootstrap` and with a `BootstrapOverExistingVolume` Warning.
+  (#46, by [SaiPisey2](https://github.com/SaiPisey2))
 - **A bootstrap onto a kept PVC that still held the engine's `dump.kdb`
   failed and destroyed that file** (#44, also in 0.6.x). The restore Job
   runs as a different UID from the engine: it overwrote the file, then
@@ -201,6 +228,7 @@ rules that match the old keys (see Fixed).
   that says so. A `dump.kdb` or `appendonly.aof` that the snapshot does
   not have is removed, so a log left from the earlier cluster is no
   longer replayed on top of the restored data.
+  (#45, by [SaiPisey2](https://github.com/SaiPisey2))
 - **A master that restarted with the append-only file on was failed over
   to a replica behind it** (new in this release). A killed engine starts a
   new stream, which was taken as lost writes. On engine 1.2.0 or later
@@ -212,6 +240,7 @@ rules that match the old keys (see Fixed).
   report the engine's version and that setting (the agent's `/status` now
   carries both): engine 1.1.x acknowledges a write before it is in the
   file, so a killed master can lack writes its replica holds.
+  (#42, by [SaiPisey2](https://github.com/SaiPisey2))
 - **A `KividbDbOps` restart deleted a master in place when its replica was
   not in sync at that moment, and did not wait for the other pods or ops**
   (also in 0.6.x), so two restarts of one cluster could take two pods
@@ -222,6 +251,7 @@ rules that match the old keys (see Fixed).
   a restarted one, fails the op, naming the pod). The ops of one cluster
   run one at a time, oldest first; the others stay `Pending` with a
   `Queued` condition.
+  (#40, by [SaiPisey2](https://github.com/SaiPisey2))
 - **`spec.bootstrapFromSnapshot` added to a running cluster scaled it to 0
   and restored the snapshot over pod-0's data** (also in 0.6.x). The CRD
   now refuses the field after creation, and a cluster whose StatefulSet
@@ -231,12 +261,14 @@ rules that match the old keys (see Fixed).
   removing the field cancels the wait. Helm does not upgrade CRDs: until
   the new `kividbclusters` CRD is applied, the API server still accepts the
   field, and only the skip protects the cluster.
+  (#37, by [SaiPisey2](https://github.com/SaiPisey2))
 - **`FailoverBlocked` held for one pass, then an empty replica was
   promoted** (also in 0.6.x). The blocked pass emptied `status.pods`, so
   the next one no longer knew the master had held keys, and the old
   master later resynced from the empty replica. A failed pass now keeps
   the last `status.pods` (with no pod `Ready`), and a newly promoted
   master keeps its key count.
+  (#35, by [SaiPisey2](https://github.com/SaiPisey2))
 - **A failed reconcile step turned off failover, with the cluster still
   `Ready`** (also in 0.6.x). A refused object or a missing referenced
   KividbConfig, KividbAclConfig, KividbSnapshotConfig or Secret now
@@ -249,6 +281,7 @@ rules that match the old keys (see Fixed).
   schedules a CronJob would refuse (not valid cron, or with a `TZ=` or
   `CRON_TZ=` prefix) are refused before anything is written. The
   referenced kinds are watched, so a fix takes effect at once.
+  (#36 and #47, by [SaiPisey2](https://github.com/SaiPisey2))
 - **Removing a shard could stay in `Rebalancing` for good** (new in this
   release). On a status conflict, a pass that had read the cluster a
   version behind wrote its status over the latest one, and could bring
@@ -258,6 +291,7 @@ rules that match the old keys (see Fixed).
   written over, a removed shard whose StatefulSet is gone is not waited
   for, and a shard made again with no slots, when `spec.shards` was
   raised back meanwhile, gets its master and its share.
+  (#38, by [SaiPisey2](https://github.com/SaiPisey2))
 - **Backup retention deleted other clusters' backups** (also in 0.6.x). A
   cluster pruned everything under `<pathPrefix>/<cluster>/`, which also
   held the backups of a same-named cluster in another namespace, or of a
@@ -270,6 +304,7 @@ rules that match the old keys (see Fixed).
   0.6.x agent, until upgraded, still prunes all of its
   `<pathPrefix>/<cluster>/`, which holds new keys only of a cluster whose
   `pathPrefix` is that folder or lies under it.
+  (#41, by [SaiPisey2](https://github.com/SaiPisey2))
 - **A new agent token stalled the rollout of every cluster with 2+ pods**
   (new in this release). The agent read `AGENT_TOKEN` once, at start, so
   the running pods answered the operator's new token with 401 and the
@@ -277,6 +312,7 @@ rules that match the old keys (see Fixed).
   `agent-token` from the auth Secret it already mounts, on each request,
   falling back to `AGENT_TOKEN`; the pods take a new token once the kubelet
   refreshes the mount (a minute or two), so a rollout may wait that long.
+  (#39, by [SaiPisey2](https://github.com/SaiPisey2))
 
 Found by a third end-to-end test on AKS (operator master 853cd01 on an
 engine 1.2.0 candidate):
@@ -484,6 +520,28 @@ acknowledged write afterwards.
 - The chart's ServiceMonitor scraped each pod twice, through the headless
   Service and through its master or replica Service. It selects the
   headless Service only (`kividb.io/service: headless`).
+
+## [0.6.1] - 2026-11-01
+
+A patch release of 0.6.0. The default engine is kividb **1.1.3**, a
+security release of kividb 1.1.
+
+### Security
+
+- **Default engine `docker.io/kividb/kividb:v1.1.3`** (it was `v1.1.2`):
+  in the controller, the CRD, the chart, the GUI, the samples and the docs.
+  **A `KividbCluster` that leaves `spec.image` unset moves to 1.1.3 when the
+  operator is upgraded**, the way every rollout goes: the replicas are
+  restarted first, then the operator switches over to an up-to-date replica,
+  and the old master is restarted last. Set `spec.image` to stay on a
+  version.
+
+### Changed
+
+- Default agent image **`docker.io/kividb/kividb-operator-agent:0.6.1`**.
+  A cluster that leaves `spec.agentImage` unset rolls to it in the same
+  rollout.
+- The e2e suite tests kividb 1.1.3 by default.
 
 ## [0.6.0] - 2026-10-24
 
@@ -945,7 +1003,13 @@ was lost in any of them.
 - Helm chart (`charts/kividb-operator`) and kustomize bases
   (`config/`) for installation.
 
-[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.4.0...main
+[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.7.0...master
+[0.7.0]: https://github.com/kividbio/kividb-operator/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/kividbio/kividb-operator/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/kividbio/kividb-operator/compare/v0.5.2...v0.6.0
+[0.5.2]: https://github.com/kividbio/kividb-operator/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/kividbio/kividb-operator/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/kividbio/kividb-operator/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kividbio/kividb-operator/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kividbio/kividb-operator/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kividbio/kividb-operator/compare/v0.1.0...v0.2.0
