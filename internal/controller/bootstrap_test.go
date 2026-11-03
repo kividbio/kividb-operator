@@ -2,17 +2,23 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // In the AKS run a replicated cluster bootstrapped from a sharded cluster's
@@ -211,7 +217,7 @@ func TestBootstrapWaitsForAnEarlierClustersStatefulSet(t *testing.T) {
 				t.Fatal(err)
 			}
 			if b := got.Status.Bootstrap; b == nil || b.Completed || b.Phase != kividbv1alpha1.BootstrapPending ||
-				b.SnapshotName != "old-backup" || b.Message != "waiting for the StatefulSet and pods of an earlier cluster with this name to be deleted" {
+				b.SnapshotName != "old-backup" || b.Message != "waiting for the StatefulSet, pods and restore Job of an earlier cluster with this name to be deleted" {
 				t.Fatalf("bootstrap status %+v; want pending, waiting for the earlier cluster", b)
 			}
 			if err := r.Get(ctx, client.ObjectKeyFromObject(old), old); err != nil {
@@ -322,5 +328,452 @@ func TestBootstrapRestoresAnOldLayoutSnapshotByItsStoredKey(t *testing.T) {
 	args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 	if !strings.Contains(args, "--object-key "+key+" ") {
 		t.Fatalf("restore args %q, want --object-key %s", args, key)
+	}
+}
+
+// earlierStatefulSet is the StatefulSet a deleted cluster with c's name
+// left behind: same name, controlled by the earlier cluster's UID, running.
+func earlierStatefulSet(c *kividbv1alpha1.KividbCluster) *appsv1.StatefulSet {
+	isController := true
+	three := int32(3)
+	return &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: c.Name, Namespace: c.Namespace,
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: "kividb.io/v1alpha1", Kind: "KividbCluster",
+			Name: c.Name, UID: "uid-earlier", Controller: &isController}}},
+		Spec: appsv1.StatefulSetSpec{Replicas: &three}}
+}
+
+// laggingCacheClient serves the next read of a KividbCluster after status
+// writes as it was before the first of them: the manager's informer cache
+// has not seen those writes yet. The read after that is current.
+func laggingCacheClient(r *KividbClusterReconciler) {
+	var stale *kividbv1alpha1.KividbCluster
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if c, ok := obj.(*kividbv1alpha1.KividbCluster); ok && stale != nil {
+				stale.DeepCopyInto(c)
+				stale = nil
+				return nil
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if _, ok := obj.(*kividbv1alpha1.KividbCluster); ok && stale == nil {
+				before := &kividbv1alpha1.KividbCluster{}
+				if err := cl.Get(ctx, client.ObjectKeyFromObject(obj), before); err != nil {
+					return err
+				}
+				stale = before
+			}
+			return cl.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+}
+
+// Issue #43: re-created at once after a delete, the cluster saw the
+// earlier cluster's StatefulSet and waited, then, on a read of itself from
+// a cache that had not yet seen the wait, updated that StatefulSet: its
+// controller reference (matched by name) got the new UID, so the garbage
+// collector kept it, and the next pass took it for this cluster's, running,
+// and skipped the restore. The earlier StatefulSet is never written to.
+func TestBootstrapNeverTakesOverAnEarlierClustersStatefulSet(t *testing.T) {
+	ctx := context.Background()
+	c, objs := bootstrapFixture("again")
+	old := earlierStatefulSet(c)
+	r := shardedReconciler(t, append(objs, c, old)...)
+	laggingCacheClient(r)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(old), old); err != nil {
+		t.Fatal(err)
+	}
+	rv := old.ResourceVersion
+
+	for i := 0; i < 3; i++ {
+		// A pass that starts on the stale read fails its status write
+		// (conflict) and is retried: that is fine.
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Logf("pass %d: %v", i, err)
+		}
+	}
+	var got appsv1.StatefulSet
+	if err := r.Get(ctx, client.ObjectKeyFromObject(old), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ResourceVersion != rv || got.OwnerReferences[0].UID != "uid-earlier" {
+		t.Fatalf("earlier StatefulSet written to: replicas %d, owners %+v", *got.Spec.Replicas, got.OwnerReferences)
+	}
+	var cl kividbv1alpha1.KividbCluster
+	if err := r.Get(ctx, req.NamespacedName, &cl); err != nil {
+		t.Fatal(err)
+	}
+	if b := cl.Status.Bootstrap; b == nil || b.Completed || b.Message != bootstrapWaitMessage {
+		t.Fatalf("bootstrap status %+v; want waiting for the earlier cluster", b)
+	}
+	if ev := events(r); strings.Contains(ev, "BootstrapSkipped") {
+		t.Fatalf("events:\n%s", ev)
+	}
+}
+
+// The same, one level down: whatever the cluster's status says, a cluster
+// that is to be bootstrapped does not update a StatefulSet another cluster
+// (by UID) controls, or none does.
+func TestStatefulSetStepLeavesAnEarlierClustersStatefulSetWhileBootstrapping(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status *kividbv1alpha1.BootstrapStatus
+	}{
+		{"no status yet", nil},
+		{"waiting", &kividbv1alpha1.BootstrapStatus{Phase: kividbv1alpha1.BootstrapPending, Message: bootstrapWaitMessage}},
+		{"restoring", &kividbv1alpha1.BootstrapStatus{Phase: kividbv1alpha1.BootstrapInProgress, Message: "restore Job running"}},
+	} {
+		for _, orphan := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, orphaned %v", tc.name, orphan), func(t *testing.T) {
+				ctx := context.Background()
+				c, objs := bootstrapFixture("again")
+				c.Status.Bootstrap = tc.status
+				old := earlierStatefulSet(c)
+				if orphan {
+					old.OwnerReferences = nil
+				}
+				r := shardedReconciler(t, append(objs, c, old)...)
+				if err := r.Get(ctx, client.ObjectKeyFromObject(old), old); err != nil {
+					t.Fatal(err)
+				}
+				rv := old.ResourceVersion
+				err := r.reconcileStatefulSet(ctx, c, nil, nil, nil, map[string]string{})
+				var got appsv1.StatefulSet
+				if gerr := r.Get(ctx, client.ObjectKeyFromObject(old), &got); gerr != nil {
+					t.Fatal(gerr)
+				}
+				if got.ResourceVersion != rv {
+					t.Fatalf("earlier StatefulSet written to (err %v): replicas %d, owners %+v", err, *got.Spec.Replicas, got.OwnerReferences)
+				}
+				if err == nil || !strings.Contains(err.Error(), "earlier cluster") {
+					t.Fatalf("err %v; want the refusal, naming the earlier cluster", err)
+				}
+			})
+		}
+	}
+
+	// Once the bootstrap is done, or without one, an orphaned StatefulSet
+	// is still adopted, as before.
+	t.Run("not bootstrapping", func(t *testing.T) {
+		ctx := context.Background()
+		c := testCluster("plain")
+		c.UID = "uid-plain"
+		c.Spec.Replicas = 1
+		c.Spec.Storage = kividbv1alpha1.StorageSpec{Size: "1Gi"}
+		old := earlierStatefulSet(c)
+		old.OwnerReferences = nil
+		r := shardedReconciler(t, c, old)
+		if err := r.reconcileStatefulSet(ctx, c, nil, nil, nil, map[string]string{}); err != nil {
+			t.Fatal(err)
+		}
+		var got appsv1.StatefulSet
+		if err := r.Get(ctx, client.ObjectKeyFromObject(old), &got); err != nil {
+			t.Fatal(err)
+		}
+		if !metav1.IsControlledBy(&got, c) {
+			t.Fatalf("owners %+v; want adopted", got.OwnerReferences)
+		}
+	})
+}
+
+// The StatefulSet the bootstrap itself created is held at 0 replicas: one
+// of ours at 0 is that one, whatever the status says (a write lost, a stale
+// read), and the restore goes on. Only one of ours that has run (replicas
+// above 0) means the cluster is already running.
+func TestBootstrapIsNotSkippedForItsOwnStatefulSetAtZero(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status *kividbv1alpha1.BootstrapStatus
+	}{
+		{"no status", nil},
+		{"waiting", &kividbv1alpha1.BootstrapStatus{Phase: kividbv1alpha1.BootstrapPending, Message: bootstrapWaitMessage}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			c, objs := bootstrapFixture("fresh")
+			c.Status.Bootstrap = tc.status
+			zero := int32(0)
+			sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: c.Name, Namespace: c.Namespace,
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(c, kividbv1alpha1.GroupVersion.WithKind("KividbCluster"))}},
+				Spec: appsv1.StatefulSetSpec{Replicas: &zero}}
+			r := shardedReconciler(t, append(objs, c, sts)...)
+
+			block, err := r.reconcileBootstrap(ctx, c)
+			if !block || err != nil {
+				t.Fatalf("block %v, err %v; want the restore going on", block, err)
+			}
+			if b := c.Status.Bootstrap; b == nil || b.Completed || b.Phase != kividbv1alpha1.BootstrapInProgress {
+				t.Fatalf("bootstrap status %+v; want the restore in progress", b)
+			}
+			var jobs batchv1.JobList
+			if err := r.List(ctx, &jobs); err != nil || len(jobs.Items) != 1 {
+				t.Fatalf("restore Jobs %d (%v); want 1", len(jobs.Items), err)
+			}
+			if ev := events(r); strings.Contains(ev, "BootstrapSkipped") {
+				t.Fatalf("events:\n%s", ev)
+			}
+		})
+	}
+}
+
+// earlierBootstrapJob is the restore Job an earlier cluster with c's name
+// ran, and that finished: TTL keeps it a day, and with --cascade=orphan the
+// garbage collector does not delete it.
+func earlierBootstrapJob(c *kividbv1alpha1.KividbCluster) *batchv1.Job {
+	isController := true
+	return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: bootstrapJobName(c), Namespace: c.Namespace,
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: "kividb.io/v1alpha1", Kind: "KividbCluster",
+			Name: c.Name, UID: "uid-earlier", Controller: &isController}}},
+		Status: batchv1.JobStatus{Succeeded: 1}}
+}
+
+// The earlier cluster's finished restore Job is not this cluster's: it
+// marked the bootstrap Completed ("PVC seeded from snapshot") with no
+// restore run for it. The bootstrap waits for it to go, then restores.
+func TestBootstrapWaitsForAnEarlierClustersRestoreJob(t *testing.T) {
+	ctx := context.Background()
+	c, objs := bootstrapFixture("again")
+	old := earlierBootstrapJob(c)
+	r := shardedReconciler(t, append(objs, c, old)...)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)}
+
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	var got kividbv1alpha1.KividbCluster
+	if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	if b := got.Status.Bootstrap; b == nil || b.Completed || b.Phase != kividbv1alpha1.BootstrapPending || b.Message != bootstrapWaitMessage {
+		t.Fatalf("bootstrap status %+v; want waiting for the earlier cluster's restore Job", b)
+	}
+	if ev := events(r); strings.Count(ev, "Warning BootstrapWaiting") != 1 || !strings.Contains(ev, bootstrapJobName(c)) {
+		t.Fatalf("events:\n%s", ev)
+	}
+
+	if err := r.Delete(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	var job batchv1.Job
+	if err := r.Get(ctx, client.ObjectKeyFromObject(old), &job); err != nil {
+		t.Fatal(err)
+	}
+	if b := got.Status.Bootstrap; b == nil || b.Phase != kividbv1alpha1.BootstrapInProgress || !metav1.IsControlledBy(&job, &got) {
+		t.Fatalf("bootstrap status %+v, Job owners %+v; want our own restore Job running", b, job.OwnerReferences)
+	}
+}
+
+// Past the wait, too, a restore Job that is not this cluster's is never
+// taken for its restore.
+func TestBootstrapJobOfAnotherClusterIsNotUsed(t *testing.T) {
+	ctx := context.Background()
+	c, objs := bootstrapFixture("again")
+	c.Status.Bootstrap = &kividbv1alpha1.BootstrapStatus{Phase: kividbv1alpha1.BootstrapPending, SnapshotName: "old-backup", Message: "bootstrap requested"}
+	r := shardedReconciler(t, append(objs, c, earlierBootstrapJob(c))...)
+
+	block, err := r.reconcileBootstrap(ctx, c)
+	if !block || err == nil || c.Status.Bootstrap.Completed {
+		t.Fatalf("block %v, err %v, status %+v; want blocked, not completed", block, err, c.Status.Bootstrap)
+	}
+}
+
+// Issue #43: a cluster re-created with the name of a deleted one finds
+// pod-0's volume kept (PVC retention is Retain); a PVC made beforehand on
+// purpose is older than the cluster too. The restore replaces its data,
+// as the spec asks; the status and a Warning say so, without guessing
+// where the volume came from.
+func TestBootstrapSaysItRestoresOverAKeptVolume(t *testing.T) {
+	ctx := context.Background()
+	c, objs := bootstrapFixture("again")
+	c.CreationTimestamp = metav1.Now()
+	kept := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: bootstrapPVCName(c), Namespace: c.Namespace,
+		CreationTimestamp: metav1.NewTime(c.CreationTimestamp.Add(-time.Hour))}}
+	r := shardedReconciler(t, append(objs, c, kept)...)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)}
+
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	var got kividbv1alpha1.KividbCluster
+	if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := "restoring over the existing volume data-again-0, which is older than this cluster"
+	if b := got.Status.Bootstrap; b == nil || b.Phase != kividbv1alpha1.BootstrapInProgress || !strings.Contains(b.Message, want) {
+		t.Fatalf("bootstrap status %+v; want the restore in progress, saying %q", b, want)
+	}
+	if ev := events(r); strings.Count(ev, "Warning BootstrapOverExistingVolume") != 1 || !strings.Contains(ev, want) {
+		t.Fatalf("events:\n%s", ev)
+	}
+
+	// The Job finishes: the completed status still says what it replaced.
+	var job batchv1.Job
+	if err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: bootstrapJobName(c)}, &job); err != nil {
+		t.Fatal(err)
+	}
+	job.Status.Succeeded = 1
+	if err := r.Status().Update(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	if b := got.Status.Bootstrap; b == nil || !b.Completed || !strings.Contains(b.Message, "data-again-0") {
+		t.Fatalf("bootstrap status %+v; want completed, naming the volume it restored over", b)
+	}
+}
+
+// bootstrapFromSnapshot added to a running cluster is skipped. The pass
+// that saves the skip goes on to the StatefulSet with that status, not
+// with one read back from a cache that has not seen it: there the
+// bootstrap was still to come, and the running StatefulSet went to 0.
+func TestSkippedBootstrapNeverScalesTheRunningClusterDown(t *testing.T) {
+	ctx := context.Background()
+	c, objs := bootstrapFixture("live")
+	three := int32(3)
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "live", Namespace: "default",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(c, kividbv1alpha1.GroupVersion.WithKind("KividbCluster"))}},
+		Spec: appsv1.StatefulSetSpec{Replicas: &three}}
+	r := shardedReconciler(t, append(objs, c, sts)...)
+	laggingCacheClient(r)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	var got appsv1.StatefulSet
+	if err := r.Get(ctx, client.ObjectKeyFromObject(sts), &got); err != nil {
+		t.Fatal(err)
+	}
+	if *got.Spec.Replicas != 3 {
+		t.Fatalf("StatefulSet replicas %d; want the running cluster's 3", *got.Spec.Replicas)
+	}
+}
+
+// ownBootstrapObjects are what this cluster's own bootstrap has made by the
+// time its restore Job is done: the Job (Succeeded), and the StatefulSet,
+// scaled up once the completion was saved.
+func ownBootstrapObjects(c *kividbv1alpha1.KividbCluster) (*appsv1.StatefulSet, *batchv1.Job) {
+	three := int32(3)
+	ref := *metav1.NewControllerRef(c, kividbv1alpha1.GroupVersion.WithKind("KividbCluster"))
+	return &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: c.Name, Namespace: c.Namespace, OwnerReferences: []metav1.OwnerReference{ref}},
+			Spec: appsv1.StatefulSetSpec{Replicas: &three}},
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: bootstrapJobName(c), Namespace: c.Namespace, OwnerReferences: []metav1.OwnerReference{ref}},
+			Status: batchv1.JobStatus{Succeeded: 1}}
+}
+
+// A pass that reads the cluster from before its restore was saved as
+// done (waiting, or no status) finds its StatefulSet already scaled up.
+// With this cluster's own restore Job there, that StatefulSet is the
+// restored one, not a cluster that was running without the bootstrap: no
+// BootstrapSkipped, and the bootstrap stays a restore.
+func TestBootstrapIsNotSkippedWhenItsOwnRestoreJobExists(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status *kividbv1alpha1.BootstrapStatus
+	}{
+		{"no status", nil},
+		{"waiting", &kividbv1alpha1.BootstrapStatus{Phase: kividbv1alpha1.BootstrapPending, SnapshotName: "old-backup", Message: bootstrapWaitMessage}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			c, objs := bootstrapFixture("again")
+			c.Status.Bootstrap = tc.status
+			sts, job := ownBootstrapObjects(c)
+			r := shardedReconciler(t, append(objs, c, sts, job)...)
+
+			if _, err := r.reconcileBootstrap(ctx, c); err != nil {
+				t.Fatal(err)
+			}
+			if b := c.Status.Bootstrap; b == nil || !b.Completed || strings.Contains(b.Message, "skipped") {
+				t.Fatalf("bootstrap status %+v; want completed as restored, not skipped", b)
+			}
+			if ev := events(r); strings.Contains(ev, "BootstrapSkipped") {
+				t.Fatalf("events:\n%s", ev)
+			}
+		})
+	}
+}
+
+// conflictingStatusWrites fails the next n status writes to a
+// KividbCluster with a conflict, as when another pass saved first.
+func conflictingStatusWrites(r *KividbClusterReconciler, n *int) {
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if _, ok := obj.(*kividbv1alpha1.KividbCluster); ok && *n > 0 {
+				*n--
+				return apierrors.NewConflict(schema.GroupResource{Group: "kividb.io", Resource: "kividbclusters"}, obj.GetName(), errors.New("injected"))
+			}
+			return cl.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+}
+
+// Issue #43's sequence on the way out of the wait, with the status writes
+// that the API server and the cache make racy: the restore's InProgress
+// write loses to a conflict, the Job finishes, the next pass saves the
+// completion and scales the StatefulSet up, and the pass after reads the
+// cluster from before (still waiting). The bootstrap ends restored, with
+// no BootstrapSkipped on the way.
+func TestBootstrapCompletesWithoutASkipThroughConflictsAndStaleReads(t *testing.T) {
+	ctx := context.Background()
+	c, objs := bootstrapFixture("again")
+	// The earlier cluster's objects are gone; the wait was saved.
+	c.Status.Bootstrap = &kividbv1alpha1.BootstrapStatus{Phase: kividbv1alpha1.BootstrapPending, SnapshotName: "old-backup", Message: bootstrapWaitMessage}
+	r := shardedReconciler(t, append(objs, c)...)
+	laggingCacheClient(r)
+	conflicts := 1
+	conflictingStatusWrites(r, &conflicts)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)}
+
+	// The restore starts; its InProgress write loses.
+	if _, err := r.Reconcile(ctx, req); err == nil {
+		t.Fatal("pass 1: want the injected conflict")
+	}
+	// The restore Job finishes.
+	var job batchv1.Job
+	if err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: bootstrapJobName(c)}, &job); err != nil {
+		t.Fatal(err)
+	}
+	job.Status.Succeeded = 1
+	if err := r.Status().Update(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	// Completed is saved, and the StatefulSet scaled up; then a pass on
+	// the stale read; then one on a current read.
+	for i := 2; i <= 4; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Logf("pass %d: %v", i, err)
+		}
+	}
+
+	var got kividbv1alpha1.KividbCluster
+	if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, req.NamespacedName, &sts); err != nil {
+		t.Fatal(err)
+	}
+	if b := got.Status.Bootstrap; b == nil || !b.Completed || strings.Contains(b.Message, "skipped") || *sts.Spec.Replicas != 3 {
+		t.Fatalf("bootstrap status %+v, StatefulSet replicas %d; want restored and running", b, *sts.Spec.Replicas)
+	}
+	if ev := events(r); strings.Contains(ev, "BootstrapSkipped") {
+		t.Fatalf("events:\n%s", ev)
 	}
 }

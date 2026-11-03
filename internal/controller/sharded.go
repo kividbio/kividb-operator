@@ -465,6 +465,8 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	applyErr := steps.err
 	if applyErr != nil && held == nil {
 		log.Error(applyErr, "applying the cluster's objects failed")
+		// held: reconcileHeld has reported it.
+		r.warnOnChange(c, "ReconcileError", applyErr)
 	}
 
 	var pods corev1.PodList

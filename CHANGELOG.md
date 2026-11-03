@@ -204,6 +204,31 @@ CRDs are attached to the GitHub Release.
 
 ### Fixed
 
+- **A cluster re-created at once with a deleted one's name and
+  `bootstrapFromSnapshot` came up on the deleted cluster's data, saying
+  `Completed` / skipped** (#43, new in this release). Right after saving
+  `BootstrapWaiting`, the pass read the cluster back from a cache that
+  had not seen it yet and updated the earlier StatefulSet; that moved
+  its owner reference to the new cluster, so it was never
+  garbage-collected. While the bootstrap runs, the cluster now never
+  updates a StatefulSet it does not control by UID, and only one of its
+  own with pods (above 0 replicas), and no restore Job of its own,
+  counts as running. A `<cluster>-bootstrap` Job from the earlier
+  cluster is waited for too, not taken for this cluster's restore, and a
+  restore onto a pod-0 volume older than the cluster says so in
+  `status.bootstrap` and with a `BootstrapOverExistingVolume` Warning.
+  (#46, by [SaiPisey2](https://github.com/SaiPisey2))
+- **A bootstrap onto a kept PVC that still held the engine's `dump.kdb`
+  failed and destroyed that file** (#44, also in 0.6.x). The restore Job
+  runs as a different UID from the engine: it overwrote the file, then
+  could not chmod it. It now writes each file to a temp file next to it
+  and renames it in only once the whole archive has been read, so a
+  failed restore leaves the old files whole. The volume needs room for
+  the old and the restored files at once; a full one fails with an error
+  that says so. A `dump.kdb` or `appendonly.aof` that the snapshot does
+  not have is removed, so a log left from the earlier cluster is no
+  longer replayed on top of the restored data.
+  (#45, by [SaiPisey2](https://github.com/SaiPisey2))
 - **A master that restarted with the append-only file on was failed over
   to a replica behind it** (new in this release). A killed engine starts a
   new stream, which was taken as lost writes. On engine 1.2.0 or later
@@ -246,14 +271,17 @@ CRDs are attached to the GitHub Release.
   (#35, by [SaiPisey2](https://github.com/SaiPisey2))
 - **A failed reconcile step turned off failover, with the cluster still
   `Ready`** (also in 0.6.x). A refused object or a missing referenced
-  KividbConfig, KividbAclConfig, KividbSnapshotConfig or Secret now holds
-  back the writes after it, not failover, role labels or status: `Ready`
-  is `False` (`ReconcileError`, or `InvalidSpec` with an Event), in sharded
-  clusters too. Port clashes (`spec.port`, `tls.port`, the agent's 8081, the
-  exporter's 9121) and backup schedules that are not valid cron are refused
-  before anything is written. The referenced kinds are watched, so a fix
-  takes effect at once.
-  (#36, by [SaiPisey2](https://github.com/SaiPisey2))
+  KividbConfig, KividbAclConfig, KividbSnapshotConfig or Secret now
+  holds back the writes after it, not failover, role labels or status:
+  `Ready` is `False` (`ReconcileError` or `InvalidSpec`), in sharded
+  clusters too, with a Warning Event of that reason (#28). The Event
+  comes once per change of the error, not every pass, and not for a
+  conflict, which the next pass retries. Port clashes (`spec.port`,
+  `tls.port`, the agent's 8081, the exporter's 9121) and backup
+  schedules a CronJob would refuse (not valid cron, or with a `TZ=` or
+  `CRON_TZ=` prefix) are refused before anything is written. The
+  referenced kinds are watched, so a fix takes effect at once.
+  (#36 and #47, by [SaiPisey2](https://github.com/SaiPisey2))
 - **Removing a shard could stay in `Rebalancing` for good** (new in this
   release). On a status conflict, a pass that had read the cluster a
   version behind wrote its status over the latest one, and could bring

@@ -45,15 +45,17 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 
 	snapName := c.Spec.BootstrapFromSnapshot.SnapshotRef.Name
 	if c.Status.Bootstrap == nil || bootstrapWaiting(c) {
-		// The bootstrap's own StatefulSet is only created after this status
-		// is saved, so one of ours that exists now belongs to a running
-		// cluster: restoring would scale it to 0 and overwrite pod-0's data.
-		// One not ours, or being deleted, is left from an earlier cluster
-		// with this name: wait until it is gone.
+		// A StatefulSet not controlled by this cluster's UID, or being
+		// deleted, is left from an earlier cluster with this name, and so is
+		// a restore Job not controlled by it: wait until they are gone.
 		var sts appsv1.StatefulSet
 		err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: statefulSetName(c)}, &sts)
-		earlier := err == nil && (!metav1.IsControlledBy(&sts, c) || sts.DeletionTimestamp != nil)
-		if apierrors.IsNotFound(err) {
+		if err != nil && !apierrors.IsNotFound(err) {
+			return true, err
+		}
+		found := err == nil
+		earlier := found && (!metav1.IsControlledBy(&sts, c) || sts.DeletionTimestamp != nil)
+		if !found {
 			// No StatefulSet of ours yet, so a pod with this cluster's
 			// labels is the earlier cluster's, possibly still on pod-0's PVC.
 			var pods corev1.PodList
@@ -62,10 +64,20 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 			}
 			earlier = len(pods.Items) > 0
 		}
+		ourJob := false
+		if !earlier {
+			var job batchv1.Job
+			err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: bootstrapJobName(c)}, &job)
+			if err != nil && !apierrors.IsNotFound(err) {
+				return true, err
+			}
+			earlier = err == nil && !metav1.IsControlledBy(&job, c)
+			ourJob = err == nil && !earlier
+		}
 		if earlier {
 			if !bootstrapWaiting(c) {
 				r.event(c, corev1.EventTypeWarning, "BootstrapWaiting",
-					"spec.bootstrapFromSnapshot (%s) waits: StatefulSet %s or its pods are left from an earlier cluster with this name, and the restore starts once they are deleted", snapName, statefulSetName(c))
+					"spec.bootstrapFromSnapshot (%s) waits: StatefulSet %s, its pods or restore Job %s are left from an earlier cluster with this name, and the restore starts once they are deleted", snapName, statefulSetName(c), bootstrapJobName(c))
 			}
 			c.Status.Bootstrap = &kividbv1alpha1.BootstrapStatus{
 				Phase:        kividbv1alpha1.BootstrapPending,
@@ -74,7 +86,15 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 			}
 			return true, nil
 		}
-		if err == nil {
+		// The bootstrap holds its own StatefulSet at 0 replicas until the
+		// restore is done (desiredSTSReplicas), so one of ours at 0 is the
+		// bootstrap's: the restore goes on, whatever the status says. With
+		// this cluster's own restore Job there, one of ours above 0 is the
+		// restored one, scaled up after a completion this read is too old
+		// to show. Otherwise one of ours above 0 has run without the
+		// bootstrap: this cluster is already running, and restoring would
+		// scale it to 0 and overwrite pod-0.
+		if found && !ourJob && (sts.Spec.Replicas == nil || *sts.Spec.Replicas > 0) {
 			r.event(c, corev1.EventTypeWarning, "BootstrapSkipped",
 				"spec.bootstrapFromSnapshot (%s) ignored: the cluster is already running, and bootstrap only seeds a new cluster", snapName)
 			c.Status.Bootstrap = &kividbv1alpha1.BootstrapStatus{
@@ -84,9 +104,6 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 				Message:      "skipped: the cluster was already running",
 			}
 			return false, nil
-		}
-		if !apierrors.IsNotFound(err) {
-			return true, err
 		}
 	}
 	if c.Status.Bootstrap == nil || bootstrapWaiting(c) {
@@ -128,7 +145,8 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 		return true, err
 	}
 
-	if err := r.ensureBootstrapPVC(ctx, c); err != nil {
+	kept, err := r.ensureBootstrapPVC(ctx, c)
+	if err != nil {
 		return true, err
 	}
 
@@ -137,16 +155,28 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 		return true, err
 	}
 
+	// A PVC older than this cluster was kept from an earlier one with its
+	// name (the StatefulSet retains its PVCs), or made beforehand on
+	// purpose. The restore replaces its data, as the spec asks: say so,
+	// where it is seen.
+	var over string
+	if kept {
+		over = fmt.Sprintf(": restoring over the existing volume %s, which is older than this cluster", bootstrapPVCName(c))
+		if c.Status.Bootstrap.Phase != kividbv1alpha1.BootstrapInProgress {
+			r.event(c, corev1.EventTypeWarning, "BootstrapOverExistingVolume",
+				"spec.bootstrapFromSnapshot (%s)%s; its data is replaced by the snapshot's", snapName, over)
+		}
+	}
 	c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapInProgress
 	c.Status.Bootstrap.SnapshotName = snapName
-	c.Status.Bootstrap.Message = "restore Job running"
+	c.Status.Bootstrap.Message = "restore Job running" + over
 
 	if job.Status.Succeeded > 0 {
 		now := metav1.Now()
 		c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapCompleted
 		c.Status.Bootstrap.Completed = true
 		c.Status.Bootstrap.CompletionTime = &now
-		c.Status.Bootstrap.Message = "PVC seeded from snapshot"
+		c.Status.Bootstrap.Message = "PVC seeded from snapshot" + over
 		c.Status.Bootstrap.Error = ""
 		log.Info("bootstrap completed", "cluster", c.Name, "snapshot", snapName)
 		return false, nil
@@ -172,20 +202,23 @@ func bootstrapSnapshotUsable(snap *kividbv1alpha1.KividbSnapshot) error {
 	return nil
 }
 
-func (r *KividbClusterReconciler) ensureBootstrapPVC(ctx context.Context, c *kividbv1alpha1.KividbCluster) error {
+// ensureBootstrapPVC creates pod-0's PVC if it does not exist. kept is true
+// for one created before this cluster: kept from an earlier cluster with
+// this name, or made beforehand.
+func (r *KividbClusterReconciler) ensureBootstrapPVC(ctx context.Context, c *kividbv1alpha1.KividbCluster) (kept bool, err error) {
 	name := bootstrapPVCName(c)
 	var pvc corev1.PersistentVolumeClaim
-	err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: name}, &pvc)
+	err = r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: name}, &pvc)
 	if err == nil {
-		return nil
+		return pvc.CreationTimestamp.Before(&c.CreationTimestamp), nil
 	}
 	if !apierrors.IsNotFound(err) {
-		return err
+		return false, err
 	}
 
 	qty, err := resource.ParseQuantity(c.Spec.Storage.Size)
 	if err != nil {
-		return fmt.Errorf("storage.size: %w", err)
+		return false, fmt.Errorf("storage.size: %w", err)
 	}
 	accessModes := c.Spec.Storage.AccessModes
 	if len(accessModes) == 0 {
@@ -213,7 +246,7 @@ func (r *KividbClusterReconciler) ensureBootstrapPVC(ctx context.Context, c *kiv
 	// name), and those are retained when the cluster is deleted. Owning this
 	// one would make pod-0's data the only volume garbage-collected with
 	// the KividbCluster.
-	return r.Create(ctx, &pvc)
+	return false, r.Create(ctx, &pvc)
 }
 
 func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kividbv1alpha1.KividbCluster, snap *kividbv1alpha1.KividbSnapshot, snapCfg *kividbv1alpha1.KividbSnapshotConfig) (*batchv1.Job, error) {
@@ -221,6 +254,11 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 	var existing batchv1.Job
 	err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: name}, &existing)
 	if err == nil {
+		if !metav1.IsControlledBy(&existing, c) {
+			// Left from an earlier cluster with this name: its result is
+			// not this cluster's restore.
+			return nil, fmt.Errorf("restore Job %s is not this cluster's but an earlier cluster's with this name; waiting for it to be deleted", name)
+		}
 		return &existing, nil
 	}
 	if !apierrors.IsNotFound(err) {
@@ -328,10 +366,10 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 
 // bootstrapWaitMessage is persisted state: bootstrapWaiting keys on it, so
 // changing the text strands clusters already waiting.
-const bootstrapWaitMessage = "waiting for the StatefulSet and pods of an earlier cluster with this name to be deleted"
+const bootstrapWaitMessage = "waiting for the StatefulSet, pods and restore Job of an earlier cluster with this name to be deleted"
 
-// bootstrapWaiting is true while the bootstrap waits for the StatefulSet or
-// pods of an earlier cluster with this name to be deleted.
+// bootstrapWaiting is true while the bootstrap waits for the StatefulSet,
+// pods or restore Job of an earlier cluster with this name to be deleted.
 func bootstrapWaiting(c *kividbv1alpha1.KividbCluster) bool {
 	b := c.Status.Bootstrap
 	return c.Spec.BootstrapFromSnapshot != nil && b != nil && b.Phase == kividbv1alpha1.BootstrapPending && b.Message == bootstrapWaitMessage

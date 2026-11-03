@@ -185,11 +185,12 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.Error(bootErr, "bootstrap reconciliation failed")
 	}
 	if c.Spec.BootstrapFromSnapshot != nil {
+		// The update reads the saved object back into c. Reading it again
+		// would come from the cache, which may not have this write yet: a
+		// bootstrap just set waiting would read as not waiting, and the
+		// statefulset step below would run (issue #43).
 		if statusErr := r.Status().Update(ctx, &c); statusErr != nil {
 			return ctrl.Result{}, fmt.Errorf("updating bootstrap status: %w", statusErr)
-		}
-		if err := r.Get(ctx, req.NamespacedName, &c); err != nil {
-			return ctrl.Result{}, err
 		}
 	}
 
@@ -212,8 +213,17 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		steps.run("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, &c, snapCfg.Name) })
 	}
 	applyErr := steps.err
+	if applyErr != nil {
+		r.warnOnChange(&c, "ReconcileError", applyErr)
+	}
 
 	if blockSTS || bootErr != nil {
+		// The pass ends here, before updateStatus. The Ready condition is
+		// what warnOnChange compares the next pass's error against: it
+		// gives a refused step, and no longer does once that is fixed.
+		if err := r.noteBootstrapApplyErr(ctx, &c, applyErr); err != nil {
+			return ctrl.Result{}, err
+		}
 		if applyErr != nil {
 			return ctrl.Result{}, applyErr
 		}
@@ -263,6 +273,36 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
 }
 
+// noteBootstrapApplyErr puts applyErr, from a pass that ends while a
+// bootstrap waits, on the Ready condition, or, with applyErr nil, takes a
+// ReconcileError an earlier such pass put there off it. The status is
+// written only if that changes it. A conflict is left to the next pass.
+func (r *KividbClusterReconciler) noteBootstrapApplyErr(ctx context.Context, c *kividbv1alpha1.KividbCluster, applyErr error) error {
+	prev := findCondition(c.Status.Conditions, "Ready")
+	// While the bootstrap waits, the cluster is not ready: the condition
+	// updateStatus gives a cluster that is not, without an error.
+	next := metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "NotReady", Message: "cluster is not fully ready", ObservedGeneration: c.Generation}
+	switch {
+	case applyErr != nil:
+		next.Reason, next.Message = "ReconcileError", applyErr.Error()
+	case prev == nil || prev.Reason != "ReconcileError":
+		return nil
+	}
+	if prev != nil && prev.Status == next.Status && prev.Reason == next.Reason && prev.Message == next.Message {
+		return nil
+	}
+	setCondition(&c.Status.Conditions, next)
+	err := r.Status().Update(ctx, c)
+	switch {
+	case apierrors.IsConflict(err):
+		logf.FromContext(ctx).V(1).Info("Ready condition of a waiting bootstrap not written: the status changed meanwhile", "error", err.Error())
+		return nil
+	case err != nil:
+		return errors.Join(applyErr, fmt.Errorf("updating status: %w", err))
+	}
+	return nil
+}
+
 // applySteps runs, in order, the steps that write a cluster's objects. The
 // first that fails skips the ones after it: applying the StatefulSet after
 // its config was refused would roll the pods onto a config never written.
@@ -303,11 +343,9 @@ func (r *KividbClusterReconciler) reconcileHeld(ctx context.Context, c *kividbv1
 	log := logf.FromContext(ctx)
 	log.Error(held.err, "not applying the cluster's objects")
 	requeue := 5 * time.Second
+	r.warnOnChange(c, held.reason, held.err)
 	if held.reason == "InvalidSpec" {
-		// Once, not every pass: only an edit fixes it, and edits are watched.
-		if prev := findCondition(c.Status.Conditions, "Ready"); prev == nil || prev.Reason != held.reason || !strings.HasPrefix(prev.Message, held.Error()) {
-			r.event(c, corev1.EventTypeWarning, "InvalidSpec", "%v", held.err)
-		}
+		// Only an edit fixes it, and edits are watched.
 		requeue = reconcileInterval
 	}
 	if isSharded(c) {
@@ -576,6 +614,13 @@ func (r *KividbClusterReconciler) applyStatefulSet(ctx context.Context, c *kivid
 	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: c.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
 		creating := sts.CreationTimestamp.IsZero()
+		if sts.ResourceVersion != "" && bootstrapBlocksSTS(c) && !metav1.IsControlledBy(sts, c) {
+			// Not this cluster's (by UID): left from an earlier cluster with
+			// this name, and running on the volumes the bootstrap restores.
+			// SetControllerReference matches owners by name and would take
+			// it over, and the garbage collector would then keep it.
+			return fmt.Errorf("StatefulSet %s is not this cluster's but an earlier cluster's with this name; not updated while spec.bootstrapFromSnapshot waits to restore", sts.Name)
+		}
 		sts.Labels = desired.Labels
 		sts.Spec.Replicas = desired.Spec.Replicas
 		sts.Spec.Template = desired.Spec.Template
@@ -749,10 +794,29 @@ func validateSnapshotConfig(snapCfg *kividbv1alpha1.KividbSnapshotConfig) error 
 	if snapCfg == nil {
 		return nil
 	}
-	if _, err := cron.ParseStandard(snapCfg.Spec.Schedule); err != nil {
+	// The cron library takes a TZ= or CRON_TZ= prefix, and panics on some
+	// ("TZ=UTC"); a CronJob refuses any schedule that holds "TZ"
+	// (k8s.io/kubernetes, batch validation).
+	if strings.Contains(snapCfg.Spec.Schedule, "TZ") {
+		return fmt.Errorf("KividbSnapshotConfig %s: spec.schedule %q sets a time zone (TZ or CRON_TZ), which a CronJob does not accept", snapCfg.Name, snapCfg.Spec.Schedule)
+	}
+	if err := parseCronSchedule(snapCfg.Spec.Schedule); err != nil {
 		return fmt.Errorf("KividbSnapshotConfig %s: spec.schedule %q is not a valid cron schedule: %w", snapCfg.Name, snapCfg.Spec.Schedule, err)
 	}
 	return nil
+}
+
+// parseCronSchedule parses schedule with the cron library's standard
+// parser, which panics on some malformed schedules: as Kubernetes does
+// (parsers.ParseCronScheduleWithPanicRecovery), the panic is an error.
+func parseCronSchedule(schedule string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("invalid schedule format: %v", r)
+		}
+	}()
+	_, err = cron.ParseStandard(schedule)
+	return err
 }
 
 // validateKividbConfig refuses directives the operator cannot run with.
@@ -806,6 +870,26 @@ func (r *KividbClusterReconciler) rejectSpec(ctx context.Context, c *kividbv1alp
 		ObservedGeneration: c.Generation,
 	})
 	return r.Status().Update(ctx, c)
+}
+
+// warnOnChange records err as a Warning Event of reason, unless the Ready
+// condition already gives it: once per change, not every pass. A refusal
+// that lasts would otherwise be an Event every few seconds, using up the
+// object's Event budget (see EventCorrelatorOptions) that Failover and
+// the rollout Events need. For the same reason a conflict, a write that
+// raced another and that the next pass retries, is left to the condition.
+// The condition's message may be err joined (one per line) with later
+// errors of the pass.
+func (r *KividbClusterReconciler) warnOnChange(c *kividbv1alpha1.KividbCluster, reason string, err error) {
+	if apierrors.IsConflict(err) {
+		return
+	}
+	msg := err.Error()
+	if prev := findCondition(c.Status.Conditions, "Ready"); prev != nil && prev.Reason == reason &&
+		(prev.Message == msg || strings.HasPrefix(prev.Message, msg+"\n")) {
+		return
+	}
+	r.event(c, corev1.EventTypeWarning, reason, "%v", err)
 }
 
 func setCondition(conditions *[]metav1.Condition, next metav1.Condition) {

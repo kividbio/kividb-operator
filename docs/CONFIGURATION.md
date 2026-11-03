@@ -155,7 +155,8 @@ namespace):
 
 If a reference names an object that doesn't exist (or a Secret it names
 does not), the cluster's objects are left as they are, with a clear error
-on `status.conditions` (`Ready` `False`, reason `ReconcileError`) — the
+on `status.conditions` (`Ready` `False`, reason `ReconcileError`, plus a
+Warning Event of that reason each time the error changes) — the
 cluster does not silently fall back to defaults for a *typo'd* reference
 (only for an *absent* one). The same holds for an input the cluster
 cannot run with, such as a `port` or TLS port that another listener of
@@ -203,8 +204,11 @@ unless the referenced [`KividbConfig`](#kividbconfig) sets `appendonly` (or
 the engine's own name for it, `aof`) itself. A pod then reloads its data
 from its volume however it stopped: every acknowledged write reaches the
 file before it is acknowledged (engine 1.2, `aof-ack-after-write yes`), and
-the file is synced to disk once a second, so a killed process loses nothing
-and a node that loses power up to about a second. `everysec` is the only
+the file is synced to disk once a second, so a killed process loses no
+acknowledged write and a node that loses power up to about a second. One
+exception: if the disk falls more than 5 seconds behind, the engine sends the
+reply anyway (counted in `INFO persistence` as `aof_acks_before_write`), and a
+process killed just after can lose that write. `everysec` is the only
 policy the engine applies.
 
 - **The cost.** Writes go through the file: fewer writes a second at high
@@ -1014,10 +1018,10 @@ spec:
 
 `schedule` and `s3` are required. `schedule` is checked the way
 Kubernetes checks a CronJob's (five fields, or a descriptor such as
-`@hourly`); one it would refuse is reported on each referencing cluster
-as `InvalidSpec`, and nothing of that cluster is applied until it is
-fixed. Any S3-compatible endpoint works: AWS S3, MinIO, Ceph RGW,
-Backblaze B2, Cloudflare R2, etc.
+`@hourly`, and no `TZ=` or `CRON_TZ=` prefix); one it would refuse is
+reported on each referencing cluster as `InvalidSpec`, and nothing of
+that cluster is applied until it is fixed. Any S3-compatible endpoint
+works: AWS S3, MinIO, Ceph RGW, Backblaze B2, Cloudflare R2, etc.
 
 ### `source`: master or replica
 

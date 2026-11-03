@@ -892,6 +892,16 @@ func (f *failoverCase) reconcile(t *testing.T, requeue time.Duration) *kividbv1a
 	return &got
 }
 
+// ready is the cluster's Ready condition as stored.
+func (f *failoverCase) ready(t *testing.T) *metav1.Condition {
+	t.Helper()
+	var got kividbv1alpha1.KividbCluster
+	if err := f.cl.Get(context.Background(), client.ObjectKeyFromObject(f.c), &got); err != nil {
+		t.Fatal(err)
+	}
+	return meta.FindStatusCondition(got.Status.Conditions, "Ready")
+}
+
 // wantFailedOver checks c1-1 was promoted and Ready is False for reason,
 // with a message that says msg.
 func (f *failoverCase) wantFailedOver(t *testing.T, got *kividbv1alpha1.KividbCluster, reason, msg string) {
@@ -1024,6 +1034,18 @@ func TestReconcile_InvalidReferenceStillFailsOver(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "default"},
 			Spec:       kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: "0 2 * *"},
 		}, `KividbSnapshotConfig snap: spec.schedule "0 2 * *"`},
+		{"schedule with a time zone", func(c *kividbv1alpha1.KividbCluster) {
+			c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "snap"}
+		}, &kividbv1alpha1.KividbSnapshotConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "default"},
+			Spec:       kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: "CRON_TZ=UTC 0 2 * * *"},
+		}, `KividbSnapshotConfig snap: spec.schedule "CRON_TZ=UTC 0 2 * * *"`},
+		{"schedule the cron library panics on", func(c *kividbv1alpha1.KividbCluster) {
+			c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "snap"}
+		}, &kividbv1alpha1.KividbSnapshotConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "default"},
+			Spec:       kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: "TZ=UTC"},
+		}, `KividbSnapshotConfig snap: spec.schedule "TZ=UTC"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFailoverCase(t, tc.edit, nil, tc.obj)
