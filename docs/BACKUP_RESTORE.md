@@ -279,7 +279,18 @@ If you need to rewrite an existing PVC by hand:
    ```
 
 3. **Copy the files onto the PVC** (short-lived debug pod mounting
-   `data-<sts>-0`).
+   `data-<sts>-0`): both `dump.kdb` and `appendonly.aof`. First delete the
+   volume's own `dump.kdb.gen`, `dump.kdb.repl`, `dump.kdb.clean`,
+   `appendonly.aof.prev`, `appendonly.aof.prev.len` and
+   `appendonly.aof.rewrite.tmp`. They belong to the data being replaced: a
+   stale `dump.kdb.gen` makes the engine refuse to start, or skip the
+   archive's `appendonly.aof`, and a stale `appendonly.aof.prev` is replayed
+   on top of the restored dump.
+
+   The archive's `appendonly.aof` holds the writes made while the snapshot was
+   taken. The engine replays it only if it runs with the append-only file on
+   (the operator's default, or `--aof`); with it off, the engine loads
+   `dump.kdb` alone, and those writes are missing.
 
 4. **Scale back up** to `replicas+1` and verify with
    `kubectl get kividbcluster my-cluster`.
