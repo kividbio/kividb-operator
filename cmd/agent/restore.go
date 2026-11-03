@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -102,19 +104,55 @@ func runRestoreFromS3(args []string) error {
 // successful.
 const restoredFileMode = 0o660
 
+// extractSnapshotTarGz restores the archive's dump.kdb and appendonly.aof
+// into dataDir. The volume may already hold these files, written by the
+// engine as its own UID (a kept PVC re-used by a new cluster), which this
+// process can neither chmod nor, often, open for writing. So each entry is
+// written to a new temp file in dataDir, and renamed over its target only
+// once the whole archive has been read: that needs write access to the
+// directory, not ownership of the file, and an archive that breaks part
+// way leaves the old files whole. The price is that the volume needs room
+// for the old files and the restored ones at once.
 func extractSnapshotTarGz(r io.Reader, dataDir string) error {
+	// The only files ever written, by fixed name. An entry's own name is
+	// used just to pick one of these and never becomes part of a path, so
+	// a crafted archive ("../../etc/x", absolute paths, links) cannot
+	// write anywhere else.
+	targets := map[string]string{"dump.kdb": "dump.kdb", "appendonly.aof": "appendonly.aof"}
+	persistenceFiles := []string{"dump.kdb", "appendonly.aof"}
+
+	// A Job that was killed (OOM, eviction, node loss) never ran its
+	// cleanup, and its temp files would leave the retry short of room for
+	// another full copy. Only this Job writes these names, and the engine
+	// is not running on the volume while it does.
+	for _, name := range persistenceFiles {
+		left, err := filepath.Glob(filepath.Join(dataDir, restoreTempPrefix(name)+"*"))
+		if err != nil {
+			return err
+		}
+		for _, tmp := range left {
+			if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("removing %s, left by an earlier restore: %w", tmp, err)
+			}
+			log.Printf("removed %s, left by an earlier restore", tmp)
+		}
+	}
+
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return err
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
-	// The only files ever written, by fixed name. An entry's own name is
-	// used just to pick one of these and never becomes part of a path, so
-	// a crafted archive ("../../etc/x", absolute paths, links) cannot
-	// write anywhere else.
-	targets := map[string]string{"dump.kdb": "dump.kdb", "appendonly.aof": "appendonly.aof"}
-	var wrote bool
+	// temps maps each target name to the temp file holding its restored
+	// content. Whatever is still in it when this returns was not renamed,
+	// and is removed.
+	temps := map[string]string{}
+	defer func() {
+		for _, tmp := range temps {
+			_ = os.Remove(tmp)
+		}
+	}()
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -127,29 +165,136 @@ func extractSnapshotTarGz(r io.Reader, dataDir string) error {
 		if !ok || hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		dest := filepath.Join(dataDir, name)
-		f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, restoredFileMode)
+		tmp, err := writeRestoreTemp(tr, dataDir, name)
 		if err != nil {
 			return err
 		}
-		if _, err := io.Copy(f, tr); err != nil {
-			f.Close()
-			return err
+		// A name that appears twice is restored from its last entry.
+		if prev, ok := temps[name]; ok {
+			_ = os.Remove(prev)
 		}
-		// Chmod explicitly: OpenFile's mode is filtered by the umask, and
-		// is ignored entirely when the file already existed.
-		if err := f.Chmod(restoredFileMode); err != nil {
-			f.Close()
-			return err
-		}
-		if err := f.Close(); err != nil {
-			return err
-		}
-		wrote = true
-		log.Printf("wrote %s", dest)
+		temps[name] = tmp
 	}
-	if !wrote {
+	// The tar reader stops at the end-of-archive marker, before the gzip
+	// trailer. Read to the end of the gzip stream so its checksum is
+	// checked, and a damaged archive is refused before anything is replaced.
+	if _, err := io.Copy(io.Discard, gz); err != nil {
+		return fmt.Errorf("reading the archive's gzip trailer: %w", err)
+	}
+	if len(temps) == 0 {
 		return fmt.Errorf("archive contained no dump.kdb or appendonly.aof")
 	}
-	return nil
+
+	// Rename the new files in before removing stale ones, so the old
+	// cluster's files are deleted only once the snapshot is in place. The
+	// renames and removals are not one atomic step: if one fails after
+	// another succeeded, the volume holds part of the snapshot next to old
+	// files. While spec.bootstrapFromSnapshot is set, the operator keeps
+	// the StatefulSet at 0 and the engine does not start on that; a cluster
+	// whose field is removed after a failed bootstrap starts on whatever
+	// is there. So that state is logged, to be restored again.
+	restored := map[string]bool{}
+	partial := func(err error) error {
+		if len(restored) > 0 {
+			log.Printf("%s now holds a partial restore, part snapshot and part old files: restore it again before starting the engine on it", dataDir)
+		}
+		return err
+	}
+	for _, name := range persistenceFiles {
+		tmp, ok := temps[name]
+		if !ok {
+			continue
+		}
+		dest := filepath.Join(dataDir, name)
+		if err := os.Rename(tmp, dest); err != nil {
+			return partial(fmt.Errorf("replacing %s: %w", dest, err))
+		}
+		delete(temps, name)
+		restored[name] = true
+		log.Printf("wrote %s", dest)
+	}
+	// After a restore the volume holds the archive's persistence files and
+	// no others. The engine loads dump.kdb and replays appendonly.aof on
+	// top, so either one left from an earlier cluster on a kept PVC would
+	// bring that cluster's data back into the restored one. Removing it,
+	// like the rename, needs write access to the directory only.
+	for _, name := range persistenceFiles {
+		if restored[name] {
+			continue
+		}
+		stale := filepath.Join(dataDir, name)
+		if err := os.Remove(stale); err == nil {
+			log.Printf("removed %s, which the snapshot does not have", stale)
+		} else if !os.IsNotExist(err) {
+			return partial(fmt.Errorf("removing %s: %w", stale, err))
+		}
+	}
+	// A rename is durable only once the directory itself is synced.
+	return syncDir(dataDir)
+}
+
+func restoreTempPrefix(name string) string {
+	return ".restore-" + name + "-"
+}
+
+// writeRestoreTemp copies one archive entry into a new temp file in dataDir
+// and returns its path. The file is created by this process, so this
+// process owns it and can set its mode. name is one of the fixed target
+// names, never the entry's own.
+func writeRestoreTemp(r io.Reader, dataDir, name string) (string, error) {
+	fail := func(err error) (string, error) {
+		// The old files stay on the volume until the restored ones are
+		// complete, which a full volume turns into a confusing failure on
+		// a restore that used to fit.
+		if errors.Is(err, syscall.ENOSPC) {
+			return "", fmt.Errorf("writing %s: %w (the volume needs room for the old and the restored files at once)", name, err)
+		}
+		return "", fmt.Errorf("writing %s: %w", name, err)
+	}
+	f, err := os.CreateTemp(dataDir, restoreTempPrefix(name)+"*")
+	if err != nil {
+		return fail(err)
+	}
+	tmp := f.Name()
+	discard := func(err error) (string, error) {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fail(err)
+	}
+	// Chmod explicitly: CreateTemp makes the file owner-only, and any mode
+	// given at create time would be filtered by the umask.
+	if err := f.Chmod(restoredFileMode); err != nil {
+		return discard(err)
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		return discard(err)
+	}
+	if err := f.Sync(); err != nil {
+		return discard(err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fail(err)
+	}
+	return tmp, nil
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("syncing %s: %w", dir, err)
+	}
+	if err := d.Sync(); err != nil && !dirSyncUnsupported(err) {
+		_ = d.Close()
+		return fmt.Errorf("syncing %s: %w", dir, err)
+	}
+	return d.Close()
+}
+
+// dirSyncUnsupported reports whether a directory fsync failed only because
+// the filesystem does not do it, as some FUSE and network filesystems do.
+// The files themselves were synced; there is nothing more to make durable
+// there, and failing the restore for it would leave the cluster empty.
+func dirSyncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP)
 }
