@@ -239,13 +239,16 @@ rules that match the old keys (see Fixed).
   master keeps its key count.
 - **A failed reconcile step turned off failover, with the cluster still
   `Ready`** (also in 0.6.x). A refused object or a missing referenced
-  KividbConfig, KividbAclConfig, KividbSnapshotConfig or Secret now holds
-  back the writes after it, not failover, role labels or status: `Ready`
-  is `False` (`ReconcileError`, or `InvalidSpec` with an Event), in sharded
-  clusters too. Port clashes (`spec.port`, `tls.port`, the agent's 8081, the
-  exporter's 9121) and backup schedules that are not valid cron are refused
-  before anything is written. The referenced kinds are watched, so a fix
-  takes effect at once.
+  KividbConfig, KividbAclConfig, KividbSnapshotConfig or Secret now
+  holds back the writes after it, not failover, role labels or status:
+  `Ready` is `False` (`ReconcileError` or `InvalidSpec`), in sharded
+  clusters too, with a Warning Event of that reason (#28). The Event
+  comes once per change of the error, not every pass, and not for a
+  conflict, which the next pass retries. Port clashes (`spec.port`,
+  `tls.port`, the agent's 8081, the exporter's 9121) and backup
+  schedules a CronJob would refuse (not valid cron, or with a `TZ=` or
+  `CRON_TZ=` prefix) are refused before anything is written. The
+  referenced kinds are watched, so a fix takes effect at once.
 - **Removing a shard could stay in `Rebalancing` for good** (new in this
   release). On a status conflict, a pass that had read the cluster a
   version behind wrote its status over the latest one, and could bring
