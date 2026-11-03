@@ -208,8 +208,11 @@ the file is synced to disk once a second, so a killed process loses no
 acknowledged write and a node that loses power up to about a second. One
 exception: if the disk falls more than 5 seconds behind, the engine sends the
 reply anyway (counted in `INFO persistence` as `aof_acks_before_write`), and a
-process killed just after can lose that write. `everysec` is the only
-policy the engine applies.
+process killed just after can lose that write. In our tests that happened
+under a bulk load on Azure StandardSSD disks: give write-heavy clusters a
+premium SSD, or a disk with provisioned IOPS, through `storage.storageClassName`,
+and watch `aof_acks_before_write`. `everysec` is the only policy the engine
+applies.
 
 - **The cost.** Writes go through the file: fewer writes a second at high
   concurrency, and the file takes disk space until the engine checkpoints
