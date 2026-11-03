@@ -178,6 +178,16 @@ rules that match the old keys (see Fixed).
 
 ### Fixed
 
+- **A bootstrap onto a kept PVC that still held the engine's `dump.kdb`
+  failed and destroyed that file** (#44, also in 0.6.x). The restore Job
+  runs as a different UID from the engine: it overwrote the file, then
+  could not chmod it. It now writes each file to a temp file next to it
+  and renames it in only once the whole archive has been read, so a
+  failed restore leaves the old files whole. The volume needs room for
+  the old and the restored files at once; a full one fails with an error
+  that says so. A `dump.kdb` or `appendonly.aof` that the snapshot does
+  not have is removed, so a log left from the earlier cluster is no
+  longer replayed on top of the restored data.
 - **A master that restarted with the append-only file on was failed over
   to a replica behind it** (new in this release). A killed engine starts a
   new stream, which was taken as lost writes. On engine 1.2.0 or later
