@@ -178,6 +178,19 @@ rules that match the old keys (see Fixed).
 
 ### Fixed
 
+- **A cluster re-created at once with a deleted one's name and
+  `bootstrapFromSnapshot` came up on the deleted cluster's data, saying
+  `Completed` / skipped** (#43, new in this release). Right after saving
+  `BootstrapWaiting`, the pass read the cluster back from a cache that
+  had not seen it yet and updated the earlier StatefulSet; that moved
+  its owner reference to the new cluster, so it was never
+  garbage-collected. While the bootstrap runs, the cluster now never
+  updates a StatefulSet it does not control by UID, and only one of its
+  own with pods (above 0 replicas), and no restore Job of its own,
+  counts as running. A `<cluster>-bootstrap` Job from the earlier
+  cluster is waited for too, not taken for this cluster's restore, and a
+  restore onto a pod-0 volume older than the cluster says so in
+  `status.bootstrap` and with a `BootstrapOverExistingVolume` Warning.
 - **A bootstrap onto a kept PVC that still held the engine's `dump.kdb`
   failed and destroyed that file** (#44, also in 0.6.x). The restore Job
   runs as a different UID from the engine: it overwrote the file, then
