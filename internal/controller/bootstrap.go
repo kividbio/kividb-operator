@@ -204,12 +204,17 @@ func bootstrapSnapshotUsable(snap *kividbv1alpha1.KividbSnapshot) error {
 
 // ensureBootstrapPVC creates pod-0's PVC if it does not exist. kept is true
 // for one created before this cluster: kept from an earlier cluster with
-// this name, or made beforehand.
+// this name, or made beforehand. One being deleted is waited for, with an
+// error that requeues the pass: a restore Job started now would have its
+// pod refused the volume, or restore onto one about to go.
 func (r *KividbClusterReconciler) ensureBootstrapPVC(ctx context.Context, c *kividbv1alpha1.KividbCluster) (kept bool, err error) {
 	name := bootstrapPVCName(c)
 	var pvc corev1.PersistentVolumeClaim
 	err = r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: name}, &pvc)
 	if err == nil {
+		if pvc.DeletionTimestamp != nil {
+			return false, fmt.Errorf("PVC %s is being deleted: the restore starts once it is gone", name)
+		}
 		return pvc.CreationTimestamp.Before(&c.CreationTimestamp), nil
 	}
 	if !apierrors.IsNotFound(err) {
