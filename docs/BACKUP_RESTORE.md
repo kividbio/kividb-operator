@@ -237,12 +237,25 @@ until the Job finishes). Once `status.bootstrap.completed` is true, the
 field is ignored on later reconciles (immutable bootstrap). The field can
 only be set when the cluster is created: the API server refuses it on an
 existing cluster, and a cluster that is already running skips it with a
-`BootstrapSkipped` Event. If a StatefulSet with the cluster's name, or its
-pods, are left from an earlier cluster (still being garbage-collected, or
-orphaned with `--cascade=orphan`), the bootstrap waits in `Pending` with a
-`BootstrapWaiting` Event and starts once that StatefulSet and its pods are
-deleted (with `--cascade=orphan`, delete the pods too). Removing
+`BootstrapSkipped` Event. If a StatefulSet with the cluster's name, its
+pods, or a `<cluster>-bootstrap` restore Job are left from an earlier
+cluster (still being garbage-collected, or orphaned with
+`--cascade=orphan`), the bootstrap waits in `Pending` with a
+`BootstrapWaiting` Event and starts once they are deleted (with
+`--cascade=orphan`, delete the pods and the Job too). Removing
 `spec.bootstrapFromSnapshot` while it waits cancels the bootstrap.
+
+**Re-creating a deleted cluster with the same name.** The StatefulSet
+keeps its PVCs when the cluster is deleted, so the new cluster finds
+`data-<cluster>-0` (and `data-<cluster>-1` and up) with the earlier
+cluster's data. The restore replaces pod-0's data with the snapshot's,
+as the spec asks; `status.bootstrap.message` says it restored over an
+existing volume older than the cluster, with a
+`BootstrapOverExistingVolume` Warning Event. The replicas' PVCs are not
+touched: the first election makes the restored pod-0 the master, and
+the other pods are made its replicas and resync from it. For a clean
+start, delete the earlier cluster's `data-<cluster>-1` and up (or all
+its PVCs) before re-creating the cluster.
 
 This is **not** an in-place restore of a live cluster — that remains out of
 scope (see [ROADMAP.md](ROADMAP.md)).

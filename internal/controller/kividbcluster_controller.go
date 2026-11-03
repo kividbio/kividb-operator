@@ -185,11 +185,12 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.Error(bootErr, "bootstrap reconciliation failed")
 	}
 	if c.Spec.BootstrapFromSnapshot != nil {
+		// The update reads the saved object back into c. Reading it again
+		// would come from the cache, which may not have this write yet: a
+		// bootstrap just set waiting would read as not waiting, and the
+		// statefulset step below would run (issue #43).
 		if statusErr := r.Status().Update(ctx, &c); statusErr != nil {
 			return ctrl.Result{}, fmt.Errorf("updating bootstrap status: %w", statusErr)
-		}
-		if err := r.Get(ctx, req.NamespacedName, &c); err != nil {
-			return ctrl.Result{}, err
 		}
 	}
 
@@ -576,6 +577,13 @@ func (r *KividbClusterReconciler) applyStatefulSet(ctx context.Context, c *kivid
 	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: c.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
 		creating := sts.CreationTimestamp.IsZero()
+		if sts.ResourceVersion != "" && bootstrapBlocksSTS(c) && !metav1.IsControlledBy(sts, c) {
+			// Not this cluster's (by UID): left from an earlier cluster with
+			// this name, and running on the volumes the bootstrap restores.
+			// SetControllerReference matches owners by name and would take
+			// it over, and the garbage collector would then keep it.
+			return fmt.Errorf("StatefulSet %s is not this cluster's but an earlier cluster's with this name; not updated while spec.bootstrapFromSnapshot waits to restore", sts.Name)
+		}
 		sts.Labels = desired.Labels
 		sts.Spec.Replicas = desired.Spec.Replicas
 		sts.Spec.Template = desired.Spec.Template
