@@ -290,12 +290,17 @@ If you need to rewrite an existing PVC by hand:
 
 3. **Copy the files onto the PVC** (short-lived debug pod mounting
    `data-<sts>-0`): both `dump.kdb` and `appendonly.aof`. First delete the
-   volume's own `dump.kdb.gen`, `dump.kdb.repl`, `dump.kdb.clean`,
-   `appendonly.aof.prev`, `appendonly.aof.prev.len` and
-   `appendonly.aof.rewrite.tmp`. They belong to the data being replaced: a
-   stale `dump.kdb.gen` makes the engine refuse to start, or skip the
-   archive's `appendonly.aof`, and a stale `appendonly.aof.prev` is replayed
-   on top of the restored dump.
+   volume's own engine files, all but `dump.kdb`: `appendonly.aof` and every
+   `appendonly.aof.*` (`.prev`, `.prev.len`, `.rewrite.tmp`, `.tmp`), every
+   `dump.kdb.*` (`dump.kdb.gen`, `dump.kdb.repl`, `dump.kdb.clean` and temp
+   files), every `superseded.*` (logs engine 1.2.1 kept aside) and
+   `dump.rdb`. They belong to the data being replaced: a stale
+   `dump.kdb.gen` makes the engine refuse to start, or skip the archive's
+   `appendonly.aof`; without `dump.kdb.gen`, a stale `appendonly.aof` (one
+   the archive does not replace, or one still there when the restored dump
+   is in place) or `appendonly.aof.prev` is replayed on top of the restored
+   dump; and the engine names each `superseded.*` file at every start, with
+   how to apply its writes. The restore Job removes the same files.
 
    The archive's `appendonly.aof` holds the writes made while the snapshot was
    taken. The engine replays it only if it runs with the append-only file on

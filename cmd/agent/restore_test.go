@@ -336,7 +336,7 @@ func TestExtractSnapshot_CreateTempFailureNamesTheFile(t *testing.T) {
 func TestExtractSnapshot_RenameFailureAfterRenameLogsPartial(t *testing.T) {
 	dir := t.TempDir()
 	logged := restoreTestCaptureLog(t)
-	restoreTestBlockPath(t, filepath.Join(dir, "appendonly.aof"))
+	restoreTestStopRenameOf(t, filepath.Join(dir, "appendonly.aof"))
 
 	archive := restoreTestArchive(t,
 		restoreTestEntry{"dump.kdb", []byte("new dump")},
@@ -349,14 +349,21 @@ func TestExtractSnapshot_RenameFailureAfterRenameLogsPartial(t *testing.T) {
 	}
 }
 
+// An earlier cluster's log that cannot be removed stops the restore before
+// the restored dump goes in: the restored dump is never left with the old
+// log, which the engine would replay over it with dump.kdb.gen gone (#58).
 func TestExtractSnapshot_StaleRemovalFailureLogsPartial(t *testing.T) {
 	dir := t.TempDir()
 	logged := restoreTestCaptureLog(t)
+	restoreTestWriteFile(t, filepath.Join(dir, "dump.kdb"), []byte("old dump"), 0o660)
+	restoreTestWriteFile(t, filepath.Join(dir, "dump.kdb.gen"), []byte("old gen"), 0o660)
 	restoreTestBlockPath(t, filepath.Join(dir, "appendonly.aof"))
 
 	archive := restoreTestArchive(t, restoreTestEntry{"dump.kdb", []byte("new dump")})
 	err := extractSnapshotTarGz(bytes.NewReader(archive), dir)
 	restoreTestAssertErr(t, err, "removing "+filepath.Join(dir, "appendonly.aof"))
+	restoreTestAssertFile(t, filepath.Join(dir, "dump.kdb"), []byte("old dump"))
+	restoreTestAssertGone(t, filepath.Join(dir, "dump.kdb.gen"))
 	if !strings.Contains(logged.String(), "partial restore") {
 		t.Fatalf("log %q does not say the volume holds a partial restore", logged)
 	}
@@ -401,8 +408,9 @@ func TestDirSyncUnsupported(t *testing.T) {
 }
 
 // restoreTestKeptVolume fills dir the way an earlier cluster's engine left
-// a kept PVC: its dump and log, the state files that describe them, and its
-// lock file. It returns every file name and the content each was given.
+// a kept PVC: its dump and log, the state files that describe them, the
+// logs engine 1.2.1 kept aside, temp files, a Redis dump, and its lock
+// file. It returns every file name and the content each was given.
 func restoreTestKeptVolume(t *testing.T, dir string) map[string][]byte {
 	t.Helper()
 	old := map[string][]byte{
@@ -410,7 +418,15 @@ func restoreTestKeptVolume(t *testing.T, dir string) map[string][]byte {
 		"appendonly.aof": []byte("old log"),
 		"kividb.lock":    nil,
 	}
-	for _, name := range engineStateFiles {
+	others := []string{
+		"superseded.1762000000000.0.appendonly.aof",
+		"superseded.1762000000000.1.appendonly.aof.prev",
+		"appendonly.aof.tmp",
+		"dump.kdb.1234.0.tmp",
+		"dump.kdb.gen.tmp",
+		"dump.rdb",
+	}
+	for _, name := range append(others, engineStateFiles...) {
 		old[name] = []byte("old " + name)
 	}
 	for name, body := range old {
@@ -474,7 +490,7 @@ func TestExtractSnapshot_TruncatedArchiveKeepsEngineStateFiles(t *testing.T) {
 func TestExtractSnapshot_StateFileRemovalFailureKeepsOldDump(t *testing.T) {
 	dir := t.TempDir()
 	logged := restoreTestCaptureLog(t)
-	restoreTestKeptVolume(t, dir)
+	old := restoreTestKeptVolume(t, dir)
 	blocked := filepath.Join(dir, "appendonly.aof.prev.len")
 	if err := os.Remove(blocked); err != nil {
 		t.Fatal(err)
@@ -491,9 +507,183 @@ func TestExtractSnapshot_StateFileRemovalFailureKeepsOldDump(t *testing.T) {
 	restoreTestAssertFile(t, filepath.Join(dir, "appendonly.aof"), []byte("old log"))
 	restoreTestAssertGone(t, filepath.Join(dir, "dump.kdb.gen"))
 	restoreTestAssertGone(t, filepath.Join(dir, "appendonly.aof.prev"))
-	restoreTestAssertDir(t, dir, "dump.kdb", "appendonly.aof", "kividb.lock",
-		"appendonly.aof.prev.len", "appendonly.aof.rewrite.tmp", "dump.kdb.repl", "dump.kdb.clean")
+	var left []string
+	for name := range old {
+		if name != "dump.kdb.gen" && name != "appendonly.aof.prev" {
+			left = append(left, name)
+		}
+	}
+	restoreTestAssertDir(t, dir, left...)
 	if !strings.Contains(logged.String(), "partial restore") {
 		t.Fatalf("log %q does not say the volume holds a partial restore", logged)
 	}
+}
+
+// restoreTestStopRenameOf makes the restore's rename of dest fail, the way a
+// Job killed between two renames stops, until the test ends.
+func restoreTestStopRenameOf(t *testing.T, dest string) {
+	t.Helper()
+	restoreTestHookRename(t, func(_, to string) error {
+		if to == dest {
+			return &fs.PathError{Op: "rename", Path: to, Err: syscall.EIO}
+		}
+		return nil
+	})
+}
+
+// restoreTestHookRename calls before ahead of each rename of a restored
+// file into place; an error from it is that rename's.
+func restoreTestHookRename(t *testing.T, before func(from, to string) error) {
+	t.Helper()
+	t.Cleanup(func() { restoreRename = os.Rename })
+	restoreRename = func(from, to string) error {
+		if err := before(from, to); err != nil {
+			return err
+		}
+		return os.Rename(from, to)
+	}
+}
+
+// restoreTestNames lists dataDir's file names, sorted.
+func restoreTestNames(t *testing.T, dataDir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+func TestEarlierEngineFile(t *testing.T) {
+	for name, want := range map[string]bool{
+		"appendonly.aof":                                 true,
+		"appendonly.aof.tmp":                             true,
+		"appendonly.aof.manifest":                        true,
+		"appendonly.aof.1.base.kdb":                      true,
+		"appendonly.aof.2.incr.aof":                      true,
+		"superseded.1762000000000.0.appendonly.aof":      true,
+		"superseded.1762000000000.1.appendonly.aof.prev": true,
+		"dump.kdb.1234.0.tmp":                            true,
+		"dump.kdb.gen.tmp":                               true,
+		"dump.rdb":                                       true,
+		"dump.kdb":                                       false,
+		"kividb.lock":                                    false,
+		"lost+found":                                     false,
+		".restore-dump.kdb-123":                          false,
+		".restore-appendonly.aof-456":                    false,
+		"my-appendonly.aof":                              false,
+	} {
+		if got := earlierEngineFile(name); got != want {
+			t.Errorf("earlierEngineFile(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// Issue #58: with dump.kdb.gen gone, which the restore removes, engine 1.2.0
+// and 1.2.1 both replay appendonly.aof over dump.kdb, and 1.2.1 keeps the
+// logs it left out as superseded.* files that it never removes. Every log of
+// the earlier cluster's, and the engine's other leftovers, go: the volume
+// holds the snapshot's dump, the unheld lock file, and what is not the
+// engine's (lost+found).
+func TestExtractSnapshot_RemovesEveryFileOfTheEarlierEngine(t *testing.T) {
+	dir := t.TempDir()
+	restoreTestKeptVolume(t, dir)
+	if err := os.Mkdir(filepath.Join(dir, "lost+found"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := restoreTestArchive(t, restoreTestEntry{"dump.kdb", []byte("new dump")})
+	if err := extractSnapshotTarGz(bytes.NewReader(archive), dir); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	restoreTestAssertFile(t, filepath.Join(dir, "dump.kdb"), []byte("new dump"))
+	restoreTestAssertDir(t, dir, "dump.kdb", "kividb.lock", "lost+found")
+}
+
+// The restored files are renamed in only once every file of the earlier
+// cluster's is gone, so a Job stopped between any two steps never leaves a
+// restored file next to the earlier cluster's logs or state files; and the
+// restored log goes in only once the restored dump has.
+func TestExtractSnapshot_RestoredFilesNeverBesideTheEarlierLogs(t *testing.T) {
+	dir := t.TempDir()
+	restoreTestKeptVolume(t, dir)
+	var renamed []string
+	restoreTestHookRename(t, func(_, to string) error {
+		for _, name := range restoreTestNames(t, dir) {
+			if earlierEngineFile(name) {
+				t.Errorf("%s is still there when %s is renamed in", name, filepath.Base(to))
+			}
+		}
+		if filepath.Base(to) == "appendonly.aof" {
+			restoreTestAssertFile(t, filepath.Join(dir, "dump.kdb"), []byte("new dump"))
+		}
+		renamed = append(renamed, filepath.Base(to))
+		return nil
+	})
+
+	archive := restoreTestArchive(t,
+		restoreTestEntry{"appendonly.aof", []byte("new log")},
+		restoreTestEntry{"dump.kdb", []byte("new dump")},
+	)
+	if err := extractSnapshotTarGz(bytes.NewReader(archive), dir); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if len(renamed) != 2 || renamed[0] != "dump.kdb" || renamed[1] != "appendonly.aof" {
+		t.Fatalf("renamed %q, want dump.kdb then appendonly.aof", renamed)
+	}
+	restoreTestAssertFile(t, filepath.Join(dir, "appendonly.aof"), []byte("new log"))
+	restoreTestAssertDir(t, dir, "dump.kdb", "appendonly.aof", "kividb.lock")
+}
+
+// A Job stopped after the restored dump went in, and before the restored
+// log did, leaves the restored dump with no log at all: not the earlier
+// cluster's, which the engine would replay over it. Its retry, and any run
+// after that, end with the snapshot's files only.
+func TestExtractSnapshot_RetryAfterStoppedJobEndsTheSame(t *testing.T) {
+	dir := t.TempDir()
+	restoreTestKeptVolume(t, dir)
+	archive := restoreTestArchive(t,
+		restoreTestEntry{"dump.kdb", []byte("new dump")},
+		restoreTestEntry{"appendonly.aof", []byte("new log")},
+	)
+
+	restoreTestStopRenameOf(t, filepath.Join(dir, "appendonly.aof"))
+	if err := extractSnapshotTarGz(bytes.NewReader(archive), dir); err == nil {
+		t.Fatal("extract with the log's rename stopped succeeded")
+	}
+	restoreTestAssertFile(t, filepath.Join(dir, "dump.kdb"), []byte("new dump"))
+	restoreTestAssertGone(t, filepath.Join(dir, "appendonly.aof"))
+	restoreTestAssertDir(t, dir, "dump.kdb", "kividb.lock")
+	// A killed Job does not get to remove its temp file.
+	restoreTestWriteFile(t, filepath.Join(dir, ".restore-appendonly.aof-999"), []byte("new log"), 0o600)
+
+	restoreRename = os.Rename
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := extractSnapshotTarGz(bytes.NewReader(archive), dir); err != nil {
+			t.Fatalf("extract, run %d after the stopped one: %v", attempt+1, err)
+		}
+		restoreTestAssertFile(t, filepath.Join(dir, "dump.kdb"), []byte("new dump"))
+		restoreTestAssertFile(t, filepath.Join(dir, "appendonly.aof"), []byte("new log"))
+		restoreTestAssertDir(t, dir, "dump.kdb", "appendonly.aof", "kividb.lock")
+	}
+}
+
+// An archive with a log and no dump: the engine would load a Redis dump.rdb
+// in place of the missing dump.kdb and replay the restored log over it.
+func TestExtractSnapshot_LogOnlyArchiveRemovesEveryDump(t *testing.T) {
+	dir := t.TempDir()
+	restoreTestWriteFile(t, filepath.Join(dir, "dump.kdb"), []byte("old dump"), 0o660)
+	restoreTestWriteFile(t, filepath.Join(dir, "dump.rdb"), []byte("old redis dump"), 0o660)
+
+	archive := restoreTestArchive(t, restoreTestEntry{"appendonly.aof", []byte("new log")})
+	if err := extractSnapshotTarGz(bytes.NewReader(archive), dir); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	restoreTestAssertFile(t, filepath.Join(dir, "appendonly.aof"), []byte("new log"))
+	restoreTestAssertDir(t, dir, "appendonly.aof")
 }

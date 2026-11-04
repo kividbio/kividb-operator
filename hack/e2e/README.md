@@ -91,6 +91,7 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 | `SKIP_SNAPSHOT=1` | `06-snapshot-chaos.sh` |
 | `SKIP_MONITOR=1` | `07-monitor-memory.sh` |
 | `SKIP_RESP_ACL=1` | `08-resp-acl-select.sh` |
+| `SKIP_RESTORE=1` | `09-restore-over-aof.sh` (also skipped with `SKIP_MINIO=1`: it needs MinIO) |
 
 Example: re-run failover only against an already-deployed operator:
 
@@ -112,6 +113,7 @@ SKIP_DEPLOY=1 SKIP_PROMETHEUS=1 SKIP_MINIO=1 SKIP_COMPAT=1 \
 | `06-snapshot-chaos.sh` | Minute CronJob, kill source / Job pod, MinIO object check |
 | `07-monitor-memory.sh` | Agent `/metrics` under load |
 | `08-resp-acl-select.sh` | RESP3 HELLO, ACL deny smoke, SELECT on replica, single-master failover |
+| `09-restore-over-aof.sh` | `bootstrapFromSnapshot` over a kept pod-0 volume whose `appendonly.aof` holds writes the snapshot lacks, with `superseded.*` and temp files: the dataset equals the snapshot's, and none of those files are left (#58) |
 
 | `07-monitor-memory.sh` | Agent `/metrics`, memory/commands under load, optional Prom targets |
 
