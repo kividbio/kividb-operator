@@ -232,8 +232,15 @@ spec:
       name: my-cluster-backups-20260721t000004z
 ```
 
-Watch progress on `status.bootstrap` / cluster conditions (`Bootstrapping`
-until the Job finishes). Once `status.bootstrap.completed` is true, the
+Watch progress on `status.bootstrap` and the `Bootstrapped` condition:
+`False` until the restore Job succeeds, with a reason that says what the
+bootstrap waits for or does (`WaitingForEarlierCluster`,
+`WaitingForVolumeDeletion`, `Restoring`, `RestoreRetrying`,
+`RestoreFailed`), then `True`. A restore pod that fails is retried once:
+the bootstrap stays `InProgress`, its message says which attempt failed
+and why, with a `BootstrapRetrying` Event, and it is `Failed` (a
+`BootstrapFailed` Event) only once the Job has given up.
+Once `status.bootstrap.completed` is true, the
 field is ignored on later reconciles (immutable bootstrap). The field can
 only be set when the cluster is created: the API server refuses it on an
 existing cluster, and a cluster that is already running skips it with a
@@ -243,7 +250,10 @@ cluster (still being garbage-collected, or orphaned with
 `--cascade=orphan`), the bootstrap waits in `Pending` with a
 `BootstrapWaiting` Event and starts once they are deleted (with
 `--cascade=orphan`, delete the pods and the Job too). Removing
-`spec.bootstrapFromSnapshot` while it waits cancels the bootstrap.
+`spec.bootstrapFromSnapshot` while it waits cancels the bootstrap. A
+`data-<cluster>-0` PVC that is still being deleted (held by a finalizer,
+say) is waited for too: `status.bootstrap.message` names it, with a
+`BootstrapWaitingForVolume` Event.
 
 **Re-creating a deleted cluster with the same name.** The StatefulSet
 keeps its PVCs when the cluster is deleted, so the new cluster finds

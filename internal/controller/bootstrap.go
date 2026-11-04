@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -26,6 +28,17 @@ func bootstrapJobName(c *kividbv1alpha1.KividbCluster) string {
 	return c.Name + "-bootstrap"
 }
 
+// BootstrapCondition says whether pod-0's volume was seeded from
+// spec.bootstrapFromSnapshot and, until it is, what the bootstrap is doing
+// or waiting for: reason WaitingForEarlierCluster, WaitingForVolumeDeletion,
+// Pending, Restoring, RestoreRetrying, RestoreFailed; True with Restored or
+// Skipped.
+const BootstrapCondition = "Bootstrapped"
+
+// errEarlierRestoreJob is returned by ensureBootstrapJob for a restore Job
+// with this cluster's name that an earlier cluster with the name made.
+var errEarlierRestoreJob = errors.New("not this cluster's but an earlier cluster's with this name; waiting for it to be deleted")
+
 // reconcileBootstrap seeds pod-0's PVC from spec.bootstrapFromSnapshot
 // before the StatefulSet is allowed to run. Returns shouldBlock=true while
 // bootstrap is incomplete so the caller can skip role reconciliation / keep
@@ -39,9 +52,15 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 	if c.Spec.BootstrapFromSnapshot == nil {
 		if b := c.Status.Bootstrap; b != nil && b.Phase == kividbv1alpha1.BootstrapPending && b.Message == bootstrapWaitMessage {
 			c.Status.Bootstrap = nil // removed while waiting: nothing was restored
+			removeCondition(&c.Status.Conditions, BootstrapCondition)
 		}
 		return false, nil
 	}
+
+	// However the pass ends, the Bootstrapped condition says where the
+	// bootstrap is. reason, when set, is what it waits for or does.
+	var reason string
+	defer func() { setBootstrapCondition(c, reason) }()
 
 	snapName := c.Spec.BootstrapFromSnapshot.SnapshotRef.Name
 	if c.Status.Bootstrap == nil || bootstrapWaiting(c) {
@@ -75,15 +94,8 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 			ourJob = err == nil && !earlier
 		}
 		if earlier {
-			if !bootstrapWaiting(c) {
-				r.event(c, corev1.EventTypeWarning, "BootstrapWaiting",
-					"spec.bootstrapFromSnapshot (%s) waits: StatefulSet %s, its pods or restore Job %s are left from an earlier cluster with this name, and the restore starts once they are deleted", snapName, statefulSetName(c), bootstrapJobName(c))
-			}
-			c.Status.Bootstrap = &kividbv1alpha1.BootstrapStatus{
-				Phase:        kividbv1alpha1.BootstrapPending,
-				SnapshotName: snapName,
-				Message:      bootstrapWaitMessage,
-			}
+			reason = "WaitingForEarlierCluster"
+			r.waitForEarlierCluster(c, snapName)
 			return true, nil
 		}
 		// The bootstrap holds its own StatefulSet at 0 replicas until the
@@ -103,6 +115,7 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 				SnapshotName: snapName,
 				Message:      "skipped: the cluster was already running",
 			}
+			reason = "Skipped"
 			return false, nil
 		}
 	}
@@ -145,12 +158,25 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 		return true, err
 	}
 
-	kept, err := r.ensureBootstrapPVC(ctx, c)
+	kept, deleting, err := r.ensureBootstrapPVC(ctx, c)
 	if err != nil {
 		return true, err
 	}
+	if deleting {
+		// A restore Job started now would have its pod refused the
+		// volume, or restore onto one about to go.
+		reason = "WaitingForVolumeDeletion"
+		r.noteBootstrapWait(ctx, c, snapName, reason,
+			fmt.Sprintf("waiting for PVC %s to finish deleting; the restore starts once it is gone", bootstrapPVCName(c)))
+		return true, nil
+	}
 
 	job, err := r.ensureBootstrapJob(ctx, c, &snap, &snapCfg)
+	if errors.Is(err, errEarlierRestoreJob) {
+		reason = "WaitingForEarlierCluster"
+		r.waitForEarlierCluster(c, snapName)
+		return true, nil
+	}
 	if err != nil {
 		return true, err
 	}
@@ -167,6 +193,7 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 				"spec.bootstrapFromSnapshot (%s)%s; its data is replaced by the snapshot's", snapName, over)
 		}
 	}
+	prevPhase, prevMessage := c.Status.Bootstrap.Phase, c.Status.Bootstrap.Message
 	c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapInProgress
 	c.Status.Bootstrap.SnapshotName = snapName
 	c.Status.Bootstrap.Message = "restore Job running" + over
@@ -181,14 +208,175 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 		log.Info("bootstrap completed", "cluster", c.Name, "snapshot", snapName)
 		return false, nil
 	}
-	if job.Status.Failed > 0 {
+	// A pod that failed is not a failed Job: the Job retries it until
+	// backoffLimit is used up (or activeDeadlineSeconds has passed), and
+	// only then is its JobFailed condition true (issue #54).
+	if failed := jobFailedCondition(job); failed != nil {
+		why := "bootstrap Job failed"
+		if failed.Reason != "" {
+			why += " (" + failed.Reason
+			if failed.Message != "" {
+				why += ": " + failed.Message
+			}
+			why += ")"
+		}
+		if pod := r.lastRestorePodFailure(ctx, c, job); pod != "" {
+			why += "; last " + pod
+		}
 		c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapFailed
-		c.Status.Bootstrap.Error = "bootstrap Job failed; check Job logs"
-		c.Status.Bootstrap.Message = fmt.Sprintf("restore Job %s failed", job.Name)
+		c.Status.Bootstrap.Error = why + "; check Job logs"
+		c.Status.Bootstrap.Message = fmt.Sprintf("restore Job %s failed", job.Name) + over
+		if prevPhase != kividbv1alpha1.BootstrapFailed {
+			r.event(c, corev1.EventTypeWarning, "BootstrapFailed", "restore Job %s failed: %s", job.Name, c.Status.Bootstrap.Error)
+		}
 		return true, fmt.Errorf("bootstrap job failed")
+	}
+	if job.Status.Failed > 0 {
+		attempt := fmt.Sprintf("restore Job attempt %d failed, retrying", job.Status.Failed)
+		msg := attempt
+		if pod := r.lastRestorePodFailure(ctx, c, job); pod != "" {
+			msg += " (" + pod + ")"
+		}
+		reason = "RestoreRetrying"
+		c.Status.Bootstrap.Message = msg + over
+		if !strings.HasPrefix(prevMessage, attempt) {
+			r.event(c, corev1.EventTypeWarning, "BootstrapRetrying", "%s", msg)
+		}
 	}
 
 	return true, nil
+}
+
+// waitForEarlierCluster records that the bootstrap waits for the
+// StatefulSet, pods or restore Job of an earlier cluster with this name to
+// be deleted, with a Warning Event when it starts to.
+func (r *KividbClusterReconciler) waitForEarlierCluster(c *kividbv1alpha1.KividbCluster, snapName string) {
+	if !bootstrapWaiting(c) {
+		r.event(c, corev1.EventTypeWarning, "BootstrapWaiting",
+			"spec.bootstrapFromSnapshot (%s) waits: StatefulSet %s, its pods or restore Job %s are left from an earlier cluster with this name, and the restore starts once they are deleted", snapName, statefulSetName(c), bootstrapJobName(c))
+	}
+	c.Status.Bootstrap = &kividbv1alpha1.BootstrapStatus{
+		Phase:        kividbv1alpha1.BootstrapPending,
+		SnapshotName: snapName,
+		Message:      bootstrapWaitMessage,
+	}
+}
+
+// noteBootstrapWait records in status.bootstrap that the bootstrap waits,
+// and why (issue #55). The message is saved with the status, so the Normal
+// Event and the log line come once, when the wait starts, not every pass.
+func (r *KividbClusterReconciler) noteBootstrapWait(ctx context.Context, c *kividbv1alpha1.KividbCluster, snapName, reason, message string) {
+	b := c.Status.Bootstrap
+	if b.Message != message {
+		r.event(c, corev1.EventTypeNormal, "BootstrapWaitingForVolume", "spec.bootstrapFromSnapshot (%s): %s", snapName, message)
+		logf.FromContext(ctx).Info("bootstrap waiting", "cluster", c.Name, "reason", reason, "message", message)
+	}
+	b.Phase = kividbv1alpha1.BootstrapPending
+	b.SnapshotName = snapName
+	b.Message = message
+	b.Error = ""
+}
+
+// setBootstrapCondition sets the Bootstrapped condition from
+// status.bootstrap. reason, when set, names what a bootstrap that is not
+// done waits for or does.
+func setBootstrapCondition(c *kividbv1alpha1.KividbCluster, reason string) {
+	b := c.Status.Bootstrap
+	if b == nil {
+		removeCondition(&c.Status.Conditions, BootstrapCondition)
+		return
+	}
+	cond := metav1.Condition{
+		Type:               BootstrapCondition,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            b.Message,
+		ObservedGeneration: c.Generation,
+	}
+	switch {
+	case b.Completed:
+		cond.Status = metav1.ConditionTrue
+		if reason != "Skipped" {
+			cond.Reason = "Restored"
+		}
+	case b.Phase == kividbv1alpha1.BootstrapFailed:
+		cond.Reason = "RestoreFailed"
+		if b.Error != "" {
+			cond.Message = b.Message + ": " + b.Error
+		}
+	case reason != "":
+	case b.Phase == kividbv1alpha1.BootstrapInProgress:
+		cond.Reason = "Restoring"
+	default:
+		cond.Reason = "Pending"
+	}
+	setCondition(&c.Status.Conditions, cond)
+}
+
+// jobFailedCondition returns the Job's JobFailed condition if it is true:
+// the Job has given up.
+func jobFailedCondition(job *batchv1.Job) *batchv1.JobCondition {
+	for i := range job.Status.Conditions {
+		if cond := &job.Status.Conditions[i]; cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
+			return cond
+		}
+	}
+	return nil
+}
+
+// lastRestorePodFailure says which of the restore Job's pods failed last
+// and why ("pod x: Error, exit code 1: <its last log line>"), or "" if no
+// failed pod of it is seen.
+func (r *KividbClusterReconciler) lastRestorePodFailure(ctx context.Context, c *kividbv1alpha1.KividbCluster, job *batchv1.Job) string {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(c.Namespace), client.MatchingLabels(bootstrapLabels(c))); err != nil {
+		return ""
+	}
+	var failed []*corev1.Pod
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		ref := metav1.GetControllerOf(p)
+		if p.Status.Phase != corev1.PodFailed || ref == nil || ref.Kind != "Job" || ref.Name != job.Name || (job.UID != "" && ref.UID != job.UID) {
+			continue
+		}
+		failed = append(failed, p)
+	}
+	if len(failed) == 0 {
+		return ""
+	}
+	sort.Slice(failed, func(i, j int) bool {
+		if !failed[i].CreationTimestamp.Equal(&failed[j].CreationTimestamp) {
+			return failed[i].CreationTimestamp.Before(&failed[j].CreationTimestamp)
+		}
+		return failed[i].Name < failed[j].Name
+	})
+	p := failed[len(failed)-1]
+	if p.Status.Reason != "" {
+		return fmt.Sprintf("pod %s: %s", p.Name, joinNonEmpty(p.Status.Reason, lastLine(p.Status.Message)))
+	}
+	for _, cs := range p.Status.ContainerStatuses {
+		if t := cs.State.Terminated; t != nil && t.ExitCode != 0 {
+			return fmt.Sprintf("pod %s: %s", p.Name, joinNonEmpty(fmt.Sprintf("%s, exit code %d", t.Reason, t.ExitCode), lastLine(t.Message)))
+		}
+	}
+	return "pod " + p.Name
+}
+
+// lastLine is the last non-empty line of s, at most 200 bytes of it.
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	line := strings.TrimSpace(lines[len(lines)-1])
+	if len(line) > 200 {
+		line = line[:200] + "..."
+	}
+	return line
+}
+
+func joinNonEmpty(a, b string) string {
+	if b == "" {
+		return a
+	}
+	return a + ": " + b
 }
 
 // bootstrapSnapshotUsable refuses a snapshot a replicated cluster cannot be
@@ -204,26 +392,25 @@ func bootstrapSnapshotUsable(snap *kividbv1alpha1.KividbSnapshot) error {
 
 // ensureBootstrapPVC creates pod-0's PVC if it does not exist. kept is true
 // for one created before this cluster: kept from an earlier cluster with
-// this name, or made beforehand. One being deleted is waited for, with an
-// error that requeues the pass: a restore Job started now would have its
-// pod refused the volume, or restore onto one about to go.
-func (r *KividbClusterReconciler) ensureBootstrapPVC(ctx context.Context, c *kividbv1alpha1.KividbCluster) (kept bool, err error) {
+// this name, or made beforehand. deleting is true for one being deleted,
+// which the caller waits for.
+func (r *KividbClusterReconciler) ensureBootstrapPVC(ctx context.Context, c *kividbv1alpha1.KividbCluster) (kept, deleting bool, err error) {
 	name := bootstrapPVCName(c)
 	var pvc corev1.PersistentVolumeClaim
 	err = r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: name}, &pvc)
 	if err == nil {
 		if pvc.DeletionTimestamp != nil {
-			return false, fmt.Errorf("PVC %s is being deleted: the restore starts once it is gone", name)
+			return false, true, nil
 		}
-		return pvc.CreationTimestamp.Before(&c.CreationTimestamp), nil
+		return pvc.CreationTimestamp.Before(&c.CreationTimestamp), false, nil
 	}
 	if !apierrors.IsNotFound(err) {
-		return false, err
+		return false, false, err
 	}
 
 	qty, err := resource.ParseQuantity(c.Spec.Storage.Size)
 	if err != nil {
-		return false, fmt.Errorf("storage.size: %w", err)
+		return false, false, fmt.Errorf("storage.size: %w", err)
 	}
 	accessModes := c.Spec.Storage.AccessModes
 	if len(accessModes) == 0 {
@@ -251,7 +438,7 @@ func (r *KividbClusterReconciler) ensureBootstrapPVC(ctx context.Context, c *kiv
 	// name), and those are retained when the cluster is deleted. Owning this
 	// one would make pod-0's data the only volume garbage-collected with
 	// the KividbCluster.
-	return false, r.Create(ctx, &pvc)
+	return false, false, r.Create(ctx, &pvc)
 }
 
 func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kividbv1alpha1.KividbCluster, snap *kividbv1alpha1.KividbSnapshot, snapCfg *kividbv1alpha1.KividbSnapshotConfig) (*batchv1.Job, error) {
@@ -262,7 +449,7 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 		if !metav1.IsControlledBy(&existing, c) {
 			// Left from an earlier cluster with this name: its result is
 			// not this cluster's restore.
-			return nil, fmt.Errorf("restore Job %s is not this cluster's but an earlier cluster's with this name; waiting for it to be deleted", name)
+			return nil, fmt.Errorf("restore Job %s: %w", name, errEarlierRestoreJob)
 		}
 		return &existing, nil
 	}
@@ -301,6 +488,9 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 						Name:            "restore",
 						Image:           agentImage(c),
 						ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
+						// The end of the log of a failed restore is its
+						// termination message, which status.bootstrap quotes.
+						TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 						Args: []string{
 							"restore-from-s3",
 							"--endpoint", snapCfg.Spec.S3.Endpoint,

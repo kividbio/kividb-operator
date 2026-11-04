@@ -691,6 +691,9 @@ spec:
     streams the writes made meanwhile, pauses writes for an instant and
     hands the slots over; clients never see an `ASK`. The source keeps
     serving the slots until then.
+  - **Write load:** on engine 1.2.0, change the shard count only while
+    writes are light, or pause them: a move under heavy writes can lose
+    some (kividbio/kividb#331, fixed in engine 1.2.1).
   - **Failures:** a move that fails leaves the slots with the source,
     and is tried again after 30 s (`status.cluster.rebalance.lastError`,
     a `SlotMoveFailed` Event). If the destination restarts during a move,
@@ -808,7 +811,10 @@ status:
 ```
 
 Other conditions come and go with what they report: `RolloutProgressing`,
-`ShardSwitchover`, `ExternallyAccessible`, and, in a sharded cluster,
+`ShardSwitchover`, `ExternallyAccessible`, `Bootstrapped` (a cluster with
+`bootstrapFromSnapshot`, see
+[BACKUP_RESTORE.md](BACKUP_RESTORE.md#supported-bootstrap-a-new-cluster-from-a-snapshot-040)),
+and, in a sharded cluster,
 `MasterRestartedEmpty` (reason `FailingOver`, `Stalled`, `FailedOver` or
 `DataLost`) for 10 minutes after a shard master came back with less than
 its replica held. A sharded cluster's `status.pods[]` also carry `keys`,
