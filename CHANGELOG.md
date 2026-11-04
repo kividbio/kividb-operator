@@ -6,6 +6,27 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A restore over a kept volume could mix the snapshot with the earlier
+  cluster's append-only file** (#58). The restore Job removes the earlier
+  cluster's `dump.kdb.gen`, and without it engine 1.2.0 and 1.2.1 both
+  replay `appendonly.aof` over `dump.kdb`. The Job removed the earlier
+  cluster's `appendonly.aof` only after it had renamed the restored
+  `dump.kdb` in, so a Job stopped between the two (killed, evicted, or a
+  removal that failed) left the restored dump with the earlier cluster's
+  log. A cluster started on that volume, once `spec.bootstrapFromSnapshot`
+  was removed after a failed bootstrap, came up with the writes of both.
+  Every file of the earlier cluster's engine now goes before a restored
+  file takes its name: `appendonly.aof` and every `appendonly.aof.*`,
+  every `dump.kdb.*` (its state and temp files), `dump.rdb`, and the
+  `superseded.*` logs that engine 1.2.1 keeps aside. The engine never
+  removes those: they held the volume's space, and every start named
+  them with how to apply their writes. A Job stopped part-way now leaves
+  what is left of the earlier cluster's files, or part of the snapshot,
+  never both, and its retry ends with the snapshot's files only. The
+  manual restore in `docs/BACKUP_RESTORE.md` removes the same files.
+
 ## [0.7.0] - 2026-11-04
 
 Sharded clusters (`spec.shards`). The default engine is kividb **1.2.0**.
