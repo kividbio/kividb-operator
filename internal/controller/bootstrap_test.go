@@ -582,8 +582,14 @@ func TestBootstrapJobOfAnotherClusterIsNotUsed(t *testing.T) {
 	r := shardedReconciler(t, append(objs, c, earlierBootstrapJob(c))...)
 
 	block, err := r.reconcileBootstrap(ctx, c)
-	if !block || err == nil || c.Status.Bootstrap.Completed {
-		t.Fatalf("block %v, err %v, status %+v; want blocked, not completed", block, err, c.Status.Bootstrap)
+	if !block || err != nil || c.Status.Bootstrap.Completed || !bootstrapWaiting(c) {
+		t.Fatalf("block %v, err %v, status %+v; want blocked, waiting for the earlier cluster's Job", block, err, c.Status.Bootstrap)
+	}
+	if cond := findCondition(c.Status.Conditions, BootstrapCondition); cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "WaitingForEarlierCluster" {
+		t.Fatalf("Bootstrapped condition %+v; want False, WaitingForEarlierCluster", cond)
+	}
+	if ev := events(r); strings.Count(ev, "Warning BootstrapWaiting") != 1 {
+		t.Fatalf("events:\n%s", ev)
 	}
 }
 
@@ -779,7 +785,9 @@ func TestBootstrapCompletesWithoutASkipThroughConflictsAndStaleReads(t *testing.
 }
 
 // A PVC being deleted is not restored onto: the bootstrap waits, with no
-// restore Job, until it is gone, then creates pod-0's PVC again.
+// restore Job, until it is gone, then creates pod-0's PVC again. The wait
+// shows in status.bootstrap and the Bootstrapped condition, with one Normal
+// Event, not only in the operator's log (issue #55).
 func TestBootstrapWaitsForAPVCBeingDeleted(t *testing.T) {
 	ctx := context.Background()
 	c, objs := bootstrapFixture("again")
@@ -788,15 +796,32 @@ func TestBootstrapWaitsForAPVCBeingDeleted(t *testing.T) {
 	going := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: bootstrapPVCName(c), Namespace: c.Namespace,
 		DeletionTimestamp: &now, Finalizers: []string{"kubernetes.io/pvc-protection"}}}
 	r := shardedReconciler(t, append(objs, c, going)...)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)}
 	jobKey := types.NamespacedName{Namespace: c.Namespace, Name: bootstrapJobName(c)}
 
-	block, err := r.reconcileBootstrap(ctx, c)
-	if !block || err == nil || !strings.Contains(err.Error(), "being deleted") {
-		t.Fatalf("block %v, err %v; want blocked on the PVC being deleted", block, err)
+	for i := 0; i < 3; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
 	}
 	var job batchv1.Job
 	if err := r.Get(ctx, jobKey, &job); !apierrors.IsNotFound(err) {
 		t.Fatalf("restore Job: err %v; want none while the PVC is being deleted", err)
+	}
+	var got kividbv1alpha1.KividbCluster
+	if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := "waiting for PVC data-again-0 to finish deleting"
+	if b := got.Status.Bootstrap; b == nil || b.Phase != kividbv1alpha1.BootstrapPending || !strings.Contains(b.Message, want) {
+		t.Fatalf("bootstrap status %+v; want Pending, saying %q", b, want)
+	}
+	cond := findCondition(got.Status.Conditions, BootstrapCondition)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "WaitingForVolumeDeletion" || !strings.Contains(cond.Message, want) {
+		t.Fatalf("Bootstrapped condition %+v; want False, WaitingForVolumeDeletion, saying %q", cond, want)
+	}
+	if ev := events(r); strings.Count(ev, "Normal BootstrapWaitingForVolume") != 1 || !strings.Contains(ev, want) {
+		t.Fatalf("events (want one BootstrapWaitingForVolume over three passes):\n%s", ev)
 	}
 
 	// The last finalizer goes, and with it the PVC.
@@ -809,7 +834,7 @@ func TestBootstrapWaitsForAPVCBeingDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := r.reconcileBootstrap(ctx, c); err != nil {
+	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("after the PVC is gone: %v", err)
 	}
 	var fresh corev1.PersistentVolumeClaim
@@ -818,5 +843,137 @@ func TestBootstrapWaitsForAPVCBeingDeleted(t *testing.T) {
 	}
 	if err := r.Get(ctx, jobKey, &job); err != nil {
 		t.Fatalf("restore Job: %v; want it created once the PVC is gone", err)
+	}
+	if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	if b := got.Status.Bootstrap; b == nil || b.Phase != kividbv1alpha1.BootstrapInProgress {
+		t.Fatalf("bootstrap status %+v; want InProgress", b)
+	}
+	if cond := findCondition(got.Status.Conditions, BootstrapCondition); cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "Restoring" {
+		t.Fatalf("Bootstrapped condition %+v; want False, Restoring", cond)
+	}
+}
+
+// A restore Job whose pod failed while it has a retry left has not failed:
+// status.bootstrap stays InProgress and says which attempt failed and why
+// (issue #54). Only the Job's JobFailed condition fails the bootstrap.
+func TestBootstrapRestoreJobRetryIsNotAFailure(t *testing.T) {
+	ctx := context.Background()
+	c, objs := bootstrapFixture("retry")
+	r := shardedReconciler(t, append(objs, c)...)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)}
+	jobKey := types.NamespacedName{Namespace: c.Namespace, Name: bootstrapJobName(c)}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	var job batchv1.Job
+	if err := r.Get(ctx, jobKey, &job); err != nil {
+		t.Fatal(err)
+	}
+	if got := job.Spec.Template.Spec.Containers[0].TerminationMessagePolicy; got != corev1.TerminationMessageFallbackToLogsOnError {
+		t.Fatalf("restore container terminationMessagePolicy %q", got)
+	}
+	// The first pod fails; the Job has a retry left (backoffLimit 1).
+	job.Status.Failed = 1
+	job.Status.Active = 1
+	if err := r.Status().Update(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "retry-bootstrap-a1b2c", Namespace: c.Namespace, Labels: bootstrapLabels(c),
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(&job, batchv1.SchemeGroupVersion.WithKind("Job"))}},
+		Status: corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{Name: "restore",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error",
+				Message: "downloading rep/rep-0.tar.gz\nrestore-from-s3: rename dump.kdb: permission denied\n"}}}}},
+	}
+	if err := r.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	var got kividbv1alpha1.KividbCluster
+	if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	b := got.Status.Bootstrap
+	if b == nil || b.Phase != kividbv1alpha1.BootstrapInProgress || b.Completed || b.Error != "" ||
+		!strings.Contains(b.Message, "restore Job attempt 1 failed, retrying") ||
+		!strings.Contains(b.Message, "pod retry-bootstrap-a1b2c: Error, exit code 1: restore-from-s3: rename dump.kdb: permission denied") {
+		t.Fatalf("bootstrap status %+v; want InProgress, retrying, with the pod's reason", b)
+	}
+	cond := findCondition(got.Status.Conditions, BootstrapCondition)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "RestoreRetrying" {
+		t.Fatalf("Bootstrapped condition %+v; want False, RestoreRetrying", cond)
+	}
+	if ev := events(r); strings.Count(ev, "Warning BootstrapRetrying") != 1 || strings.Contains(ev, "BootstrapFailed") {
+		t.Fatalf("events (want one BootstrapRetrying, no BootstrapFailed):\n%s", ev)
+	}
+
+	// The retry fails too: backoffLimit is used up, and the Job has failed.
+	if err := r.Get(ctx, jobKey, &job); err != nil {
+		t.Fatal(err)
+	}
+	job.Status.Failed = 2
+	job.Status.Active = 0
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+		Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit"}}
+	if err := r.Status().Update(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	b = got.Status.Bootstrap
+	if b == nil || b.Phase != kividbv1alpha1.BootstrapFailed || b.Completed ||
+		!strings.Contains(b.Error, "BackoffLimitExceeded") || !strings.Contains(b.Error, "permission denied") {
+		t.Fatalf("bootstrap status %+v; want Failed, with the Job's and the pod's reasons", b)
+	}
+	cond = findCondition(got.Status.Conditions, BootstrapCondition)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "RestoreFailed" {
+		t.Fatalf("Bootstrapped condition %+v; want False, RestoreFailed", cond)
+	}
+	if ev := events(r); strings.Count(ev, "Warning BootstrapFailed") != 1 {
+		t.Fatalf("events (want one BootstrapFailed):\n%s", ev)
+	}
+}
+
+// The Bootstrapped condition turns True once the restore Job succeeds.
+func TestBootstrapConditionIsTrueOnceRestored(t *testing.T) {
+	ctx := context.Background()
+	c, objs := bootstrapFixture("done")
+	r := shardedReconciler(t, append(objs, c)...)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	var job batchv1.Job
+	if err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: bootstrapJobName(c)}, &job); err != nil {
+		t.Fatal(err)
+	}
+	job.Status.Succeeded = 1
+	if err := r.Status().Update(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	var got kividbv1alpha1.KividbCluster
+	if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	if cond := findCondition(got.Status.Conditions, BootstrapCondition); cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != "Restored" {
+		t.Fatalf("Bootstrapped condition %+v; want True, Restored", cond)
 	}
 }
