@@ -59,6 +59,13 @@ CRDs are attached to the GitHub Release.
   does not accept one. Every cluster that references it holds back its
   apply steps until it is fixed, though failover still runs. Remove the
   prefix before upgrading.
+- **Reshard only under light write load.** Engine 1.2.0 can lose writes
+  while slots move between shards under heavy writes
+  (kividbio/kividb#331). That covers changing `spec.shards` (scaling in
+  or out, which uses `CLUSTER MIGRATION IMPORT`) and `redis-cli --cluster
+  reshard`. It was seen only under heavy CPU contention. Until engine
+  1.2.1, change `spec.shards` while writes are light, or pause writes.
+  Engine 1.2.1 fixes it: set `spec.image` to it once it is released.
 
 ### Security
 
@@ -224,7 +231,22 @@ CRDs are attached to the GitHub Release.
   `status.bootstrap` and with a `BootstrapOverExistingVolume` Warning.
   (#46, by [SaiPisey2](https://github.com/SaiPisey2))
   A pod-0 PVC that is being deleted is waited for too: the restore Job
-  starts once it is gone, on a new one.
+  starts once it is gone, on a new one. The wait shows in
+  `status.bootstrap.message` ("waiting for PVC data-<cluster>-0 to finish
+  deleting") and in a Normal `BootstrapWaitingForVolume` Event, not only in
+  the operator's log (#55). A new condition, `Bootstrapped`, says where a
+  bootstrap is: `False` with reason `WaitingForEarlierCluster`,
+  `WaitingForVolumeDeletion`, `Restoring`, `RestoreRetrying` or
+  `RestoreFailed`, and `True` once restored (or skipped).
+- **`status.bootstrap` said `Failed` while the restore Job still had a
+  retry left** (#54, also in 0.6.x). A failed pod was taken for a failed
+  Job, and the retry then went on to complete. The bootstrap now fails
+  only once the Job's `JobFailed` condition is true (its `backoffLimit`
+  used up or its deadline passed), with a `BootstrapFailed` Warning Event.
+  Until then it stays `InProgress`, and the message says "restore Job
+  attempt N failed, retrying" with the failed pod's reason, with a
+  `BootstrapRetrying` Warning Event per attempt. The restore container's
+  last log lines are its termination message, so the reason includes them.
 - **A bootstrap onto a kept PVC that still held the engine's `dump.kdb`
   failed and destroyed that file** (#44, also in 0.6.x). The restore Job
   runs as a different UID from the engine: it overwrote the file, then
