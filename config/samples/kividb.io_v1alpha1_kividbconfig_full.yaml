@@ -16,8 +16,7 @@ spec:
     slowlog-log-slower-than: "10000"
     # Do not set "replicaof", "port" or "aclfile" here -- the operator
     # manages those directives itself.
-  # TLS is left disabled in this sample; see
+  # TLS stays off in this sample: there is no tls block (a tls block
+  # always needs tls.certSecretRef, even with enabled: false). See
   # kividb.io_v1alpha1_kividbconfig_tls.yaml for a TLS-enabled example
   # (pairs with a KividbCluster whose spec.variant is "tls" or "full").
-  tls:
-    enabled: false

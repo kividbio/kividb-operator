@@ -6,8 +6,24 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **An OLM bundle for OperatorHub.io.** `make bundle VERSION=… IMG=…` builds
+  the bundle from `config/manifests` (operator-sdk v1.36.0, kustomize v5.4.3),
+  and `make scorecard` runs the scorecard tests. The bundle validates for
+  Kubernetes 1.27, 1.32 and 1.33 and installs through OLM 0.28.0 in
+  AllNamespaces mode.
+
 ### Fixed
 
+- **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
+  `config/crd/kustomization.yaml` did not list it, so the documented install
+  could not run `KividbDbOps` operations. After applying it again, restart
+  the manager (`kubectl rollout restart`): it looks for the CRD once, at
+  start-up.
+- **The full `KividbConfig` sample was rejected by its own CRD.** It set
+  `tls: {enabled: false}`, and the CRD requires `certSecretRef` whenever `tls`
+  is present. The sample now leaves `tls` out.
 - **A restore over a kept volume could mix the snapshot with the earlier
   cluster's append-only file** (#58). The restore Job removes the earlier
   cluster's `dump.kdb.gen`, and without it engine 1.2.0 and 1.2.1 both

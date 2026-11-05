@@ -7,3 +7,4 @@ resources:
   - kividb.io_v1alpha1_kividbsnapshotconfig_full.yaml
   - kividb.io_v1alpha1_kividbcluster_full.yaml
   - kividb.io_v1alpha1_kividbcluster_dev-minio.yaml
+  - kividb.io_v1alpha1_kividbdbops_restart.yaml

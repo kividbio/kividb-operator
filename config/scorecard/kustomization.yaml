@@ -1,0 +1,20 @@
+# Scorecard configuration, copied into the bundle as
+# tests/scorecard/config.yaml by `operator-sdk generate bundle`.
+# Run it against a cluster with `make scorecard`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - bases/config.yaml
+patches:
+  - path: patches/basic.config.yaml
+    target:
+      group: scorecard.operatorframework.io
+      version: v1alpha3
+      kind: Configuration
+      name: config
+  - path: patches/olm.config.yaml
+    target:
+      group: scorecard.operatorframework.io
+      version: v1alpha3
+      kind: Configuration
+      name: config

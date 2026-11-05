@@ -1,0 +1,13 @@
+# A rolling restart of the pods of the kividb-minimal cluster, one pod at
+# a time. Apply it again under a new name to restart again.
+apiVersion: kividb.io/v1alpha1
+kind: KividbDbOps
+metadata:
+  name: kividb-minimal-restart
+  namespace: default
+spec:
+  clusterRef:
+    name: kividb-minimal
+  op: restart
+  restart:
+    method: InPlace
