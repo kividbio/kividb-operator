@@ -18,11 +18,12 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install
-  could not run `KividbDbOps` operations.
+  could not run `KividbDbOps` operations. After applying it again, restart
+  the manager (`kubectl rollout restart`): it looks for the CRD once, at
+  start-up.
 - **The full `KividbConfig` sample was rejected by its own CRD.** It set
   `tls: {enabled: false}`, and the CRD requires `certSecretRef` whenever `tls`
   is present. The sample now leaves `tls` out.
-
 - **A restore over a kept volume could mix the snapshot with the earlier
   cluster's append-only file** (#58). The restore Job removes the earlier
   cluster's `dump.kdb.gen`, and without it engine 1.2.0 and 1.2.1 both

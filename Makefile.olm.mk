@@ -1,5 +1,4 @@
-# OLM bundle targets for kividb-operator. Paste into the Makefile before
-# the "Misc" section, or keep this file and add `include Makefile.olm.mk`.
+# OLM bundle targets for kividb-operator, included from the Makefile.
 #
 #   make bundle      generate bundle/ (manifests, metadata, tests) for VERSION
 #   make scorecard   run the bundle's scorecard tests against the current cluster

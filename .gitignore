@@ -25,3 +25,6 @@ Thumbs.db
 kubeconfig*
 *.local.yaml
 metrics.json
+# make bundle output
+/bundle/
+/bundle.Dockerfile
