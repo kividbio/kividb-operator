@@ -4,3 +4,4 @@ resources:
   - bases/kividb.io_kividbaclconfigs.yaml
   - bases/kividb.io_kividbsnapshotconfigs.yaml
   - bases/kividb.io_kividbsnapshots.yaml
+  - bases/kividb.io_kividbdbops.yaml

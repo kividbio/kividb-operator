@@ -1,0 +1,43 @@
+# Input to `operator-sdk generate bundle` (see `make bundle`): the base
+# CSV, the operator's install manifests from config/default, the samples
+# that become the CSV's alm-examples, and the scorecard configuration.
+resources:
+  - bases/kividb-operator.clusterserviceversion.yaml
+  - ../default
+  - ../samples
+  - ../scorecard
+
+patches:
+  # config/samples carries Secrets with placeholder credentials so the
+  # samples can be applied by hand. They must not end up in the bundle.
+  - target:
+      version: v1
+      kind: Secret
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: unused
+  # alm-examples are sorted by name, and a console offers the first one of
+  # a kind as the default. Keep only examples that work on their own: drop
+  # the local-MinIO sample (kividb-dev*) and kividb-full, which needs the
+  # Secrets removed above. kividb-minimal stays the KividbCluster example.
+  - target:
+      group: kividb.io
+      version: v1alpha1
+      name: "kividb-dev.*|kividb-full"
+    patch: |-
+      $patch: delete
+      apiVersion: kividb.io/v1alpha1
+      kind: KividbCluster
+      metadata:
+        name: unused
+  # The samples name the "default" namespace. An alm-example is created
+  # in the namespace the user picks, so it carries none.
+  - target:
+      group: kividb.io
+      version: v1alpha1
+    patch: |-
+      - op: remove
+        path: /metadata/namespace
