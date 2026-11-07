@@ -48,6 +48,14 @@ jobs:
       - name: go build
         run: go build ./...
 
+      # kube-apiserver and etcd for the envtest tests. Without
+      # KUBEBUILDER_ASSETS they skip, so fail here instead.
+      - name: envtest binaries
+        run: |
+          assets="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.19 use 1.31.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          test -n "$assets"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
+
       - name: go test
         run: go test ./... -race -coverprofile=cover.out
 

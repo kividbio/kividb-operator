@@ -15,6 +15,15 @@ go mod tidy
 make fmt vet test
 ```
 
+Tests that need a real API server (envtest) skip unless
+`KUBEBUILDER_ASSETS` points at kube-apiserver and etcd binaries. CI sets it;
+to run them locally:
+
+```bash
+export KUBEBUILDER_ASSETS="$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.19 use 1.31.x -p path)"
+make test
+```
+
 ## Running against a local cluster
 
 ```bash

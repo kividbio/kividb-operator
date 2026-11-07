@@ -27,15 +27,15 @@ kividb-operator {{ .Chart.AppVersion }} has been installed into namespace "{{ .R
    kind: KividbCluster
    metadata:
      name: my-kividb
-     namespace: default
+     namespace: {{ .Values.watchNamespace | default "default" }}
    spec:
      image: docker.io/kividb/kividb:v1.2.0
      storage:
        size: 5Gi
    EOF
 
-   kubectl get kividbcluster my-kividb
-   kubectl get pods -l app.kubernetes.io/instance=my-kividb
+   kubectl get kividbcluster my-kividb -n {{ .Values.watchNamespace | default "default" }}
+   kubectl get pods -n {{ .Values.watchNamespace | default "default" }} -l app.kubernetes.io/instance=my-kividb
 
 {{- if .Values.gui.enabled }}
 
