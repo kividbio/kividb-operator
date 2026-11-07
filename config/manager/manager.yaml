@@ -41,6 +41,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # OLM writes the OperatorGroup's target namespaces into this
+            # annotation (empty for AllNamespaces). Without OLM the
+            # annotation is absent, which resolves to an empty value, and
+            # the manager watches every namespace.
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['olm.targetNamespaces']
           ports:
             - name: metrics
               containerPort: 8080

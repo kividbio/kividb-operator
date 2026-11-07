@@ -48,6 +48,33 @@ kubectl get crd kividbclusters.kividb.io kividbconfigs.kividb.io \
   kividbaclconfigs.kividb.io kividbsnapshotconfigs.kividb.io kividbsnapshots.kividb.io
 ```
 
+### Watching one namespace
+
+By default the operator watches every namespace. To limit the manager and
+the GUI to one, set `watchNamespace` to a namespace that already exists:
+
+```bash
+helm install kividb-operator charts/kividb-operator \
+  -n kividb-operator-system --create-namespace \
+  --set watchNamespace=team-a
+```
+
+Both get `WATCH_NAMESPACE=team-a`, and their ClusterRoles are bound in
+`team-a` with RoleBindings instead of ClusterRoleBindings. If `team-a` is
+not the release namespace, a small Role there lets the manager read and
+create its agent token Secret. The GUI keeps one cluster-wide permission,
+`get`/`list` on StorageClasses, for its create form.
+
+KividbClusters in other namespaces are ignored. If you restrict an existing
+install, the clusters outside `team-a` keep running but are no longer
+reconciled: no failover, no backups, no spec changes. Deleting one still
+works (the operator sets no finalizers), and its owned objects are removed
+by garbage collection.
+
+Without Helm, set `WATCH_NAMESPACE` on the manager to one namespace or a
+comma-separated list (OLM does this for an OperatorGroup's target
+namespaces). The GUI takes one namespace only.
+
 ### Upgrading
 
 ```bash

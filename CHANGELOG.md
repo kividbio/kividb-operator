@@ -16,6 +16,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The manager ignored `WATCH_NAMESPACE` and the chart's `watchNamespace`**
+  (#61). Only the GUI read it. The manager now watches only the namespaces it
+  lists (comma-separated; unset means all), and refuses to start on an
+  invalid name. With `watchNamespace` set, the chart binds the manager's and
+  the GUI's RBAC in that namespace (see `docs/INSTALL.md`). The OLM bundle
+  now also offers the OwnNamespace, SingleNamespace and MultiNamespace
+  install modes.
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install
   could not run `KividbDbOps` operations. After applying it again, restart

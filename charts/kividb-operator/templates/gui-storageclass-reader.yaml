@@ -1,0 +1,34 @@
+{{- if and .Values.gui.enabled .Values.rbac.create .Values.watchNamespace }}
+# StorageClasses are cluster-scoped, so the GUI ClusterRole's rule for them
+# does nothing through the RoleBinding in watchNamespace. The create form
+# lists them; this keeps that one read cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kividb-operator.fullname" . }}-gui-storageclass-reader
+  labels:
+    {{- include "kividb-operator.gui.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+    verbs:
+      - get
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kividb-operator.fullname" . }}-gui-storageclass-reader
+  labels:
+    {{- include "kividb-operator.gui.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kividb-operator.fullname" . }}-gui-storageclass-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kividb-operator.gui.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

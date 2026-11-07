@@ -53,8 +53,22 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	// WATCH_NAMESPACE (comma-separated; OLM sets it from the OperatorGroup)
+	// limits the manager to those namespaces. Unset means every namespace.
+	watchNamespaces, err := controller.ParseWatchNamespaces(os.Getenv("WATCH_NAMESPACE"))
+	if err != nil {
+		ctrl.Log.Error(err, "unable to read the namespaces to watch")
+		os.Exit(1)
+	}
+	if len(watchNamespaces) == 0 {
+		ctrl.Log.Info("watching every namespace")
+	} else {
+		ctrl.Log.Info("watching only these namespaces", "namespaces", watchNamespaces)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
+		Cache:                  controller.WatchNamespacesCacheOptions(watchNamespaces),
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
