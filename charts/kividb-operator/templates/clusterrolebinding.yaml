@@ -1,7 +1,6 @@
 {{- if .Values.rbac.create }}
 apiVersion: rbac.authorization.k8s.io/v1
-# With watchNamespace set, the ClusterRole is bound in that namespace only
-# (a RoleBinding), so the service account cannot use it anywhere else.
+# With watchNamespace set, a RoleBinding to the Role in that namespace.
 {{- if .Values.watchNamespace }}
 kind: RoleBinding
 {{- else }}
@@ -16,7 +15,11 @@ metadata:
     {{- include "kividb-operator.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
+  {{- if .Values.watchNamespace }}
+  kind: Role
+  {{- else }}
   kind: ClusterRole
+  {{- end }}
   name: {{ include "kividb-operator.clusterRoleName" . }}
 subjects:
   - kind: ServiceAccount

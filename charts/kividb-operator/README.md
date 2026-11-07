@@ -90,7 +90,7 @@ for the complete, commented list. The most commonly overridden:
 | `gui.service.type` | `ClusterIP` | How to expose the GUI |
 | `crds.install` | `true` | Install the CRD on first install (Helm convention: never auto-upgraded afterward — see `docs/INSTALL.md`) |
 | `metrics.serviceMonitor.enabled` | `false` | Cluster-wide `ServiceMonitor` for every `KividbCluster`'s agent + `redis-exporter` metrics |
-| `watchNamespace` | `""` (all namespaces) | Restrict the manager and the GUI to one existing namespace; their RBAC is bound there with RoleBindings |
+| `watchNamespace` | `""` (all namespaces) | Restrict the manager and the GUI to one existing namespace; their RBAC becomes Roles and RoleBindings there |
 
 Per-`KividbCluster` settings (replicas, storage, ACL users, backup
 schedule, the `redis-exporter` sidecar, scheduling constraints, ...) are

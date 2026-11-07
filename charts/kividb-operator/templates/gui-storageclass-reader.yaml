@@ -1,7 +1,7 @@
 {{- if and .Values.gui.enabled .Values.rbac.create .Values.watchNamespace }}
-# StorageClasses are cluster-scoped, so the GUI ClusterRole's rule for them
-# does nothing through the RoleBinding in watchNamespace. The create form
-# lists them; this keeps that one read cluster-wide.
+# StorageClasses are cluster-scoped, so a Role cannot grant them. The GUI's
+# create form lists them; this keeps that one read cluster-wide when the
+# rest of the GUI's RBAC is a Role in watchNamespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

@@ -1,11 +1,21 @@
 {{- if .Values.rbac.create }}
-# Mirrors config/rbac/role.yaml exactly -- see the //+kubebuilder:rbac
+# Its rules mirror config/rbac/role.yaml exactly -- see the //+kubebuilder:rbac
 # markers on KividbClusterReconciler in
 # internal/controller/kividbcluster_controller.go for the source of truth.
+#
+# With watchNamespace set this is a Role in that namespace, so nothing
+# the manager may do reaches past it.
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.watchNamespace }}
+kind: Role
+{{- else }}
 kind: ClusterRole
+{{- end }}
 metadata:
   name: {{ include "kividb-operator.clusterRoleName" . }}
+  {{- if .Values.watchNamespace }}
+  namespace: {{ .Values.watchNamespace }}
+  {{- end }}
   labels:
     {{- include "kividb-operator.labels" . | nindent 4 }}
 rules:

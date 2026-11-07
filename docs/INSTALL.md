@@ -59,11 +59,13 @@ helm install kividb-operator charts/kividb-operator \
   --set watchNamespace=team-a
 ```
 
-Both get `WATCH_NAMESPACE=team-a`, and their ClusterRoles are bound in
-`team-a` with RoleBindings instead of ClusterRoleBindings. If `team-a` is
-not the release namespace, a small Role there lets the manager read and
-create its agent token Secret. The GUI keeps one cluster-wide permission,
-`get`/`list` on StorageClasses, for its create form.
+Both get `WATCH_NAMESPACE=team-a`, and their RBAC is rendered as Roles and
+RoleBindings in `team-a` instead of ClusterRoles and ClusterRoleBindings.
+The CRDs stay cluster-scoped. If `team-a` is not the release namespace, a
+small Role there lets the manager read and create its agent token Secret.
+The GUI keeps one cluster-wide permission, `get`/`list` on StorageClasses,
+for its create form: StorageClasses are cluster-scoped, so a Role cannot
+grant them.
 
 KividbClusters in other namespaces are ignored. If you restrict an existing
 install, the clusters outside `team-a` keep running but are no longer

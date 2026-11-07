@@ -66,18 +66,7 @@ func main() {
 		ctrl.Log.Info("watching only these namespaces", "namespaces", watchNamespaces)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Cache:                  controller.WatchNamespacesCacheOptions(watchNamespaces),
-		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "kividb-operator-leader.kividb.io",
-		// client-go's default spam filter lets 25 Events through per object,
-		// then one every 5 minutes: a sharded cluster's rollout uses that up,
-		// and the Events after it (PasswordChanged, a failover) were dropped.
-		EventBroadcaster: record.NewBroadcasterWithCorrelatorOptions(controller.EventCorrelatorOptions()), //nolint:staticcheck // the only way to tune the spam filter
-	})
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), managerOptions(metricsAddr, probeAddr, enableLeaderElection, watchNamespaces))
 	if err != nil {
 		ctrl.Log.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -149,5 +138,22 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		ctrl.Log.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+// managerOptions builds the manager's options. watchNamespaces limits its
+// cache; nil means every namespace.
+func managerOptions(metricsAddr, probeAddr string, leaderElection bool, watchNamespaces []string) ctrl.Options {
+	return ctrl.Options{
+		Scheme:                 scheme,
+		Cache:                  controller.WatchNamespacesCacheOptions(watchNamespaces),
+		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
+		HealthProbeBindAddress: probeAddr,
+		LeaderElection:         leaderElection,
+		LeaderElectionID:       "kividb-operator-leader.kividb.io",
+		// client-go's default spam filter lets 25 Events through per object,
+		// then one every 5 minutes: a sharded cluster's rollout uses that up,
+		// and the Events after it (PasswordChanged, a failover) were dropped.
+		EventBroadcaster: record.NewBroadcasterWithCorrelatorOptions(controller.EventCorrelatorOptions()), //nolint:staticcheck // the only way to tune the spam filter
 	}
 }

@@ -15,8 +15,9 @@ namespace: kividb-operator-system
 
 # watchNamespace, if set, limits the manager and the GUI to that one
 # namespace: it is passed to both as WATCH_NAMESPACE, and their RBAC is bound
-# there with RoleBindings instead of ClusterRoleBindings. The namespace must
-# exist before the install. Leave it empty ("") to watch every namespace.
+# as Roles and RoleBindings instead of ClusterRoles and ClusterRoleBindings.
+# The namespace must exist before the install. Leave it empty ("") to watch
+# every namespace.
 watchNamespace: ""
 
 crds:

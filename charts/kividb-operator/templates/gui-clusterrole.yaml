@@ -1,11 +1,22 @@
 {{- if and .Values.gui.enabled .Values.rbac.create }}
 # Management GUI ClusterRole. Still never grants Secrets. Extends the
 # read-only surface with create on kividbdbops (restart ops) and get on
-# pods/log (log viewer). Mirrors config/gui/rbac.yaml.
+# pods/log (log viewer). Its rules mirror config/gui/rbac.yaml.
+#
+# With watchNamespace set this is a Role in that namespace; the one
+# cluster-scoped read it needs, StorageClasses, is in
+# gui-storageclass-reader.yaml.
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.watchNamespace }}
+kind: Role
+{{- else }}
 kind: ClusterRole
+{{- end }}
 metadata:
   name: {{ include "kividb-operator.fullname" . }}-gui-role
+  {{- if .Values.watchNamespace }}
+  namespace: {{ .Values.watchNamespace }}
+  {{- end }}
   labels:
     {{- include "kividb-operator.gui.labels" . | nindent 4 }}
 rules:
@@ -37,6 +48,7 @@ rules:
       - kividbdbops
     verbs:
       - create
+  {{- if not .Values.watchNamespace }}
   - apiGroups:
       - storage.k8s.io
     resources:
@@ -44,6 +56,7 @@ rules:
     verbs:
       - get
       - list
+  {{- end }}
   - apiGroups:
       - apps
     resources:
