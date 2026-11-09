@@ -158,13 +158,14 @@ func TestReconcileRoles_FailoverSkipsEmptiedReplicas(t *testing.T) {
 		h.withClusterInClient()
 		ctx := context.Background()
 		for pass := 1; pass <= 2; pass++ {
+			read := h.cluster.Status.DeepCopy()
 			statuses, m, failover, err := h.r.reconcileRoles(ctx, h.cluster, h.list())
 			if err == nil {
 				t.Fatalf("pass %d: promoted %q, want the failover to be refused", pass, m)
 			}
 			// What Reconcile writes after a failed pass; updateStatus
 			// updates h.cluster in place, as Reconcile's next Get would.
-			if err := h.r.updateStatus(ctx, h.cluster, statuses, m, h.cluster.Status.MasterPod, failover, err); err != nil {
+			if err := h.r.updateStatus(ctx, h.cluster, read, statuses, m, h.cluster.Status.MasterPod, failover, err); err != nil {
 				t.Fatal(err)
 			}
 			for _, ps := range h.cluster.Status.Pods {

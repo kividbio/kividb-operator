@@ -116,6 +116,9 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		return ctrl.Result{}, err
 	}
+	// The status as this pass read it, which may be a version behind: see
+	// writeStatus.
+	read := c.Status.DeepCopy()
 
 	if err := validateSpec(&c); err != nil {
 		return ctrl.Result{}, r.rejectSpec(ctx, &c, err)
@@ -192,6 +195,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if statusErr := r.Status().Update(ctx, &c); statusErr != nil {
 			return ctrl.Result{}, fmt.Errorf("updating bootstrap status: %w", statusErr)
 		}
+		read = c.Status.DeepCopy()
 	}
 
 	rollout := map[string]string{
@@ -263,7 +267,10 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	r.notePersistence(&c, kdbConfig)
-	if statusErr := r.updateStatus(ctx, &c, statuses, masterPod, previousMasterPod, failoverHappened, err); statusErr != nil {
+	if statusErr := r.updateStatus(ctx, &c, read, statuses, masterPod, previousMasterPod, failoverHappened, err); errors.Is(statusErr, errStaleStatus) {
+		log.V(1).Info("status changed since this pass read it; looking again")
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	} else if statusErr != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", statusErr)
 	}
 
@@ -341,6 +348,7 @@ func (e *heldError) Unwrap() error                 { return e.err }
 // overlap and the rollout need what could not be resolved, so they wait.
 func (r *KividbClusterReconciler) reconcileHeld(ctx context.Context, c *kividbv1alpha1.KividbCluster, held *heldError) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	read := c.Status.DeepCopy() // nothing before this pass changed it
 	log.Error(held.err, "not applying the cluster's objects")
 	requeue := 5 * time.Second
 	r.warnOnChange(c, held.reason, held.err)
@@ -378,7 +386,10 @@ func (r *KividbClusterReconciler) reconcileHeld(ctx context.Context, c *kividbv1
 		log.Error(err, "role reconciliation failed")
 	}
 	r.reconcileHandover(ctx, c, podList.Items, statuses, masterPod)
-	if statusErr := r.updateStatus(ctx, c, statuses, masterPod, previousMasterPod, failoverHappened, errors.Join(held, err)); statusErr != nil {
+	if statusErr := r.updateStatus(ctx, c, read, statuses, masterPod, previousMasterPod, failoverHappened, errors.Join(held, err)); errors.Is(statusErr, errStaleStatus) {
+		log.V(1).Info("status changed since this pass read it; looking again")
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	} else if statusErr != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", statusErr)
 	}
 	return ctrl.Result{RequeueAfter: requeue}, nil
@@ -649,7 +660,7 @@ func (r *KividbClusterReconciler) applyStatefulSet(ctx context.Context, c *kivid
 	return err
 }
 
-func (r *KividbClusterReconciler) updateStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, statuses []kividbv1alpha1.KividbPodStatus, masterPod, previousMasterPod string, failoverHappened bool, roleErr error) error {
+func (r *KividbClusterReconciler) updateStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus, statuses []kividbv1alpha1.KividbPodStatus, masterPod, previousMasterPod string, failoverHappened bool, roleErr error) error {
 	desiredPods := c.Spec.Replicas + 1
 
 	// reconcileRoles' own failoverHappened is a transient, single-pass
@@ -709,7 +720,10 @@ func (r *KividbClusterReconciler) updateStatus(ctx context.Context, c *kividbv1a
 	}
 	setCondition(&c.Status.Conditions, readyCondition)
 
-	return r.Status().Update(ctx, c)
+	// A pass that read a stale status does not write over a newer one: that
+	// would also take previousMasterPod from the stale status, and count a
+	// failover twice.
+	return r.writeStatus(ctx, c, read)
 }
 
 // validateSpec catches spec values the API server accepted but that the

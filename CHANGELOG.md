@@ -42,6 +42,15 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   what is left of the earlier cluster's files, or part of the snapshot,
   never both, and its retry ends with the snapshot's files only. The
   manual restore in `docs/BACKUP_RESTORE.md` removes the same files.
+- **Status updates of a replicated cluster conflicted at steady state**
+  (#52), each a `Reconciler error` with a growing backoff: 134 in a few
+  hours on AKS. A pass that starts within milliseconds of the last one's
+  status write reads the cluster from the cache before that write reaches
+  it, and its own write then conflicts. The status is now written as a
+  sharded cluster's is: after a change outside the status, the same
+  status goes onto the latest version, and a pass that read a status a
+  newer pass has since replaced leaves it alone and looks again in 5 s,
+  logged at debug level only.
 
 ## [0.7.0] - 2026-11-04
 
