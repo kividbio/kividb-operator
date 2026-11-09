@@ -42,6 +42,14 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   what is left of the earlier cluster's files, or part of the snapshot,
   never both, and its retry ends with the snapshot's files only. The
   manual restore in `docs/BACKUP_RESTORE.md` removes the same files.
+- **A refused bootstrap left the cluster's phase empty** (#51), and its
+  `Bootstrapped` condition said `RestoreFailed` though no restore ran. A
+  pass the bootstrap holds never reached the code that sets the phase, so
+  it was empty through every bootstrap, and the GUI showed `Unknown`. The
+  phase is now `Provisioning` while the bootstrap waits or restores, and
+  `Error` once it has failed or was refused, with the reason `Refused` on
+  the condition for a refusal. A restore started after the spec is fixed
+  no longer keeps the refusal in `status.bootstrap.error`.
 
 ## [0.7.0] - 2026-11-04
 

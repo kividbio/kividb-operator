@@ -236,7 +236,10 @@ Watch progress on `status.bootstrap` and the `Bootstrapped` condition:
 `False` until the restore Job succeeds, with a reason that says what the
 bootstrap waits for or does (`WaitingForEarlierCluster`,
 `WaitingForVolumeDeletion`, `Restoring`, `RestoreRetrying`,
-`RestoreFailed`), then `True`. A restore pod that fails is retried once:
+`RestoreFailed`, or `Refused` for a snapshot it cannot restore, such as a
+sharded cluster's backup), then `True`. Until then the cluster's phase is
+`Provisioning`, or `Error` once the bootstrap has failed or was refused.
+A restore pod that fails is retried once:
 the bootstrap stays `InProgress`, its message says which attempt failed
 and why, with a `BootstrapRetrying` Event, and it is `Failed` (a
 `BootstrapFailed` Event) only once the Job has given up.
