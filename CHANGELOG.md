@@ -6,6 +6,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+**Read before upgrading:** the pods of every sharded cluster roll once,
+replicas first and each master after a handover, for the new
+`--cluster-announce-hostname` flag (#57).
+
 ### Added
 
 - **An OLM bundle for OperatorHub.io.** `make bundle VERSION=… IMG=…` builds
@@ -42,6 +46,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   what is left of the earlier cluster's files, or part of the snapshot,
   never both, and its retry ends with the snapshot's files only. The
   manual restore in `docs/BACKUP_RESTORE.md` removes the same files.
+- **A restarted node of a sharded cluster showed as `?` in `CLUSTER
+  SLOTS`** (#57), on itself and on its peers, for about six seconds: it
+  started with no hostname, and the agent set one only later. A client
+  that reloaded its slot map then could not reach those slots. A node now
+  starts with `--cluster-announce-hostname`, its pod's DNS name, which
+  every engine with `--cluster-announce-ip` (1.1.0 on) takes. The agent
+  still sets the address of a Service a pod is exposed through.
 
 ## [0.7.0] - 2026-11-04
 

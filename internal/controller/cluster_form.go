@@ -134,7 +134,13 @@ func evenSlotRanges(shards int) [][2]int {
 // announceName is the name a node announces to clients: its pod's DNS
 // name under its shard's headless Service.
 func announceName(c *kividbv1alpha1.KividbCluster, p *shardPod) string {
-	return fmt.Sprintf("%s.%s.%s.svc", p.pod.Name, shardHeadlessServiceName(c, p.shard), c.Namespace)
+	return shardPodDNSName(c, p.shard, p.pod.Name)
+}
+
+// shardPodDNSName is pod's DNS name under its shard's headless Service. pod
+// may be "$(POD_NAME)", for the pod template (shardPodTemplate).
+func shardPodDNSName(c *kividbv1alpha1.KividbCluster, shard int32, pod string) string {
+	return fmt.Sprintf("%s.%s.%s.svc", pod, shardHeadlessServiceName(c, shard), c.Namespace)
 }
 
 // clusterView is what the operator works from: the cluster as one node

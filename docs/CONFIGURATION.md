@@ -565,7 +565,7 @@ spec:
   introduces the nodes to each other (`CLUSTER MEET`), gives each shard's
   `-0` pod an even share of the slots, and has the shard's other pods
   `CLUSTER REPLICATE` it. Each node announces its pod's DNS name to clients
-  (`cluster-announce-hostname`).
+  (`cluster-announce-hostname`), from the moment it starts.
 - **Failover is kividb's.** When a master fails, the engine promotes one of
   its replicas; the operator does not promote anything in cluster mode. It
   reports the move (`status.shards[].masterPod`, `lastFailoverTime`, a
