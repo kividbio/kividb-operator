@@ -42,6 +42,19 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   what is left of the earlier cluster's files, or part of the snapshot,
   never both, and its retry ends with the snapshot's files only. The
   manual restore in `docs/BACKUP_RESTORE.md` removes the same files.
+- **`make deploy` ignored `IMG`** (#63). It set the image `manager`, which
+  no image in `config/manager` is named, and without `kustomize` on the
+  PATH it set none: the manager ran `docker.io/kividb/kividb-operator:0.7.0`
+  whatever `IMG` said. It now sets the image `manager.yaml` names, with the
+  kustomize `make kustomize` installs into `bin/`.
+- **`kubectl apply -k config/default` failed on a cluster without the
+  `kividb-operator-system` namespace**, and so did `make deploy`: nothing
+  created it. `make deploy` now creates it, and `docs/INSTALL.md` says to.
+- **The GUI from `config/gui` could only run in `kividb-operator-system`**
+  (#63). It mounts the agent token Secret from the operator's namespace,
+  so with the operator anywhere else it had no token. `config/gui` is now
+  a kustomization: `kubectl apply -k config/gui`, with its namespace set
+  there or in an overlay. `kubectl apply -f config/gui/` works as before.
 
 ## [0.7.0] - 2026-11-04
 

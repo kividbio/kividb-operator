@@ -223,7 +223,11 @@ helm upgrade --install kividb-operator charts/kividb-operator \
   --set gui.auth.existingSecret=kividb-gui-auth
 ```
 
-Plain YAML: `config/gui/` (update RBAC from `config/gui/rbac.yaml`).
+Plain YAML: `kubectl apply -k config/gui` (update RBAC from
+`config/gui/rbac.yaml`). The GUI must run in the operator's namespace,
+where the operator creates the agent token Secret the GUI mounts. If that
+isn't `kividb-operator-system`, set it first: `kustomize edit set
+namespace <ns>` in `config/gui`, or an overlay.
 
 Port-forward:
 

@@ -151,9 +151,12 @@ install: ## Install the CRDs into the cluster pointed at by the current kubeconf
 uninstall: ## Remove the CRDs from the cluster (also deletes any KividbCluster objects!).
 	kubectl delete -k config/crd --ignore-not-found
 
+# config/default does not create its namespace, as Helm's --create-namespace
+# does: deploy creates it if missing.
 .PHONY: deploy
-deploy: ## Deploy the operator (CRDs + RBAC + manager Deployment) to the cluster.
-	cd config/manager && { command -v kustomize >/dev/null 2>&1 && kustomize edit set image manager=$(IMG) || true; }
+deploy: kustomize ## Deploy the operator (CRDs + RBAC + manager Deployment) to the cluster, running IMG.
+	cd config/manager && $(KUSTOMIZE) edit set image docker.io/kividb/kividb-operator=$(IMG)
+	kubectl create namespace kividb-operator-system --dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -k config/default
 
 .PHONY: undeploy
