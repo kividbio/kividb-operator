@@ -71,13 +71,21 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+  # The same Trivy scan CI runs: a fixable HIGH or CRITICAL in any image
+  # stops the release before anything is pushed.
+  image-scan:
+    name: Image scan
+    uses: ./.github/workflows/image-scan.yaml
+    permissions:
+      contents: read
+
   # Native multi-arch: each arch builds on a matching GitHub-hosted runner
   # (ubuntu-latest = amd64, ubuntu-24.04-arm = arm64). No QEMU. Each job
   # pushes to GHCR by digest only; images-manifest stitches the digests into
   # the versioned + latest tags as a real multi-arch OCI index.
   images:
     name: Build ${{ matrix.image }} (${{ matrix.platform }})
-    needs: [version-check, dockerhub-check]
+    needs: [version-check, dockerhub-check, image-scan]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

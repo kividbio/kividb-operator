@@ -9,11 +9,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # Keep in sync with go.mod's `go` directive (and the golang:*-bookworm
-  # builder image in the Dockerfiles).
-  GO_VERSION: "1.26"
-
 jobs:
   go:
     name: Go build / vet / test / fmt
@@ -21,17 +16,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The Go release in go.mod's `toolchain` line, the one the image
+      # builds use too.
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
-      # go.sum is not committed yet (see docs/_internal-spec.md) -- `go mod
-      # tidy` fetches and pins real module versions/checksums. GitHub-hosted
-      # runners have network access, so this is expected to succeed here
-      # even though it cannot be run in the sandboxed environment the
-      # initial source was written in.
-      - name: go mod tidy
-        run: go mod tidy
+      # go.mod and go.sum must already be tidy. When they are not, the
+      # tidied files are kept as the go-mod-tidy artifact.
+      - name: go mod tidy (no diff)
+        run: |
+          go mod tidy
+          if ! git diff --exit-code -- go.mod go.sum; then
+            echo "::error::go.mod/go.sum are not tidy: run 'go mod tidy' and commit the result (also in the go-mod-tidy artifact)"
+            exit 1
+          fi
+
+      - name: upload tidied go.mod/go.sum
+        if: failure()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: go-mod-tidy
+          path: |
+            go.mod
+            go.sum
+          if-no-files-found: ignore
 
       - name: gofmt check
         run: |
@@ -148,3 +157,9 @@ jobs:
           load: true
           provenance: false
           tags: ${{ matrix.tag }}
+
+  # Trivy scan of the three images; fails on a fixable HIGH or CRITICAL.
+  # The release workflow runs the same scan before it pushes anything.
+  image-scan:
+    name: Image scan
+    uses: ./.github/workflows/image-scan.yaml
