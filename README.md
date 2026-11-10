@@ -96,10 +96,10 @@ kubectl apply -f config/samples/kividb.io_v1alpha1_kividbcluster_minimal.yaml
 
 # 3. Watch it come up
 kubectl get kividbcluster -w
-kubectl get pods -l kividb.io/cluster=kividb-sample
+kubectl get pods -l kividb.io/cluster=kividb-minimal
 
 # 4. Connect (from inside the cluster, or via port-forward)
-kubectl port-forward svc/kividb-sample-master 6380:6380
+kubectl port-forward svc/kividb-minimal-master 6380:6380
 redis-cli -p 6380 ping
 ```
 

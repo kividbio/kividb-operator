@@ -16,6 +16,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The README quickstart commands used `kividb-sample`, but the minimal
+  sample creates `kividb-minimal`.** The `kubectl get pods -l` and
+  `kubectl port-forward` commands now use `kividb-minimal`, so they work as
+  written.
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install
   could not run `KividbDbOps` operations. After applying it again, restart
