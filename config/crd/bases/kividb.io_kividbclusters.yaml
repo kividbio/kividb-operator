@@ -313,6 +313,8 @@ spec:
                         type: string
                       incarnation:
                         type: string
+                      podIP:
+                        type: string
                       shard:
                         type: integer
                       nodeID:

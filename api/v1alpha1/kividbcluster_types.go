@@ -510,6 +510,13 @@ type KividbPodStatus struct {
 	// +optional
 	Incarnation string `json:"incarnation,omitempty"`
 
+	// PodIP is the address the pod's agent last answered on, in a
+	// replicated cluster. A failover holds the writes of the master it
+	// replaces there before promoting a replica, which still reaches a
+	// master whose pod was force-deleted while its container runs on.
+	// +optional
+	PodIP string `json:"podIP,omitempty"`
+
 	// Shard is the shard the pod belongs to, in a sharded cluster.
 	// +optional
 	Shard *int32 `json:"shard,omitempty"`

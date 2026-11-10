@@ -235,6 +235,53 @@ func (h *rolesHarness) reconcile() (masterPod string, failover bool) {
 	return masterPod, failover
 }
 
+// reconcileAndPersist is reconcile that also keeps the pass's pod
+// statuses, as updateStatus would: the next pass sees them as the last
+// persisted ones.
+func (h *rolesHarness) reconcileAndPersist() (masterPod string, failover bool) {
+	h.t.Helper()
+	var list corev1.PodList
+	if err := h.r.List(context.Background(), &list, client.InNamespace(h.cluster.Namespace)); err != nil {
+		h.t.Fatal(err)
+	}
+	statuses, masterPod, failover, err := h.r.reconcileRoles(context.Background(), h.cluster, list.Items)
+	if err != nil {
+		h.t.Fatalf("reconcileRoles: %v", err)
+	}
+	h.cluster.Status.MasterPod, h.cluster.Status.Pods = masterPod, statuses
+	return masterPod, failover
+}
+
+func (h *rolesHarness) podStatus(name string) kividbv1alpha1.KividbPodStatus {
+	h.t.Helper()
+	for _, ps := range h.cluster.Status.Pods {
+		if ps.Name == name {
+			return ps
+		}
+	}
+	h.t.Fatalf("no status for pod %s", name)
+	return kividbv1alpha1.KividbPodStatus{}
+}
+
+// Each pod's entry records the address its agent last answered on; one
+// that cannot be asked keeps the one it had (#53: a failover holds the
+// writes of the master it replaces there, once its pod is gone).
+func TestReconcileRoles_RecordsEachPodsAddress(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "master", ready: true, agent: masterRun(100, "s", "run-0")},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 100)},
+		testPod{name: "c1-2", ip: "10.0.0.3", label: "replica", unreadyFor: time.Second},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{{Name: "c1-2", PodIP: "10.0.0.33", RunID: "run-2"}}
+
+	h.reconcileAndPersist()
+	for name, want := range map[string]string{"c1-0": "10.0.0.1", "c1-1": "10.0.0.2", "c1-2": "10.0.0.33"} {
+		if got := h.podStatus(name).PodIP; got != want {
+			t.Errorf("%s: podIP = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func (h *rolesHarness) setReady(name string, ready bool) {
 	h.t.Helper()
 	var p corev1.Pod

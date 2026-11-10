@@ -295,12 +295,16 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		// Last observed: a pod that cannot be asked keeps what it last
 		// reported. A master's offset, stream and run are how its restart
 		// behind its replicas is recognised (regressedMaster), and its key
-		// count how emptied replicas are (withoutEmptied).
+		// count how emptied replicas are (withoutEmptied); its address and
+		// run are where, and to whom, a failover away from it holds its
+		// writes (fenceOldMaster).
 		last := previous[p.Name]
 		offset, keys, replID, runID, inc := last.ReplicationOffset, last.Keys, last.ReplID, last.RunID, last.Incarnation
+		podIP := last.PodIP
 		synced := false
 		if v.status != nil {
 			offset, keys, replID, runID, inc = 0, v.status.KeyCount, "", v.status.RunID, incarnation(v.pod)
+			podIP = p.Status.PodIP
 		}
 
 		switch {
@@ -355,6 +359,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			ReplID:            replID,
 			RunID:             runID,
 			Incarnation:       inc,
+			PodIP:             podIP,
 		})
 	}
 
