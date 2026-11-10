@@ -128,8 +128,10 @@ EOF
     || die "attempt ${attempt}: the writer did not finish: $(kubectl logs -n "${NS}" fence-writer --tail=5 2>&1)"
   check_result "${attempt}" "${master}" "$(kubectl logs -n "${NS}" fence-writer | tail -1)"
 
-  if kubectl logs -n "${OPERATOR_NS}" deploy/kividb-operator-manager --since-time="${since}" 2>/dev/null \
-      | grep -q "fenced the master being failed away from"; then
+  # Read the log whole first: piped into grep -q, kubectl is killed by
+  # SIGPIPE once grep has its match, and pipefail turns a match into a miss.
+  operator_log="$(kubectl logs -n "${OPERATOR_NS}" deploy/kividb-operator-manager --since-time="${since}" 2>/dev/null || true)"
+  if grep -q "fenced the master being failed away from" <<<"${operator_log}"; then
     fenced=$((fenced + 1))
     log "attempt ${attempt}: the operator held ${master}'s writes before failing over"
     break
