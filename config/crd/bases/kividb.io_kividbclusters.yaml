@@ -401,6 +401,12 @@ spec:
                 lastFailoverTime:
                   type: string
                   format: date-time
+                fencedMaster:
+                  type: object
+                  properties:
+                    name: {type: string}
+                    podIP: {type: string}
+                    runID: {type: string}
                 observedGeneration:
                   type: integer
                   format: int64

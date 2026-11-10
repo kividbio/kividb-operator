@@ -29,7 +29,57 @@ func newFenceHarness(t *testing.T, replacement ...testPod) *rolesHarness {
 		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 100},
 		{Name: "c1-2", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 90},
 	}
+	h.withClusterInClient() // the fence is recorded in the status before the promotion
 	return h
+}
+
+// addPod creates p, as the StatefulSet does when it replaces a pod.
+func (h *rolesHarness) addPod(p testPod) {
+	h.t.Helper()
+	if err := h.r.Create(context.Background(), p.object(h.cluster)); err != nil {
+		h.t.Fatal(err)
+	}
+	if p.agent != nil {
+		h.agents.status[p.ip] = p.agent
+	}
+}
+
+// storedFence is status.fencedMaster as the API server has it.
+func (h *rolesHarness) storedFence() *kividbv1alpha1.FencedMaster {
+	h.t.Helper()
+	var c kividbv1alpha1.KividbCluster
+	if err := h.r.Get(context.Background(), client.ObjectKeyFromObject(h.cluster), &c); err != nil {
+		h.t.Fatal(err)
+	}
+	return c.Status.FencedMaster
+}
+
+// recordEvents makes the reconciler's events readable with eventsWith.
+func (h *rolesHarness) recordEvents() *record.FakeRecorder {
+	rec := record.NewFakeRecorder(64)
+	h.r.Recorder = rec
+	return rec
+}
+
+// eventsWith drains rec and returns the events that mention s.
+func eventsWith(rec *record.FakeRecorder, s string) []string {
+	var out []string
+	for len(rec.Events) > 0 {
+		if e := <-rec.Events; strings.Contains(e, s) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// assertNoCall checks that no agent call starts with prefix.
+func (h *rolesHarness) assertNoCall(prefix string) {
+	h.t.Helper()
+	for _, call := range h.agents.calls {
+		if strings.HasPrefix(call, prefix) {
+			h.t.Errorf("unexpected %q", call)
+		}
+	}
 }
 
 func (h *rolesHarness) pods() []corev1.Pod {
@@ -98,16 +148,87 @@ func TestFailover_WaitsForTheCandidateToCatchUpWithTheFencedMaster(t *testing.T)
 	}
 }
 
-// A replica that does not catch up within the budget is promoted anyway:
-// the fence may not hold the failover up.
-func TestFailover_PromotesAReplicaThatDoesNotCatchUpWithinTheBudget(t *testing.T) {
+// The wait for the replica is not cut short by the fence's own timeout:
+// the old master is paused, so waiting costs availability, not writes.
+func TestFailover_KeepsWaitingForTheCatchUpPastFenceTimeout(t *testing.T) {
 	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.status["10.0.0.1"] = masterRun(120, "stream-a", "run-0")
+	h.agents.catchUp = map[string]int{"10.0.0.2": int(2 * fenceTimeout / switchoverPoll)}
+	h.assertFailoverTo("c1-1")
+	if n := h.agents.catchUp["10.0.0.2"]; n != 0 {
+		t.Errorf("c1-1 was promoted %d ROLE answers before it had caught up with the old master", n)
+	}
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+}
+
+// A replica that has not caught up when the wait ends is promoted all the
+// same, and the operator says so.
+func TestFailover_WarnsWhenItPromotesAReplicaThatHasNotCaughtUp(t *testing.T) {
+	shortSwitchoverWaits(t)
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
 	h.agents.status["10.0.0.1"] = masterRun(120, "stream-a", "run-0")
 	h.agents.catchUp = map[string]int{"10.0.0.2": -1}
+	h.assertFailoverTo("c1-1")
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 || !strings.Contains(e[0], "caught up") {
+		t.Errorf("events %v, want one FailoverUnfenced saying c1-1 had not caught up", e)
+	}
+}
+
+// The fenced master stops answering while the replica catches up (its
+// container stopped): it takes no more writes, so there is nothing more to
+// wait for.
+func TestFailover_StopsWaitingForTheCatchUpWhenTheOldMasterIsGone(t *testing.T) {
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.status["10.0.0.1"] = masterRun(120, "stream-a", "run-0")
+	h.agents.catchUp = map[string]int{"10.0.0.2": -1}
+	h.agents.goneAfterPause = map[string]bool{"10.0.0.1": true}
 	start := time.Now()
 	h.assertFailoverTo("c1-1")
-	if took := time.Since(start); took >= time.Second {
-		t.Errorf("the failover took %s, want it bounded by fenceTimeout (%s)", took, fenceTimeout)
+	if took := time.Since(start); took >= switchoverCatchUpTimeout/2 {
+		t.Errorf("the failover took %s, want it to stop waiting once the old master was gone", took)
+	}
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 || !strings.Contains(e[0], "caught up") {
+		t.Errorf("events %v, want one FailoverUnfenced saying c1-1 had not caught up", e)
+	}
+}
+
+// The engine answered with the recorded run, so it is there: a pause whose
+// reply does not come back -- it may have landed -- is sent again rather
+// than failing over unfenced.
+func TestFailover_SendsAnUnansweredPauseAgain(t *testing.T) {
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.pauseUnanswered = map[string]int{"10.0.0.1": 1}
+	h.assertFailoverTo("c1-1")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2")
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+	if h.storedFence() == nil {
+		t.Error("no status.fencedMaster: the failover went on unfenced")
+	}
+}
+
+// A pause never answered within fenceRetryTimeout: the failover goes on
+// unfenced, and says so.
+func TestFailover_UnfencedWhenThePauseIsNeverAnswered(t *testing.T) {
+	defer func(d time.Duration) { fenceRetryTimeout = d }(fenceRetryTimeout)
+	fenceRetryTimeout = 3 * fenceTimeout
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.pauseUnanswered = map[string]int{"10.0.0.1": 1000}
+	start := time.Now()
+	h.assertFailoverTo("c1-1")
+	if took := time.Since(start); took < fenceRetryTimeout {
+		t.Errorf("the failover went on after %s, before fenceRetryTimeout (%s)", took, fenceRetryTimeout)
+	}
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 {
+		t.Errorf("events %v, want one FailoverUnfenced", e)
 	}
 }
 
@@ -152,14 +273,18 @@ func TestFailover_GoesOnWhenTheOldMasterIsGone(t *testing.T) {
 }
 
 // An address nothing answers on (a dead node) holds the failover up for
-// fenceTimeout at most.
+// fenceTimeout at most, and the failover says it went on unfenced.
 func TestFailover_WaitsAtMostFenceTimeoutForAHungOldMaster(t *testing.T) {
 	h := newFenceHarness(t)
+	rec := h.recordEvents()
 	h.agents.hang = map[string]bool{"10.0.0.1": true}
 	start := time.Now()
 	h.assertFailoverTo("c1-1")
 	if took := time.Since(start); took < fenceTimeout || took >= time.Second {
 		t.Errorf("the failover took %s, want at least fenceTimeout (%s) and well under a second", took, fenceTimeout)
+	}
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 {
+		t.Errorf("events %v, want one FailoverUnfenced", e)
 	}
 }
 
@@ -191,28 +316,144 @@ func TestFailover_UnfencedWithoutARecordedAddress(t *testing.T) {
 	}
 }
 
-// The promotion failed: the old master is still the master, and its
-// writes must not stay held.
-func TestFailover_LiftsTheFenceWhenThePromotionFails(t *testing.T) {
+// The promotion failed, or seemed to: it may have gone through all the
+// same. The old master's writes stay held -- lifting the pause would let it
+// take writes the replica, master after all, never sees -- and the record
+// of it, written before the promotion, is there for the next pass.
+func TestFailover_KeepsTheFenceWhenThePromotionFails(t *testing.T) {
 	h := newFenceHarness(t)
 	h.agents.failPromote = map[string]bool{"10.0.0.2": true}
 	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
 		t.Fatal("reconcileRoles succeeded, want the promotion's error")
 	}
-	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2", "exec 10.0.0.1 CLIENT UNPAUSE")
-	if h.agents.paused["10.0.0.1"] {
-		t.Error("the old master's writes are still held")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2")
+	h.assertNoCall("exec 10.0.0.1 CLIENT UNPAUSE")
+	if !h.agents.paused["10.0.0.1"] {
+		t.Error("the old master's writes are no longer held")
 	}
+	want := kividbv1alpha1.FencedMaster{Name: "c1-0", PodIP: "10.0.0.1", RunID: "run-0"}
+	if got := h.storedFence(); got == nil || *got != want {
+		t.Errorf("stored status.fencedMaster = %+v, want %+v", got, want)
+	}
+}
+
+// The promotion went through but its reply was lost. The next pass
+// finishes the failover with the old master's writes held all along.
+func TestFailover_PromoteThatErrorsAfterTakingEffect(t *testing.T) {
+	h := newFenceHarness(t)
+	h.agents.failPromoteAfter = map[string]bool{"10.0.0.2": true}
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+		t.Fatal("pass 1: reconcileRoles succeeded, want the promotion's error")
+	}
+	h.agents.failPromoteAfter = nil
+	rec := h.recordEvents()
+	if m, _ := h.reconcileAndPersist(); m != "c1-1" {
+		t.Fatalf("pass 2: master=%q, want c1-1", m)
+	}
+	h.assertCallOrder("promote 10.0.0.2", "replicaof 10.0.0.1 -> 10.0.0.2", "exec 10.0.0.1 CLIENT KILL TYPE normal", "exec 10.0.0.1 CLIENT UNPAUSE")
+	for _, call := range h.agents.calls {
+		if call == "replicaof 10.0.0.1 -> 10.0.0.2" {
+			break
+		}
+		if call == "exec 10.0.0.1 CLIENT UNPAUSE" {
+			t.Fatalf("the old master's pause was lifted before it was made a replica (calls %v)", h.agents.calls)
+		}
+	}
+	h.assertRole("10.0.0.1", agentapi.RoleReplica, "10.0.0.2")
+	if h.cluster.Status.FencedMaster != nil {
+		t.Errorf("status.fencedMaster = %+v, want it cleared", h.cluster.Status.FencedMaster)
+	}
+	// c1-1 caught up before pass 1 promoted it, and is a master since.
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+}
+
+// The force-deleted master could not be made a replica right after the
+// promotion. Its pod object is gone and a replacement under the same name
+// has another address, so only the record of the fence leads back to it:
+// each pass holds its writes again and tries, until it is done.
+func TestFailover_RetriesDemotingAForceDeletedMaster(t *testing.T) {
+	h := newFenceHarness(t)
+	h.agents.failReplicaOf = map[string]bool{"10.0.0.1": true}
+	h.assertFailoverTo("c1-1")
+	if h.cluster.Status.FencedMaster == nil {
+		t.Fatal("pass 1: no status.fencedMaster")
+	}
+
+	h.addPod(testPod{name: "c1-0", ip: "10.0.0.9", label: "replica", ready: true, uid: "new", agent: masterRun(0, "stream-b", "run-new")})
+	h.agents.calls = nil
+	h.reconcileAndPersist()
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "replicaof 10.0.0.1 -> 10.0.0.2")
+	if !h.agents.paused["10.0.0.1"] || h.cluster.Status.FencedMaster == nil {
+		t.Fatalf("pass 2: paused=%v fencedMaster=%+v, want the writes still held and the record kept", h.agents.paused["10.0.0.1"], h.cluster.Status.FencedMaster)
+	}
+	if got := h.podStatus("c1-0").PodIP; got != "10.0.0.9" {
+		t.Errorf("c1-0's entry records %q, want the replacement's 10.0.0.9", got)
+	}
+
+	h.agents.failReplicaOf = nil
+	h.agents.calls = nil
+	h.reconcileAndPersist()
+	h.assertCallOrder("replicaof 10.0.0.1 -> 10.0.0.2", "exec 10.0.0.1 CLIENT KILL TYPE normal", "exec 10.0.0.1 CLIENT UNPAUSE")
+	h.assertRole("10.0.0.1", agentapi.RoleReplica, "10.0.0.2")
+	if h.agents.paused["10.0.0.1"] || h.cluster.Status.FencedMaster != nil {
+		t.Errorf("pass 3: paused=%v fencedMaster=%+v, want it released and the record cleared", h.agents.paused["10.0.0.1"], h.cluster.Status.FencedMaster)
+	}
+	h.assertNoCall("exec 10.0.0.9 CLIENT")
+}
+
+// Once another engine, or nothing, answers at the fenced master's
+// address, there is nothing left to hold: the record goes.
+func TestFailover_ForgetsTheFencedMasterOnceItIsGone(t *testing.T) {
+	for name, at := range map[string]*agentapi.StatusResponse{
+		"another engine": masterRun(5, "stream-x", "run-other"),
+		"nothing":        nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newRolesHarness(t, "c1-1",
+				testPod{name: "c1-1", ip: "10.0.0.2", label: "master", ready: true, agent: masterRun(100, "stream-b", "run-1")},
+			)
+			h.cluster.Status.FencedMaster = &kividbv1alpha1.FencedMaster{Name: "c1-0", PodIP: "10.0.0.1", RunID: "run-0"}
+			if at != nil {
+				h.agents.status["10.0.0.1"] = at
+			}
+			h.reconcile()
+			if h.cluster.Status.FencedMaster != nil {
+				t.Errorf("status.fencedMaster = %+v, want it cleared", h.cluster.Status.FencedMaster)
+			}
+			h.assertNoCall("replicaof 10.0.0.1")
+			h.assertNoPause()
+		})
+	}
+}
+
+// terminationGracePeriodSeconds: 0 would make the pause CLIENT PAUSE 0,
+// which the engine takes as no pause at all.
+func TestFailover_PausesForAtLeastTenSeconds(t *testing.T) {
+	h := newFenceHarness(t)
+	zero := int64(0)
+	h.cluster.Spec.TerminationGracePeriodSeconds = &zero
+	h.assertFailoverTo("c1-1")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 10000 WRITE", "promote 10.0.0.2")
 }
 
 // An engine before kividb 1.1 has no CLIENT PAUSE ... WRITE: the failover
 // goes on without the fence.
 func TestFailover_OldEngineWithoutPauseDoesNotBlock(t *testing.T) {
 	h := newFenceHarness(t)
+	rec := h.recordEvents()
 	h.agents.noPause = true
+	start := time.Now()
 	h.assertFailoverTo("c1-1")
 	if h.agents.paused["10.0.0.1"] {
 		t.Error("an engine without CLIENT PAUSE WRITE recorded as paused")
+	}
+	if took := time.Since(start); took >= fenceTimeout {
+		t.Errorf("the failover took %s: an engine that refuses the pause is not asked again", took)
+	}
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 {
+		t.Errorf("events %v, want one FailoverUnfenced", e)
 	}
 }
 
@@ -260,5 +501,51 @@ func TestReconcileRoles_RestartedReplicaKeepsItsClients(t *testing.T) {
 		if strings.HasPrefix(call, "exec 10.0.0.1 CLIENT") {
 			t.Errorf("the restarted replica was sent %q", call)
 		}
+	}
+}
+
+// While the fenced master is not yet a replica, the operator comes back
+// well within its pause, which each try renews.
+func TestReconcile_ComesBackSoonWhileTheFencedMasterIsHeld(t *testing.T) {
+	f := newFailoverCase(t, func(c *kividbv1alpha1.KividbCluster) {
+		c.Status.FencedMaster = &kividbv1alpha1.FencedMaster{Name: "c1-9", PodIP: "10.0.0.9", RunID: "run-9"}
+	}, nil)
+	f.agents.status["10.0.0.9"] = masterRun(50, "stream-a", "run-9")
+	f.agents.failReplicaOf = map[string]bool{"10.0.0.9": true}
+	got := f.reconcile(t, fencedMasterRetry)
+	if got.Status.FencedMaster == nil {
+		t.Error("status.fencedMaster cleared while the fenced master is not a replica yet")
+	}
+	if fencedMasterRetry >= minFencePause {
+		t.Errorf("fencedMasterRetry %s is not within the pause it renews (%s)", fencedMasterRetry, minFencePause)
+	}
+}
+
+// The pass read the cluster before an overlapping pass's status write --
+// the cache lags behind the API server during a failover. The fence is
+// recorded all the same, and the failover goes on; the field is all it
+// writes over the newer status.
+func TestFailover_RecordsTheFenceFromAStaleRead(t *testing.T) {
+	h := newFenceHarness(t)
+	var stored kividbv1alpha1.KividbCluster
+	if err := h.r.Get(context.Background(), client.ObjectKeyFromObject(h.cluster), &stored); err != nil {
+		t.Fatal(err)
+	}
+	stored.Status.Phase = kividbv1alpha1.PhaseDegraded
+	if err := h.r.Status().Update(context.Background(), &stored); err != nil {
+		t.Fatal(err)
+	}
+
+	h.assertFailoverTo("c1-1")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2", "replicaof 10.0.0.1 -> 10.0.0.2")
+	if err := h.r.Get(context.Background(), client.ObjectKeyFromObject(h.cluster), &stored); err != nil {
+		t.Fatal(err)
+	}
+	want := kividbv1alpha1.FencedMaster{Name: "c1-0", PodIP: "10.0.0.1", RunID: "run-0"}
+	if got := stored.Status.FencedMaster; got == nil || *got != want {
+		t.Errorf("stored status.fencedMaster = %+v, want %+v", got, want)
+	}
+	if stored.Status.Phase != kividbv1alpha1.PhaseDegraded {
+		t.Errorf("stored status.phase = %q: the newer status was written over", stored.Status.Phase)
 	}
 }

@@ -131,7 +131,10 @@ EOF
   # Read the log whole first: piped into grep -q, kubectl is killed by
   # SIGPIPE once grep has its match, and pipefail turns a match into a miss.
   operator_log="$(kubectl logs -n "${OPERATOR_NS}" deploy/kividb-operator-manager --since-time="${since}" 2>/dev/null || true)"
-  if grep -q "fenced the master being failed away from" <<<"${operator_log}"; then
+  # Fenced, and failed over: a pass can fence and then stop short of the
+  # promotion, and the pod come back as the master on its own.
+  if grep -q "fenced the master being failed away from" <<<"${operator_log}" &&
+    [[ "$(master_pod "${NS}" "${NAME}")" != "${master}" ]]; then
     fenced=$((fenced + 1))
     log "attempt ${attempt}: the operator held ${master}'s writes before failing over"
     break

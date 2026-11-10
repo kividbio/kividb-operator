@@ -203,16 +203,22 @@ does, in order:
    highest `replicationOffset` (most caught-up); ties break on pod name
    for determinism. Before promoting it, hold the old master's writes
    (`CLIENT PAUSE <ms> WRITE` through its agent, for the pod's
-   termination grace period) at the address and to the engine run its
-   status entry recorded (`status.pods[].podIP`, `runID`) -- after a
-   force-delete its pod object is gone while its container still runs,
-   and takes writes, until its replicas have left it -- and wait for the
-   candidate to catch up with it, as a switchover does. The failover
-   waits 250 ms at most for this (`fenceTimeout`) and goes on whatever
-   happened (`FailoverUnfenced` Event when nothing was recorded). Call
-   `POST /promote` on it, move the `kividb.io/role` label to it, then
-   `POST /replicaof` on the old master, disconnect its clients and lift
-   its pause.
+   termination grace period, 10 s at least) at the address and to the
+   engine run its status entry recorded (`status.pods[].podIP`, `runID`)
+   -- after a force-delete its pod object is gone while its container
+   still runs, and takes writes, until its replicas have left it -- and
+   wait for the candidate to catch up with it, as a switchover does (5 s
+   at most, less once the old master stops answering). An address
+   nothing answers on gets 250 ms (`fenceTimeout`); an unanswered pause
+   is sent again for up to 3 s (`fenceRetryTimeout`). A failover that
+   goes on without the fence, or before the candidate caught up, raises
+   `FailoverUnfenced`. Record the fenced master in
+   `status.fencedMaster`, call `POST /promote` on the candidate (a
+   failed call leaves the old master paused: it may have gone through),
+   move the `kividb.io/role` label to it, then `POST /replicaof` on the
+   old master, disconnect its clients and lift its pause -- on every
+   pass until that is done, or another engine, or none, answers at its
+   address.
 6. **Convergence**: for every other ready pod, if its reported
    `masterHost:masterPort` doesn't match the new master's pod IP and
    port, call `POST /replicaof` to repoint it. This also self-heals a
@@ -236,9 +242,11 @@ sequenceDiagram
     Ctrl->>Old: GET /status (times out / Ready=False)
     Note over Ctrl: unhealthyThresholdSeconds exceeded
     Ctrl->>New: GET /status (compare offsets)
-    Ctrl-->>Old: CLIENT PAUSE WRITE at its last address (250 ms at most)
+    Ctrl-->>Old: CLIENT PAUSE WRITE at its last address
+    Ctrl->>New: ROLE until it has caught up with Old
     Ctrl->>New: POST /promote  (REPLICAOF NO ONE)
     Ctrl->>Ctrl: patch pod label kividb.io/role=master on New
+    Ctrl-->>Old: POST /replicaof New, CLIENT KILL, CLIENT UNPAUSE
     Ctrl->>Others: POST /replicaof {host: New's IP, port}
     Note over Ctrl: master/replica Services now resolve to New automatically
 ```

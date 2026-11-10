@@ -216,7 +216,14 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		// until its replicas have left it: hold them first (fence.go).
 		heldOld := ""
 		if needsFailover && behindOf == "" {
-			heldOld = r.fenceOldMaster(ctx, c, previous[currentMasterName], views[candidate].pod.Status.PodIP)
+			last := previous[currentMasterName]
+			heldOld = r.fenceOldMaster(ctx, c, last, views[candidate])
+			if heldOld != "" {
+				if err := r.recordFence(ctx, c, kividbv1alpha1.FencedMaster{Name: last.Name, PodIP: heldOld, RunID: last.RunID}); err != nil {
+					r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
+					return nil, currentMasterName, false, fmt.Errorf("recording the fenced master %s before promoting %s: %w", currentMasterName, candidate, err)
+				}
+			}
 		}
 
 		// Take the master label off the pod being failed away from *before*
@@ -238,35 +245,23 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 		if old, ok := views[currentMasterName]; ok {
 			if err := r.setRoleLabel(ctx, old.pod, kividbv1alpha1.RoleReplica); err != nil {
-				r.unpauseWrites(ctx, heldOld)
+				if heldOld != "" {
+					r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
+					c.Status.FencedMaster = nil
+				}
 				r.unpauseWrites(ctx, fenced)
 				return nil, currentMasterName, false, fmt.Errorf("demoting %s: %w", currentMasterName, err)
 			}
 		}
 		candidateIP := views[candidate].pod.Status.PodIP
 		if err := r.Agent.Promote(ctx, candidateIP); err != nil {
-			r.unpauseWrites(ctx, heldOld)
-			r.unpauseWrites(ctx, fenced)
+			// The promotion may have gone through all the same: the old
+			// master's writes stay held, and the next pass finishes the
+			// failover. Its pause ends by itself.
 			return nil, currentMasterName, false, fmt.Errorf("promoting %s: %w", candidate, err)
 		}
 		if err := r.setRoleLabel(ctx, views[candidate].pod, kividbv1alpha1.RoleMaster); err != nil {
 			return nil, currentMasterName, false, err
-		}
-		if heldOld != "" {
-			// It answered the fence: make it the new master's replica at
-			// once, as a switchover does, so that it takes no write when
-			// its pause ends, and send its clients away. If this fails, its
-			// pause runs out by itself, and the loop below does it when the
-			// pod is back.
-			if err := r.Agent.ReplicaOf(ctx, heldOld, candidateIP, port); err != nil {
-				log.Info("could not point the fenced master at the new master; its pause runs out by itself", "pod", currentMasterName, "error", err.Error())
-			} else {
-				if old, ok := views[currentMasterName]; ok && old.status != nil && old.pod.Status.PodIP == heldOld {
-					old.status = &agentapi.StatusResponse{Role: agentapi.RoleReplica, MasterHost: candidateIP, MasterPort: port,
-						KeyCount: old.status.KeyCount, KeyCountKnown: old.status.KeyCountKnown, RunID: old.status.RunID}
-				}
-				r.releaseDemotedMaster(ctx, heldOld)
-			}
 		}
 		if fenced != "" {
 			// Its pause lasts restartedMasterPause: if this fails, it ends
@@ -302,6 +297,19 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	var masterIP string
 	if v, ok := views[newMasterName]; ok {
 		masterIP = v.pod.Status.PodIP
+	}
+
+	// The master a failover holds the writes of -- on this pass, or on one
+	// that could not make it a replica -- follows the master now, as in a
+	// switchover: it takes no write when its pause ends, and its clients
+	// are sent away.
+	if ip := r.demoteFencedMaster(ctx, c, masterIP, port); ip != "" {
+		for _, v := range views {
+			if v.status != nil && v.pod.Status.PodIP == ip {
+				v.status = &agentapi.StatusResponse{Role: agentapi.RoleReplica, MasterHost: masterIP, MasterPort: port,
+					KeyCount: v.status.KeyCount, KeyCountKnown: v.status.KeyCountKnown, RunID: v.status.RunID}
+			}
+		}
 	}
 
 	var masterStatus *agentapi.StatusResponse

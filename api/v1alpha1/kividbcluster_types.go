@@ -677,6 +677,15 @@ type KividbClusterStatus struct {
 	// +optional
 	LastFailoverTime *metav1.Time `json:"lastFailoverTime,omitempty"`
 
+	// FencedMaster is the master a failover held the writes of, in a
+	// replicated cluster, until it has been made the new master's replica.
+	// It is written before the promotion: the pod object of a force-deleted
+	// master is gone, and its name soon belongs to a replacement pod at
+	// another address, so this is how a later pass, or a restarted
+	// operator, still reaches it.
+	// +optional
+	FencedMaster *FencedMaster `json:"fencedMaster,omitempty"`
+
 	// ObservedGeneration is the .metadata.generation last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -693,6 +702,18 @@ type KividbClusterStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// FencedMaster is a master whose writes a failover holds (CLIENT PAUSE
+// WRITE): where it answered, and which engine run it was.
+type FencedMaster struct {
+	// Name is its pod's name.
+	Name string `json:"name"`
+	// PodIP is the address its agent answered on.
+	PodIP string `json:"podIP"`
+	// RunID is its engine's run ID: another engine answering at PodIP is
+	// not it.
+	RunID string `json:"runID"`
 }
 
 // +kubebuilder:object:root=true

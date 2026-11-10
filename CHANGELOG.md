@@ -7,9 +7,9 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 **Apply the new `kividbclusters` CRD before `helm upgrade`:** Helm does not
-upgrade it, and `status.pods[]` gains `podIP`. Until it is applied, the API
-server drops the field and failovers do not hold the old master's writes
-(`FailoverUnfenced` Warning).
+upgrade it, and the status gains `pods[].podIP` and `fencedMaster`. Until it
+is applied, the API server drops them and failovers do not hold the old
+master's writes (`FailoverUnfenced` Warning).
 
 ### Added
 
@@ -50,17 +50,23 @@ server drops the field and failovers do not hold the old master's writes
 - **A force-deleted master's last writes were lost** (#53). Its pod object
   is gone at once and the operator fails over within the second, but its
   container runs on until its replicas have left it, acknowledging the
-  writes that come in on connections clients already had to it: 68 lost in
-  the AKS test, 689 to 954 per force-delete on kind. Before promoting a
-  replica, the operator now holds the old master's writes (`CLIENT PAUSE
-  WRITE` through its agent) at the address and engine run `status.pods[]`
-  last recorded for it (`podIP`, new, and `runID`), waits for the replica to
-  catch up with it, and once the replica is promoted makes the old master
-  its replica and disconnects its clients, as a switchover does. It waits
-  250 ms at most for all of this and goes on whatever happened. An old
-  master that answers the pause but not the re-pointing stays paused for
-  the pod's termination grace period, and follows the new master when it is
-  back. The agent's preStop hook looks at a stopping master every 10 ms
+  writes that come in on connections clients already had to it: 176 lost in
+  the AKS test on engine 1.2.1, 689 to 954 per force-delete on kind. Before
+  promoting a replica, the operator now holds the old master's writes
+  (`CLIENT PAUSE WRITE` through its agent, for the pod's termination grace
+  period, 10 s at least) at the address and engine run `status.pods[]` last
+  recorded for it (`podIP`, new, and `runID`), waits for the replica to
+  catch up with it (5 s at most, less once the old master stops answering),
+  records it in `status.fencedMaster` (new), and once the replica is
+  promoted makes the old master its replica and disconnects its clients, as
+  a switchover does. Should that fail, or the operator restart, every pass
+  holds its writes again and retries, every 2 s, until it is done or
+  another engine, or none, answers at that address. An address nothing
+  answers on holds the failover up for 250 ms; a pause that goes unanswered
+  is sent again for up to 3 s. A failover that goes on without the fence,
+  or before the replica caught up, raises a `FailoverUnfenced` Warning. A
+  failed promotion no longer lifts the old master's pause: it may have gone
+  through. The agent's preStop hook looks at a stopping master every 10 ms
   instead of 250 ms.
   `hack/e2e/10-force-delete-fence.sh` force-deletes the master under load
   and counts the writes lost (skipped in CI: `SKIP_FENCE=1`).

@@ -270,6 +270,11 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
+	if c.Status.FencedMaster != nil {
+		// A failover's fenced master is not a replica yet: try again
+		// before its pause runs out (demoteFencedMaster).
+		return ctrl.Result{RequeueAfter: fencedMasterRetry}, nil
+	}
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
 }
 
