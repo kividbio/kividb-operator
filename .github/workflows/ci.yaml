@@ -16,8 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The Go release in go.mod's `toolchain` line, the one the image
-      # builds use too.
+      # Installs go.mod's `go` version; the go command then switches to the
+      # `toolchain` line's release (GOTOOLCHAIN=auto), as the image builds do.
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
