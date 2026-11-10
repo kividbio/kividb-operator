@@ -10,11 +10,14 @@
 FROM golang:1.26-bookworm AS builder
 
 WORKDIR /build
+# The golang image sets GOTOOLCHAIN=local. With auto, the go command
+# downloads the `toolchain` go.mod names (checked against the Go
+# checksum database) when this image's Go is older, so a security patch
+# release reaches the binaries before the golang image is rebuilt.
+ENV GOTOOLCHAIN=auto
 
 # Cache module downloads separately from source so `go build` is only
-# re-run when go.mod/go.sum change, not on every source edit. go.sum does
-# not exist yet in this repo (see docs/_internal-spec.md) -- the wildcard
-# keeps this COPY working once CI runs `go mod tidy` and commits one.
+# re-run when go.mod/go.sum change, not on every source edit.
 COPY go.mod go.sum* ./
 RUN go mod download
 
@@ -22,7 +25,7 @@ COPY api ./api
 COPY internal ./internal
 COPY cmd ./cmd
 
-# CGO_ENABLED=0 + the static-debian12 base below is what lets this run
+# CGO_ENABLED=0 + the static-debian13 base below is what lets this run
 # without a libc in the runtime image at all. TARGETARCH is supplied by
 # buildx so multi-arch images compile for the right architecture.
 ARG TARGETOS=linux
@@ -30,7 +33,7 @@ ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/kividb-operator-gui ./cmd/gui
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 
 # distroless's :nonroot tag already runs as an unprivileged, shell-less user
 # (uid/gid 65532) -- no useradd step is possible (or needed) in this base.
