@@ -6,7 +6,11 @@
 # with the next key. After DURATION seconds, and SETTLE more for the
 # cluster to settle, every acknowledged key is checked with EXISTS on the
 # master. Prints one JSON line:
-#   {"acked": N, "lost": M, "first_lost": t|null, "last_lost": t|null}
+#   {"acked": N, "lost": M, "acked_after_error": K,
+#    "first_lost": t|null, "last_lost": t|null}
+# acked_after_error counts the writes acknowledged after the first error
+# on any connection -- the master going away: writes that went through the
+# new master.
 # Key names start with PREFIX: they must be fresh on every run, or a key an
 # earlier run wrote hides the loss of this run's.
 import json
@@ -62,6 +66,7 @@ class Conn:
 
 
 acked = [[] for _ in range(CONNS)]  # (key, time acknowledged)
+first_error = []  # time of the first error on any connection
 end = time.time() + DURATION
 
 
@@ -81,6 +86,8 @@ def writer(i):
             if conn.read() == "OK":
                 acked[i].append((key, time.time()))
         except (OSError, RuntimeError, ConnectionError):
+            if not first_error:
+                first_error.append(time.time())
             conn.close()
             conn = None
 
@@ -104,9 +111,11 @@ for keys in acked:
             if check.read() == 0:
                 lost.append(at)
 lost.sort()
+after = sum(1 for keys in acked for _, at in keys if first_error and at > first_error[0])
 print(json.dumps({
     "acked": total,
     "lost": len(lost),
+    "acked_after_error": after,
     "first_lost": lost[0] if lost else None,
     "last_lost": lost[-1] if lost else None,
 }))

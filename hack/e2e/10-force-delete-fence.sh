@@ -74,6 +74,20 @@ all_synced() {
   [[ "$(grep -c . <<<"${rows}")" == 3 && "$(grep -c '^truetrue$' <<<"${rows}")" == 3 ]]
 }
 
+# check_result ATTEMPT MASTER RESULT: fail on the writer's result line.
+check_result() {
+  local attempt="$1" master="$2" result="$3" acked lost after
+  acked="$(sed -n 's/.*"acked": \([0-9]*\).*/\1/p' <<<"${result}")"
+  lost="$(sed -n 's/.*"lost": \([0-9]*\).*/\1/p' <<<"${result}")"
+  after="$(sed -n 's/.*"acked_after_error": \([0-9]*\).*/\1/p' <<<"${result}")"
+  [[ -n "${acked}" && -n "${lost}" && -n "${after}" ]] || die "attempt ${attempt}: unreadable writer result: ${result}"
+  log "attempt ${attempt}: force-deleted ${master}; ${acked} writes acknowledged (${after} after the master went away), ${lost} lost"
+  (( lost == 0 )) || die "attempt ${attempt}: ${lost} of ${acked} acknowledged writes lost after force-deleting ${master} (${result})"
+  # "0 lost" proves nothing unless writes went through, before and after.
+  (( acked > 0 )) || die "attempt ${attempt}: the writer could not write at all (${result})"
+  (( after > 0 )) || die "attempt ${attempt}: no write went through after ${master} went away (${result})"
+}
+
 fenced=0
 for attempt in $(seq 1 "${ATTEMPTS}"); do
   wait_for_condition 300 "every pod of ${NAME} Ready and in sync" all_synced
@@ -112,12 +126,7 @@ EOF
   kill_pod "${NS}" "${master}"
   kubectl wait -n "${NS}" --for=jsonpath='{.status.phase}'=Succeeded pod/fence-writer --timeout=240s >/dev/null \
     || die "attempt ${attempt}: the writer did not finish: $(kubectl logs -n "${NS}" fence-writer --tail=5 2>&1)"
-  result="$(kubectl logs -n "${NS}" fence-writer | tail -1)"
-  acked="$(sed -n 's/.*"acked": \([0-9]*\).*/\1/p' <<<"${result}")"
-  lost="$(sed -n 's/.*"lost": \([0-9]*\).*/\1/p' <<<"${result}")"
-  [[ -n "${acked}" && -n "${lost}" ]] || die "attempt ${attempt}: unreadable writer result: ${result}"
-  log "attempt ${attempt}: force-deleted ${master}; ${acked} writes acknowledged, ${lost} lost"
-  (( lost == 0 )) || die "attempt ${attempt}: ${lost} of ${acked} acknowledged writes lost after force-deleting ${master} (${result})"
+  check_result "${attempt}" "${master}" "$(kubectl logs -n "${NS}" fence-writer | tail -1)"
 
   if kubectl logs -n "${OPERATOR_NS}" deploy/kividb-operator-manager --since-time="${since}" 2>/dev/null \
       | grep -q "fenced the master being failed away from"; then
