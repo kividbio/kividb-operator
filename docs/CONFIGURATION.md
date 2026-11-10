@@ -385,7 +385,7 @@ tests; on kind, 689 to 954 per force-delete without the fence, none with
 it). As in a switchover, the replica is promoted once it has everything
 the old master acknowledged before the pause, and the old master is then
 made its replica, its clients disconnected and the pause lifted, so the
-writes it held fail rather than land. The failover waits 100 ms at most
+writes it held fail rather than land. The failover waits 250 ms at most
 for all of this and goes on whatever happened, so a master cut off from
 the operator is not held: it acknowledges writes until it is demoted.
 Should the old master answer the pause but not the re-pointing, the

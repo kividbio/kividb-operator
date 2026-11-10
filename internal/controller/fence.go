@@ -38,9 +38,11 @@ import (
 
 // fenceTimeout is how long a failover waits, at most, to hold the writes
 // of the master it replaces and for the replica to catch up with it. Its
-// agent answers within milliseconds while its container still runs; an
-// address nothing answers on costs this much, once.
-const fenceTimeout = 100 * time.Millisecond
+// agent answers within milliseconds while its container still runs, and
+// within about 150 ms (p99) under a tight CPU limit and write load (250m
+// for the engine, 100m for the agent); an address nothing answers on costs
+// this much, once.
+const fenceTimeout = 250 * time.Millisecond
 
 // fencePause is how long the fence holds the old master's writes, should
 // it not be made the new master's replica right after the promotion: the

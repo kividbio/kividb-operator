@@ -208,7 +208,7 @@ does, in order:
    force-delete its pod object is gone while its container still runs,
    and takes writes, until its replicas have left it -- and wait for the
    candidate to catch up with it, as a switchover does. The failover
-   waits 100 ms at most for this (`fenceTimeout`) and goes on whatever
+   waits 250 ms at most for this (`fenceTimeout`) and goes on whatever
    happened (`FailoverUnfenced` Event when nothing was recorded). Call
    `POST /promote` on it, move the `kividb.io/role` label to it, then
    `POST /replicaof` on the old master, disconnect its clients and lift
@@ -236,7 +236,7 @@ sequenceDiagram
     Ctrl->>Old: GET /status (times out / Ready=False)
     Note over Ctrl: unhealthyThresholdSeconds exceeded
     Ctrl->>New: GET /status (compare offsets)
-    Ctrl-->>Old: CLIENT PAUSE WRITE at its last address (100 ms at most)
+    Ctrl-->>Old: CLIENT PAUSE WRITE at its last address (250 ms at most)
     Ctrl->>New: POST /promote  (REPLICAOF NO ONE)
     Ctrl->>Ctrl: patch pod label kividb.io/role=master on New
     Ctrl->>Others: POST /replicaof {host: New's IP, port}

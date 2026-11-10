@@ -57,7 +57,7 @@ server drops the field and failovers do not hold the old master's writes
   last recorded for it (`podIP`, new, and `runID`), waits for the replica to
   catch up with it, and once the replica is promoted makes the old master
   its replica and disconnects its clients, as a switchover does. It waits
-  100 ms at most for all of this and goes on whatever happened. An old
+  250 ms at most for all of this and goes on whatever happened. An old
   master that answers the pause but not the re-pointing stays paused for
   the pod's termination grace period, and follows the new master when it is
   back. The agent's preStop hook looks at a stopping master every 10 ms
