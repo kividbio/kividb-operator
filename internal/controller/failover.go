@@ -339,10 +339,13 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			if masterIP != "" && !followsMaster(v.status, masterIP, port) {
 				if err := r.Agent.ReplicaOf(ctx, p.Status.PodIP, masterIP, port); err != nil {
 					log.Error(err, "failed to point replica at master", "pod", p.Name, "master", masterIP)
-				} else if v.status.Role == agentapi.RoleMaster {
-					// A master demoted here -- most often the one a
-					// failover replaced, back -- may still be holding
-					// writes (fenceOldMaster).
+				} else if v.status.Role == agentapi.RoleMaster && v.status.RunID != "" && v.status.RunID == previous[p.Name].RunID {
+					// A master demoted here that has kept running since it
+					// was last recorded -- the one a failover replaced, back
+					// -- may still be holding writes (fenceOldMaster). A pod
+					// that has just started reports role master too (an
+					// engine starts as one), with a new run: it holds
+					// nothing, and its clients are left alone.
 					r.releaseDemotedMaster(ctx, p.Status.PodIP)
 				}
 			}

@@ -97,9 +97,13 @@ func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []st
 		delete(f.paused, ip)
 	case cmd == "PING":
 		return agentapi.ExecResponse{Type: "status", Str: "PONG"}
+	case cmd == "INFO SERVER":
+		return agentapi.ExecResponse{Type: "bulk", Str: "# Server" + crlf + "kividb_version:1.2.0" + crlf + "run_id:" + st.RunID + crlf}
 	}
 	return ok
 }
+
+const crlf = "\r\n"
 
 func (f *fakeAgents) byIP(ip string) *agentapi.StatusResponse {
 	if ip == "" {

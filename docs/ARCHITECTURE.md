@@ -201,12 +201,13 @@ does, in order:
    work across the pod's restart.
 5. **Election**: among the remaining ready pods, pick the one with the
    highest `replicationOffset` (most caught-up); ties break on pod name
-   for determinism. Before promoting it, hold the old master's writes:
-   `CLIENT PAUSE <terminationGracePeriodSeconds> WRITE` through its agent,
-   at the address and to the engine run its status entry recorded
-   (`status.pods[].podIP`, `runID`) -- after a force-delete its pod object
-   is gone while its container still runs, and takes writes, until its
-   replicas have left it. The failover waits 100 ms at most for this
+   for determinism. Before promoting it, hold the old master's writes
+   (`CLIENT PAUSE <ms> WRITE` through its agent, for the pod's
+   termination grace period) at the address and to the engine run its
+   status entry recorded (`status.pods[].podIP`, `runID`) -- after a
+   force-delete its pod object is gone while its container still runs,
+   and takes writes, until its replicas have left it. The failover waits
+   100 ms at most for this
    (`fenceTimeout`) and goes on whatever happened (`FailoverUnfenced`
    Event when nothing was recorded). Call `POST /promote` on it, move the
    `kividb.io/role` label to it.
@@ -214,7 +215,9 @@ does, in order:
    `masterHost:masterPort` doesn't match the new master's pod IP and
    port, call `POST /replicaof` to repoint it. This also self-heals a
    replica that was manually pointed elsewhere, or an old master that
-   comes back after a failover and needs to rejoin as a replica.
+   comes back after a failover and needs to rejoin as a replica; one that
+   kept running since it was last recorded may still hold writes, so its
+   clients are disconnected and its pause lifted.
 7. Status is stamped with `phase: FailingOver` for the reconcile pass in
    which a failover happened, then reverts to `Running`/`Degraded` once
    things settle, so the transition is visible in `kubectl get

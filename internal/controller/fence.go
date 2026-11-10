@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -63,11 +64,16 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 	}
 	fctx, cancel := context.WithTimeout(ctx, fenceTimeout)
 	defer cancel()
-	st, err := r.Agent.Status(fctx, last.PodIP)
-	if err == nil && st.RunID != last.RunID {
-		log.Info("not holding the writes at the old master's address: another engine answers there",
-			"pod", last.Name, "ip", last.PodIP, "runID", st.RunID, "recordedRunID", last.RunID)
-		return ""
+	// One command each for the run and the pause: under a CPU limit every
+	// round trip to a loaded engine can take tens of milliseconds, and
+	// GET /status makes seven.
+	info, err := r.Agent.Exec(fctx, last.PodIP, "INFO", "server")
+	if err == nil {
+		if runID := infoField(info.Str, "run_id"); runID != last.RunID {
+			log.Info("not holding the writes at the old master's address: another engine answers there",
+				"pod", last.Name, "ip", last.PodIP, "runID", runID, "recordedRunID", last.RunID)
+			return ""
+		}
 	}
 	if err == nil {
 		_, err = r.Agent.Exec(fctx, last.PodIP, "CLIENT", "PAUSE", strconv.FormatInt(fencePause(c).Milliseconds(), 10), "WRITE")
@@ -96,4 +102,15 @@ func (r *KividbClusterReconciler) releaseDemotedMaster(ctx context.Context, ip s
 		logf.FromContext(ctx).V(1).Info("disconnecting a demoted master's clients", "ip", ip, "error", err.Error())
 	}
 	r.unpauseWrites(ctx, ip)
+}
+
+// infoField is the value of key in an INFO reply ("key:value" lines), or
+// "".
+func infoField(info, key string) string {
+	for line := range strings.SplitSeq(info, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), key+":"); ok {
+			return v
+		}
+	}
+	return ""
 }

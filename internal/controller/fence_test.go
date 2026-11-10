@@ -68,6 +68,15 @@ func TestFailover_FencesTheOldMasterAtItsLastAddress(t *testing.T) {
 	}
 }
 
+// The fence is two engine commands, the run check and the pause: under a
+// CPU limit every round trip to a loaded engine can take tens of
+// milliseconds, and GET /status makes seven.
+func TestFailover_FenceChecksTheRunWithOneCommand(t *testing.T) {
+	h := newFenceHarness(t)
+	h.assertFailoverTo("c1-1")
+	h.assertCallOrder("exec 10.0.0.1 INFO server", "exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2")
+}
+
 // The StatefulSet recreated the pod under the same name, with a new
 // address: the engine to hold is the old one, at the old address.
 func TestFailover_FencesTheOldAddressNotTheReplacementPod(t *testing.T) {
@@ -186,4 +195,25 @@ func TestFailover_OldMasterBackWhilePausedFollowsAndIsReleased(t *testing.T) {
 		t.Error("the old master's writes are still held")
 	}
 	h.assertRole("10.0.0.1", agentapi.RoleReplica, "10.0.0.2")
+}
+
+// A replica whose pod restarted reports role master (an engine starts as
+// one) until it is pointed at the master. It is a new engine run, not a
+// demoted master: its clients are left alone.
+func TestReconcileRoles_RestartedReplicaKeepsItsClients(t *testing.T) {
+	h := newRolesHarness(t, "c1-1",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "replica", ready: true, agent: masterRun(0, "stream-new", "run-new")},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "master", ready: true, agent: masterRun(100, "stream-a", "run-1")},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleReplica, Synced: true, ReplicationOffset: 100, RunID: "run-old", PodIP: "10.0.0.1"},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleMaster, Synced: true, ReplicationOffset: 100, RunID: "run-1", PodIP: "10.0.0.2"},
+	}
+	h.reconcile()
+	h.assertCallOrder("replicaof 10.0.0.1 -> 10.0.0.2")
+	for _, call := range h.agents.calls {
+		if strings.HasPrefix(call, "exec 10.0.0.1 CLIENT") {
+			t.Errorf("the restarted replica was sent %q", call)
+		}
+	}
 }

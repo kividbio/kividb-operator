@@ -390,7 +390,10 @@ pod can take to stop. An old master that comes back sooner is made a
 replica of the new one, its clients are disconnected and the pause is
 lifted, so the writes it held fail rather than land; a force-deleted
 pod's replacement is a new engine, never paused, whose data stops at the
-fence, and it rejoins as a replica. With no address recorded -- a
+fence, and it rejoins as a replica. An old master that keeps running
+without coming back -- its node cut off from the API server but not from
+the pods -- takes writes again once the pause ends, until it is demoted.
+With no address recorded -- a
 `kividbclusters` CRD from before `podIP`, which Helm does not upgrade --
 the failover goes on unfenced (`FailoverUnfenced` Warning).
 `min-replicas-to-write` / `min-replicas-max-lag` narrow this window: a master refuses writes
