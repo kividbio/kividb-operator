@@ -382,21 +382,21 @@ pod deleted with `--grace-period=0 --force`: its pod object is gone at
 once, but its container keeps running, and taking writes, until its
 replicas have left it (68 and 188 acknowledged writes lost in two AKS
 tests; on kind, 689 to 954 per force-delete without the fence, none with
-it). The failover waits 100 ms at most for the fence and goes on whatever
-happened, so a master cut off from the operator is not held: it
-acknowledges writes until it is demoted. The pause lasts
-`terminationGracePeriodSeconds` (60 s by default), the longest the old
-pod can take to stop. An old master that comes back sooner is made a
-replica of the new one, its clients are disconnected and the pause is
-lifted, so the writes it held fail rather than land; a force-deleted
-pod's replacement is a new engine, never paused, whose data stops at the
-fence, and it rejoins as a replica. An old master that keeps running
-without coming back -- its node cut off from the API server but not from
-the pods -- takes writes again once the pause ends, until it is demoted.
-With no address recorded -- a
-`kividbclusters` CRD from before `podIP`, which Helm does not upgrade --
-the failover goes on unfenced (`FailoverUnfenced` Warning).
-`min-replicas-to-write` / `min-replicas-max-lag` narrow this window: a master refuses writes
+it). As in a switchover, the replica is promoted once it has everything
+the old master acknowledged before the pause, and the old master is then
+made its replica, its clients disconnected and the pause lifted, so the
+writes it held fail rather than land. The failover waits 100 ms at most
+for all of this and goes on whatever happened, so a master cut off from
+the operator is not held: it acknowledges writes until it is demoted.
+Should the old master answer the pause but not the re-pointing, the
+pause lasts `terminationGracePeriodSeconds` (60 s by default), the
+longest the old pod can take to stop, and it is made a replica when it
+is back. A force-deleted pod's replacement is a new engine, never
+paused, whose data stops at the fence; it rejoins as a replica. With no
+address recorded -- a `kividbclusters` CRD from before `podIP`, which
+Helm does not upgrade -- the failover goes on unfenced
+(`FailoverUnfenced` Warning). `min-replicas-to-write` /
+`min-replicas-max-lag` narrow this window: a master refuses writes
 (`NOREPLICAS`) unless that many replicas acknowledged within the lag. The
 operator does not set them in a replicated cluster (it does in a sharded
 one, through `spec.cluster.minReplicasToWrite`, default 0), because the

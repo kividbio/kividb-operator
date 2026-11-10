@@ -63,8 +63,51 @@ func TestFailover_FencesTheOldMasterAtItsLastAddress(t *testing.T) {
 	h := newFenceHarness(t)
 	h.assertFailoverTo("c1-1")
 	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2")
-	if !h.agents.paused["10.0.0.1"] {
-		t.Error("the old master's writes are not held")
+}
+
+// Once the replica is promoted, the old master that answered the fence
+// follows it at once, as in a switchover: it can take no write when its
+// pause ends, its clients are sent to the new master, and a force-deleted
+// one's preStop hook lets it stop.
+func TestFailover_MakesTheFencedMasterAReplicaAtOnce(t *testing.T) {
+	h := newFenceHarness(t)
+	h.assertFailoverTo("c1-1")
+	h.assertCallOrder(
+		"exec 10.0.0.1 CLIENT PAUSE 60000 WRITE",
+		"promote 10.0.0.2",
+		"replicaof 10.0.0.1 -> 10.0.0.2",
+		"exec 10.0.0.1 CLIENT KILL TYPE normal",
+		"exec 10.0.0.1 CLIENT UNPAUSE",
+	)
+	if h.agents.paused["10.0.0.1"] {
+		t.Error("the old master's writes are still held")
+	}
+	h.assertRole("10.0.0.1", agentapi.RoleReplica, "10.0.0.2")
+}
+
+// A write the old master acknowledged just before the pause may not have
+// reached the replica yet: the promotion waits for it to, within the
+// fence's budget.
+func TestFailover_WaitsForTheCandidateToCatchUpWithTheFencedMaster(t *testing.T) {
+	h := newFenceHarness(t)
+	h.agents.status["10.0.0.1"] = masterRun(120, "stream-a", "run-0")
+	h.agents.catchUp = map[string]int{"10.0.0.2": 2}
+	h.assertFailoverTo("c1-1")
+	if n := h.agents.catchUp["10.0.0.2"]; n != 0 {
+		t.Errorf("c1-1 was promoted %d ROLE answers before it had caught up with the old master", n)
+	}
+}
+
+// A replica that does not catch up within the budget is promoted anyway:
+// the fence may not hold the failover up.
+func TestFailover_PromotesAReplicaThatDoesNotCatchUpWithinTheBudget(t *testing.T) {
+	h := newFenceHarness(t)
+	h.agents.status["10.0.0.1"] = masterRun(120, "stream-a", "run-0")
+	h.agents.catchUp = map[string]int{"10.0.0.2": -1}
+	start := time.Now()
+	h.assertFailoverTo("c1-1")
+	if took := time.Since(start); took >= time.Second {
+		t.Errorf("the failover took %s, want it bounded by fenceTimeout (%s)", took, fenceTimeout)
 	}
 }
 
@@ -179,6 +222,7 @@ func TestFailover_OldEngineWithoutPauseDoesNotBlock(t *testing.T) {
 // on the dropped connections instead of landing on a replica.
 func TestFailover_OldMasterBackWhilePausedFollowsAndIsReleased(t *testing.T) {
 	h := newFenceHarness(t, testPod{name: "c1-0", ip: "10.0.0.1", label: "master", unreadyFor: time.Minute, agent: masterRun(100, "stream-a", "run-0")})
+	h.agents.failReplicaOf = map[string]bool{"10.0.0.1": true} // pointing it at the new master at once fails
 	if m, failover := h.reconcileAndPersist(); m != "c1-1" || !failover {
 		t.Fatalf("pass 1: master=%q failover=%v, want a failover to c1-1", m, failover)
 	}
@@ -186,6 +230,7 @@ func TestFailover_OldMasterBackWhilePausedFollowsAndIsReleased(t *testing.T) {
 		t.Fatal("pass 1: the old master's writes are not held")
 	}
 
+	h.agents.failReplicaOf = nil
 	h.setReady("c1-0", true)
 	if m, failover := h.reconcileAndPersist(); m != "c1-1" || failover {
 		t.Fatalf("pass 2: master=%q failover=%v, want c1-1 and no failover", m, failover)

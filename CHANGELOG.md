@@ -54,11 +54,14 @@ server drops the field and failovers do not hold the old master's writes
   the AKS test, 689 to 954 per force-delete on kind. Before promoting a
   replica, the operator now holds the old master's writes (`CLIENT PAUSE
   WRITE` through its agent) at the address and engine run `status.pods[]`
-  last recorded for it (`podIP`, new, and `runID`). It waits 100 ms at most
-  and goes on whatever happened. The pause lasts the pod's termination
-  grace period; an old master that comes back sooner follows the new one,
-  its clients are disconnected and the pause is lifted. The agent's preStop
-  hook looks at a stopping master every 10 ms instead of 250 ms.
+  last recorded for it (`podIP`, new, and `runID`), waits for the replica to
+  catch up with it, and once the replica is promoted makes the old master
+  its replica and disconnects its clients, as a switchover does. It waits
+  100 ms at most for all of this and goes on whatever happened. An old
+  master that answers the pause but not the re-pointing stays paused for
+  the pod's termination grace period, and follows the new master when it is
+  back. The agent's preStop hook looks at a stopping master every 10 ms
+  instead of 250 ms.
   `hack/e2e/10-force-delete-fence.sh` force-deletes the master under load
   and counts the writes lost (skipped in CI: `SKIP_FENCE=1`).
 

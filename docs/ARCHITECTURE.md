@@ -206,11 +206,13 @@ does, in order:
    termination grace period) at the address and to the engine run its
    status entry recorded (`status.pods[].podIP`, `runID`) -- after a
    force-delete its pod object is gone while its container still runs,
-   and takes writes, until its replicas have left it. The failover waits
-   100 ms at most for this
-   (`fenceTimeout`) and goes on whatever happened (`FailoverUnfenced`
-   Event when nothing was recorded). Call `POST /promote` on it, move the
-   `kividb.io/role` label to it.
+   and takes writes, until its replicas have left it -- and wait for the
+   candidate to catch up with it, as a switchover does. The failover
+   waits 100 ms at most for this (`fenceTimeout`) and goes on whatever
+   happened (`FailoverUnfenced` Event when nothing was recorded). Call
+   `POST /promote` on it, move the `kividb.io/role` label to it, then
+   `POST /replicaof` on the old master, disconnect its clients and lift
+   its pause.
 6. **Convergence**: for every other ready pod, if its reported
    `masterHost:masterPort` doesn't match the new master's pod IP and
    port, call `POST /replicaof` to repoint it. This also self-heals a

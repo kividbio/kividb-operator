@@ -216,7 +216,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		// until its replicas have left it: hold them first (fence.go).
 		heldOld := ""
 		if needsFailover && behindOf == "" {
-			heldOld = r.fenceOldMaster(ctx, c, previous[currentMasterName])
+			heldOld = r.fenceOldMaster(ctx, c, previous[currentMasterName], views[candidate].pod.Status.PodIP)
 		}
 
 		// Take the master label off the pod being failed away from *before*
@@ -251,6 +251,22 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 		if err := r.setRoleLabel(ctx, views[candidate].pod, kividbv1alpha1.RoleMaster); err != nil {
 			return nil, currentMasterName, false, err
+		}
+		if heldOld != "" {
+			// It answered the fence: make it the new master's replica at
+			// once, as a switchover does, so that it takes no write when
+			// its pause ends, and send its clients away. If this fails, its
+			// pause runs out by itself, and the loop below does it when the
+			// pod is back.
+			if err := r.Agent.ReplicaOf(ctx, heldOld, candidateIP, port); err != nil {
+				log.Info("could not point the fenced master at the new master; its pause runs out by itself", "pod", currentMasterName, "error", err.Error())
+			} else {
+				if old, ok := views[currentMasterName]; ok && old.status != nil && old.pod.Status.PodIP == heldOld {
+					old.status = &agentapi.StatusResponse{Role: agentapi.RoleReplica, MasterHost: candidateIP, MasterPort: port,
+						KeyCount: old.status.KeyCount, KeyCountKnown: old.status.KeyCountKnown, RunID: old.status.RunID}
+				}
+				r.releaseDemotedMaster(ctx, heldOld)
+			}
 		}
 		if fenced != "" {
 			// Its pause lasts restartedMasterPause: if this fails, it ends

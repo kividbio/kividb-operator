@@ -28,31 +28,35 @@ import (
 // PAUSE WRITE through its agent) at the address its status entry last
 // recorded, the pod object -- and with it the address -- being gone, and
 // only if the engine answering there is still the one that entry recorded.
-// It is a best effort, and a bounded one: the failover waits fenceTimeout
-// at most and goes on whatever happened. A master that is gone needs no
-// fence, and one that is cut off from the operator cannot be given one;
-// neither may hold the failover up.
+// Then it waits for the replica to have everything the master
+// acknowledged before the pause, as a switchover does (waitCaughtUp), and
+// once the replica is promoted makes the old master its replica
+// (releaseDemotedMaster). It is a best effort, and a bounded one: the
+// failover waits fenceTimeout at most, for all of it, and goes on whatever
+// happened. A master that is gone needs no fence, and one that is cut off
+// from the operator cannot be given one; neither may hold the failover up.
 
 // fenceTimeout is how long a failover waits, at most, to hold the writes
-// of the master it replaces. Its agent answers within milliseconds while
-// its container still runs; an address nothing answers on costs this much,
-// once.
+// of the master it replaces and for the replica to catch up with it. Its
+// agent answers within milliseconds while its container still runs; an
+// address nothing answers on costs this much, once.
 const fenceTimeout = 100 * time.Millisecond
 
-// fencePause is how long the fence holds the old master's writes: the
+// fencePause is how long the fence holds the old master's writes, should
+// it not be made the new master's replica right after the promotion: the
 // pod's termination grace period, the longest its container can take to
-// stop. An old master that comes back sooner is made a replica of the new
-// one, its clients are disconnected and the pause is lifted
-// (releaseDemotedMaster).
+// stop. An old master that comes back sooner is made a replica then, its
+// clients are disconnected and the pause is lifted (releaseDemotedMaster).
 func fencePause(c *kividbv1alpha1.KividbCluster) time.Duration {
 	return time.Duration(*gracePeriod(c)) * time.Second
 }
 
 // fenceOldMaster holds the writes of the master being failed away from,
-// last being its entry in the last persisted status. It returns the
-// address it holds them at, or "" when it did not (the failover goes on
-// either way).
-func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv1alpha1.KividbCluster, last kividbv1alpha1.KividbPodStatus) string {
+// last being its entry in the last persisted status, and waits for the
+// replica at candidateIP to catch up with it. It returns the address it
+// holds the writes at, or "" when it did not (the failover goes on either
+// way).
+func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv1alpha1.KividbCluster, last kividbv1alpha1.KividbPodStatus, candidateIP string) string {
 	log := logf.FromContext(ctx)
 	if last.PodIP == "" || last.RunID == "" {
 		// A kividbclusters CRD from before status.pods[].podIP drops the
@@ -81,6 +85,9 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 	switch {
 	case err == nil:
 		log.Info("fenced the master being failed away from", "pod", last.Name, "ip", last.PodIP)
+		if ok, _, why := r.waitCaughtUp(fctx, last.PodIP, candidateIP); !ok {
+			log.Info("promoting a replica that may not have caught up with the fenced master", "pod", last.Name, "why", why)
+		}
 		return last.PodIP
 	case errors.Is(fctx.Err(), context.DeadlineExceeded):
 		log.Info("the fence timed out; failing over without it", "pod", last.Name, "ip", last.PodIP, "after", fenceTimeout)
