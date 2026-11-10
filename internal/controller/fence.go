@@ -83,3 +83,17 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 	}
 	return ""
 }
+
+// releaseDemotedMaster lets go of a master that has just been made a
+// replica -- the old master of a failover, come back, or one that
+// restarted behind its replicas -- which may still be holding writes
+// (fenceOldMaster, pauseWrites). Its clients are disconnected first, so
+// that they reconnect through the master Service and the writes it held
+// fail on the dropped connections instead of landing; then the pause is
+// lifted. On an engine that was not paused, UNPAUSE does nothing.
+func (r *KividbClusterReconciler) releaseDemotedMaster(ctx context.Context, ip string) {
+	if _, err := r.Agent.Exec(ctx, ip, "CLIENT", "KILL", "TYPE", "normal"); err != nil {
+		logf.FromContext(ctx).V(1).Info("disconnecting a demoted master's clients", "ip", ip, "error", err.Error())
+	}
+	r.unpauseWrites(ctx, ip)
+}

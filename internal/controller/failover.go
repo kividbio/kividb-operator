@@ -261,10 +261,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			} else {
 				old.status = &agentapi.StatusResponse{Role: agentapi.RoleReplica, MasterHost: candidateIP, MasterPort: port,
 					KeyCount: old.status.KeyCount, KeyCountKnown: old.status.KeyCountKnown, RunID: old.status.RunID}
-				if _, err := r.Agent.Exec(ctx, fenced, "CLIENT", "KILL", "TYPE", "normal"); err != nil {
-					log.V(1).Info("disconnecting the restarted master's clients", "pod", currentMasterName, "error", err.Error())
-				}
-				r.unpauseWrites(ctx, fenced)
+				r.releaseDemotedMaster(ctx, fenced)
 			}
 		}
 		switch {
@@ -342,6 +339,11 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			if masterIP != "" && !followsMaster(v.status, masterIP, port) {
 				if err := r.Agent.ReplicaOf(ctx, p.Status.PodIP, masterIP, port); err != nil {
 					log.Error(err, "failed to point replica at master", "pod", p.Name, "master", masterIP)
+				} else if v.status.Role == agentapi.RoleMaster {
+					// A master demoted here -- most often the one a
+					// failover replaced, back -- may still be holding
+					// writes (fenceOldMaster).
+					r.releaseDemotedMaster(ctx, p.Status.PodIP)
 				}
 			}
 			if err := r.setRoleLabel(ctx, v.pod, kividbv1alpha1.RoleReplica); err != nil {

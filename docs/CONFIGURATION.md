@@ -384,7 +384,13 @@ replicas have left it (68 and 188 acknowledged writes lost in two AKS
 tests; on kind, 689 to 954 per force-delete without the fence, none with
 it). The failover waits 100 ms at most for the fence and goes on whatever
 happened, so a master cut off from the operator is not held: it
-acknowledges writes until it is demoted. With no address recorded -- a
+acknowledges writes until it is demoted. The pause lasts
+`terminationGracePeriodSeconds` (60 s by default), the longest the old
+pod can take to stop. An old master that comes back sooner is made a
+replica of the new one, its clients are disconnected and the pause is
+lifted, so the writes it held fail rather than land; a force-deleted
+pod's replacement is a new engine, never paused, whose data stops at the
+fence, and it rejoins as a replica. With no address recorded -- a
 `kividbclusters` CRD from before `podIP`, which Helm does not upgrade --
 the failover goes on unfenced (`FailoverUnfenced` Warning).
 `min-replicas-to-write` / `min-replicas-max-lag` narrow this window: a master refuses writes
