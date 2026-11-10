@@ -154,8 +154,9 @@ uninstall: ## Remove the CRDs from the cluster (also deletes any KividbCluster o
 # config/default does not create its namespace, as Helm's --create-namespace
 # does: deploy creates it if missing.
 .PHONY: deploy
-deploy: kustomize ## Deploy the operator (CRDs + RBAC + manager Deployment) to the cluster, running IMG.
+deploy: kustomize ## Deploy the operator (CRDs + RBAC + manager Deployment) to the cluster, running IMG and AGENT_IMG.
 	cd config/manager && $(KUSTOMIZE) edit set image docker.io/kividb/kividb-operator=$(IMG)
+	printf -- '- op: add\n  path: /spec/template/spec/containers/0/args/-\n  value: --default-agent-image=%s\n' '$(AGENT_IMG)' > config/manager/agent_patch.yaml
 	kubectl create namespace kividb-operator-system --dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -k config/default
 
