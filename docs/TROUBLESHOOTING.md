@@ -128,6 +128,25 @@ kubectl annotate kividbcluster my-cluster kividb.io/allow-empty-failover=true
 
 Remove the annotation again afterwards.
 
+## Failover without a fence (`FailoverUnfenced`)
+
+A failover went ahead without first holding the old master's writes,
+because the status recorded no address or engine run for it
+(`status.pods[].podIP`, `runID`). A master that was still running then --
+a force-deleted pod's container, for a moment -- may have acknowledged
+writes the new master never got. The usual cause is a `kividbclusters`
+CRD older than the operator: Helm installs CRDs once and never upgrades
+them, and the API server drops the status fields its CRD does not list.
+Apply the current CRDs:
+
+```bash
+kubectl apply -f charts/kividb-operator/crds/
+```
+
+The address is recorded again from the next status write. Right after an
+upgrade, pods whose agent has not been replaced yet report no engine run
+either; the rollout replaces them.
+
 ## `PersistenceDisabled`, `MasterRestartedEmpty`, `ShardDataLost`
 
 - **`PersistenceDisabled`** (and the `Persistence` condition `False`): the

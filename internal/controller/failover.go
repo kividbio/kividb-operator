@@ -211,6 +211,14 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 		log.Info("promoting pod to master", "pod", candidate, "reason", map[bool]string{true: "failover", false: "bootstrap"}[needsFailover])
 
+		// The master being replaced may still be running, and taking
+		// writes that the promotion would discard -- after a force-delete,
+		// until its replicas have left it: hold them first (fence.go).
+		heldOld := ""
+		if needsFailover && behindOf == "" {
+			heldOld = r.fenceOldMaster(ctx, c, previous[currentMasterName])
+		}
+
 		// Take the master label off the pod being failed away from *before*
 		// promoting its replacement. That pod is usually still there (hung,
 		// partitioned, crash-looping) and will come back believing it is a
@@ -230,12 +238,14 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 		if old, ok := views[currentMasterName]; ok {
 			if err := r.setRoleLabel(ctx, old.pod, kividbv1alpha1.RoleReplica); err != nil {
+				r.unpauseWrites(ctx, heldOld)
 				r.unpauseWrites(ctx, fenced)
 				return nil, currentMasterName, false, fmt.Errorf("demoting %s: %w", currentMasterName, err)
 			}
 		}
 		candidateIP := views[candidate].pod.Status.PodIP
 		if err := r.Agent.Promote(ctx, candidateIP); err != nil {
+			r.unpauseWrites(ctx, heldOld)
 			r.unpauseWrites(ctx, fenced)
 			return nil, currentMasterName, false, fmt.Errorf("promoting %s: %w", candidate, err)
 		}

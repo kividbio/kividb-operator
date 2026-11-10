@@ -374,14 +374,20 @@ or its pod is force-deleted, the writes it acknowledged in its last moments
 and had not yet streamed are lost with it, and a master that is cut off
 (not dead) goes on acknowledging writes on the connections it still has
 until it is demoted -- in the AKS test, 150 ms after the promotion, 120
-writes. The operator does not fence it. The same holds for a master pod
-deleted with `--grace-period=0 --force`: the operator promotes a replica
-in the same second, but the deleted pod's container keeps running, and
-taking writes, for a moment after its pod object is gone, with no address
-left for the operator to pause it at (in the AKS test, 188 writes; its
-other replica, which had read past the promotion point from it, resynced
-in full). `min-replicas-to-write` /
-`min-replicas-max-lag` narrow this window: a master refuses writes
+writes. Before it promotes a replica, the operator holds the old master's
+writes (`CLIENT PAUSE WRITE` through its agent) at the address the status
+last recorded for it (`status.pods[].podIP`), if the engine answering
+there still has the run recorded for it (`runID`). That covers a master
+pod deleted with `--grace-period=0 --force`: its pod object is gone at
+once, but its container keeps running, and taking writes, until its
+replicas have left it (68 and 188 acknowledged writes lost in two AKS
+tests; on kind, 689 to 954 per force-delete without the fence, none with
+it). The failover waits 100 ms at most for the fence and goes on whatever
+happened, so a master cut off from the operator is not held: it
+acknowledges writes until it is demoted. With no address recorded -- a
+`kividbclusters` CRD from before `podIP`, which Helm does not upgrade --
+the failover goes on unfenced (`FailoverUnfenced` Warning).
+`min-replicas-to-write` / `min-replicas-max-lag` narrow this window: a master refuses writes
 (`NOREPLICAS`) unless that many replicas acknowledged within the lag. The
 operator does not set them in a replicated cluster (it does in a sharded
 one, through `spec.cluster.minReplicasToWrite`, default 0), because the

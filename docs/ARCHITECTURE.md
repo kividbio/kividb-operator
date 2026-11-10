@@ -201,7 +201,14 @@ does, in order:
    work across the pod's restart.
 5. **Election**: among the remaining ready pods, pick the one with the
    highest `replicationOffset` (most caught-up); ties break on pod name
-   for determinism. Call `POST /promote` on it, move the
+   for determinism. Before promoting it, hold the old master's writes:
+   `CLIENT PAUSE <terminationGracePeriodSeconds> WRITE` through its agent,
+   at the address and to the engine run its status entry recorded
+   (`status.pods[].podIP`, `runID`) -- after a force-delete its pod object
+   is gone while its container still runs, and takes writes, until its
+   replicas have left it. The failover waits 100 ms at most for this
+   (`fenceTimeout`) and goes on whatever happened (`FailoverUnfenced`
+   Event when nothing was recorded). Call `POST /promote` on it, move the
    `kividb.io/role` label to it.
 6. **Convergence**: for every other ready pod, if its reported
    `masterHost:masterPort` doesn't match the new master's pod IP and
@@ -217,13 +224,14 @@ does, in order:
 ```mermaid
 sequenceDiagram
     participant Ctrl as Controller
-    participant Old as Old master pod (dead)
+    participant Old as Old master
     participant New as Best replica
     participant Others as Other replicas
 
     Ctrl->>Old: GET /status (times out / Ready=False)
     Note over Ctrl: unhealthyThresholdSeconds exceeded
     Ctrl->>New: GET /status (compare offsets)
+    Ctrl-->>Old: CLIENT PAUSE WRITE at its last address (100 ms at most)
     Ctrl->>New: POST /promote  (REPLICAOF NO ONE)
     Ctrl->>Ctrl: patch pod label kividb.io/role=master on New
     Ctrl->>Others: POST /replicaof {host: New's IP, port}

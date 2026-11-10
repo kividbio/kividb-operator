@@ -46,6 +46,11 @@ type fakeAgents struct {
 	noPause bool
 	// failReplicaOf: /replicaof fails on these pods.
 	failReplicaOf map[string]bool
+	// failPromote: /promote fails on these pods.
+	failPromote map[string]bool
+	// hang: nothing answers on these addresses -- a request waits until
+	// its context ends, as one to a dead node does.
+	hang map[string]bool
 }
 
 // execReply answers /exec the way kividb would, for the commands the
@@ -108,6 +113,10 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	if f.hang[ip] {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}
 	st, ok := f.status[ip]
 	if !ok {
 		return nil, fmt.Errorf("dial %s: connection refused", ip)
@@ -119,6 +128,10 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 		body = st
 	case "/promote":
 		f.calls = append(f.calls, "promote "+ip)
+		if f.failPromote[ip] {
+			b, _ := json.Marshal(agentapi.ErrorResponse{Error: "connection reset"})
+			return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
+		}
 		st.Role, st.MasterHost, st.MasterPort = agentapi.RoleMaster, "", 0
 	case "/replicaof":
 		var r agentapi.ReplicaOfRequest
@@ -482,6 +495,11 @@ func TestReconcileRoles_MasterRestartedBehindItsReplicas(t *testing.T) {
 	)
 	if h.agents.paused["10.0.0.9"] {
 		t.Error("the restarted master's writes are still held")
+	}
+	for _, call := range h.agents.calls {
+		if strings.Contains(call, "CLIENT PAUSE 60000") {
+			t.Errorf("the restarted master was fenced a second time: %q", call)
+		}
 	}
 }
 
