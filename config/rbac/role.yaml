@@ -181,5 +181,4 @@ rules:
       - get
       - create
       - update
-      - patch
       - delete

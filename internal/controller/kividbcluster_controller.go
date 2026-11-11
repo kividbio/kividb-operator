@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -87,6 +88,15 @@ type KividbClusterReconciler struct {
 	// sync on the last pass ("<ns>/<cluster>" -> map[pod]reason).
 	notSynced sync.Map
 
+	// serviceMonitorUnserved: until when the API server is taken not to
+	// serve the ServiceMonitor kind (time.Time), see serviceMonitorServed.
+	serviceMonitorUnserved atomic.Value
+
+	// serviceMonitorWarned: the clusters told that their ServiceMonitor
+	// cannot be made ("<ns>/<cluster>" -> struct{}), see
+	// reconcileServiceMonitor.
+	serviceMonitorWarned sync.Map
+
 	// clock is time.Now, unless a test sets it.
 	clock func() time.Time
 }
@@ -113,7 +123,7 @@ func (r *KividbClusterReconciler) agentToken() string {
 //+kubebuilder:rbac:groups="",resources=services;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-//+kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;create;update;patch;delete
+//+kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;create;update;delete
 
 // Reconcile implements the main control loop for a single KividbCluster.
 func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -222,7 +232,6 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if snapCfg != nil {
 		steps.run("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, &c, snapCfg.Name) })
 	}
-	// Last: a missing Prometheus Operator CRD skips nothing else.
 	steps.run("", func() error { return r.reconcileServiceMonitor(ctx, &c) })
 	applyErr := steps.err
 	if applyErr != nil {

@@ -347,15 +347,21 @@ gates the heavier, richer exporter.
 in its namespace and owned by it. It scrapes `/metrics` on the agent port
 of every pod and, with `enabled: true`, on `redis-exporter`'s port too,
 through the cluster's headless Service (one per shard in a sharded
-cluster). Setting it back to `false` deletes it. It needs the
-`monitoring.coreos.com` CRDs (Prometheus Operator): without them the
-Ready condition says so and the rest of the cluster is reconciled as
-usual. A `ServiceMonitor` of the same name the cluster does not own is
-never changed or deleted; the cluster reports it instead.
+cluster). Setting it back to `false` deletes it. The operator sets the
+selector, the endpoints and its own labels; labels and other fields you
+add (a scrape `interval`, the label your Prometheus selects by) are kept.
+A `ServiceMonitor` of the same name the cluster does not own is never
+changed or deleted; the Ready condition reports it instead.
+
+It needs the `monitoring.coreos.com` CRDs (Prometheus Operator). Without
+them the cluster gets one `ServiceMonitorUnavailable` Warning Event and is
+otherwise reconciled as usual. The operator looks for the CRDs again at
+most once a minute, so one installed later is picked up within a minute.
 
 Prometheus picks up a `ServiceMonitor` only if its `serviceMonitorSelector`
-and `serviceMonitorNamespaceSelector` match it. The operator copies no
-labels for that; with kube-prometheus-stack's defaults, set
+and `serviceMonitorNamespaceSelector` match it. Add the label your
+Prometheus selects by to the `ServiceMonitor`, or, with
+kube-prometheus-stack's defaults, set
 `prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false`.
 
 The chart's `metrics.serviceMonitor.enabled` is the other way: one

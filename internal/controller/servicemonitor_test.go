@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -14,8 +15,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -170,20 +173,125 @@ func TestServiceMonitorSelectsOnlyTheHeadlessServices(t *testing.T) {
 	}
 }
 
+// Without the CRD a cluster that asks for a ServiceMonitor gets one Warning
+// Event, not an error: nothing else of the cluster is held back or marked
+// not Ready because Prometheus Operator is not installed.
 func TestServiceMonitorWithoutTheCRD(t *testing.T) {
 	t.Parallel()
 
 	c := smCluster(true, false)
-	err := smReconciler(t, false, c).reconcileServiceMonitor(context.Background(), c)
-	if err == nil || !strings.Contains(err.Error(), "monitoring.coreos.com") {
-		t.Fatalf("serviceMonitor set without the CRD: error = %v, want one naming monitoring.coreos.com", err)
+	r := smReconciler(t, false, c)
+	rec := record.NewFakeRecorder(10)
+	r.Recorder = rec
+	for range 3 {
+		if err := r.reconcileServiceMonitor(context.Background(), c); err != nil {
+			t.Fatalf("serviceMonitor set without the CRD: error = %v, want none", err)
+		}
+	}
+	if got := len(rec.Events); got != 1 {
+		t.Fatalf("3 passes without the CRD: %d Events, want 1", got)
+	}
+	if ev := <-rec.Events; !strings.Contains(ev, "Warning ServiceMonitorUnavailable") || !strings.Contains(ev, "monitoring.coreos.com") {
+		t.Fatalf("Event = %q, want a ServiceMonitorUnavailable Warning naming monitoring.coreos.com", ev)
 	}
 
 	off := smCluster(false, false)
-	if err := smReconciler(t, false, off).reconcileServiceMonitor(context.Background(), off); err != nil {
+	r = smReconciler(t, false, off)
+	rec = record.NewFakeRecorder(10)
+	r.Recorder = rec
+	if err := r.reconcileServiceMonitor(context.Background(), off); err != nil {
 		t.Fatalf("serviceMonitor not set, no CRD: error = %v, want none", err)
 	}
+	if len(rec.Events) != 0 {
+		t.Fatal("serviceMonitor not set, no CRD: want no Event")
+	}
 }
+
+// The CRD lookup misses on every pass while the CRD is absent, and each
+// miss is a request to the API server. It is asked again only after
+// serviceMonitorRecheck; then a CRD installed meanwhile is found.
+func TestServiceMonitorCRDCheckedAgainLater(t *testing.T) {
+	t.Parallel()
+
+	c := smCluster(true, false)
+	now := time.Unix(1000, 0)
+	r := smReconciler(t, false, c)
+	lookups := 0
+	mapper := &countingMapper{RESTMapper: r.RESTMapper(), lookups: &lookups}
+	r.Client = &mapperClient{Client: r.Client, mapper: mapper}
+	r.clock = func() time.Time { return now }
+	ctx := context.Background()
+
+	for range 3 {
+		if err := r.reconcileServiceMonitor(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if lookups != 1 {
+		t.Fatalf("3 passes within serviceMonitorRecheck: %d lookups, want 1", lookups)
+	}
+
+	// The CRD is installed; after serviceMonitorRecheck it is found.
+	mapper.RESTMapper.(*meta.DefaultRESTMapper).Add(serviceMonitorGVK, meta.RESTScopeNamespace)
+	now = now.Add(serviceMonitorRecheck)
+	if err := r.reconcileServiceMonitor(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if getServiceMonitor(t, r, c) == nil {
+		t.Fatal("CRD installed, recheck due: no ServiceMonitor")
+	}
+}
+
+// Labels and spec fields the operator does not set, such as the label a
+// Prometheus selects ServiceMonitors by or a scrape interval, are kept.
+func TestServiceMonitorKeepsOtherFields(t *testing.T) {
+	t.Parallel()
+	c := smCluster(true, false)
+	r := smReconciler(t, true, c)
+	ctx := context.Background()
+	if err := r.reconcileServiceMonitor(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	sm := getServiceMonitor(t, r, c)
+	l := sm.GetLabels()
+	l["release"] = "kube-prometheus-stack"
+	sm.SetLabels(l)
+	if err := unstructured.SetNestedField(sm.Object, "app", "spec", "jobLabel"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Update(ctx, sm); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reconcileServiceMonitor(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	sm = getServiceMonitor(t, r, c)
+	if sm.GetLabels()["release"] != "kube-prometheus-stack" {
+		t.Fatalf("labels = %v, want release kept", sm.GetLabels())
+	}
+	if job, _, _ := unstructured.NestedString(sm.Object, "spec", "jobLabel"); job != "app" {
+		t.Fatalf("spec.jobLabel = %q, want it kept", job)
+	}
+}
+
+type countingMapper struct {
+	meta.RESTMapper
+	lookups *int
+}
+
+func (m *countingMapper) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+	if gk == serviceMonitorGVK.GroupKind() {
+		*m.lookups++
+	}
+	return m.RESTMapper.RESTMapping(gk, versions...)
+}
+
+type mapperClient struct {
+	client.Client
+	mapper meta.RESTMapper
+}
+
+func (c *mapperClient) RESTMapper() meta.RESTMapper { return c.mapper }
 
 func TestServiceMonitorDeletedWhenTurnedOff(t *testing.T) {
 	t.Parallel()
@@ -241,7 +349,7 @@ func TestServiceMonitorRestored(t *testing.T) {
 	}
 	sm := getServiceMonitor(t, r, c)
 	want := sm.Object["spec"]
-	sm.Object["spec"] = map[string]interface{}{"endpoints": []interface{}{}}
+	sm.Object["spec"] = map[string]interface{}{"endpoints": []interface{}{}, "selector": map[string]interface{}{}}
 	if err := r.Update(ctx, sm); err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,11 +67,15 @@ func TestServiceMonitorEnvtest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	events := record.NewFakeRecorder(1000)
+	// skew moves the reconciler's clock forward, past serviceMonitorRecheck.
+	var skew atomic.Int64
 	r := &KividbClusterReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Agent:    NewAgentClient(time.Second, "test-token"),
-		Recorder: record.NewFakeRecorder(1000),
+		Recorder: events,
+		clock:    func() time.Time { return time.Now().Add(time.Duration(skew.Load())) },
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
@@ -102,19 +107,29 @@ func TestServiceMonitorEnvtest(t *testing.T) {
 		}
 	}
 
-	// No CRD: the rest of the cluster is made, and Ready says why there is
-	// no ServiceMonitor.
+	// No CRD: the rest of the cluster is made, a Warning Event says why
+	// there is no ServiceMonitor, and the Ready condition does not.
 	eventually("the StatefulSet is made without the ServiceMonitor CRD", func() bool {
 		return c.Get(ctx, key, &appsv1.StatefulSet{}) == nil
 	})
-	eventually("the Ready condition names the missing CRD", func() bool {
+	eventually("a ServiceMonitorUnavailable Event", func() bool {
+		select {
+		case ev := <-events.Events:
+			return strings.Contains(ev, "ServiceMonitorUnavailable")
+		default:
+			return false
+		}
+	})
+	eventually("the Ready condition is set", func() bool {
 		var got kividbv1alpha1.KividbCluster
 		if err := c.Get(ctx, key, &got); err != nil {
 			t.Fatal(err)
 		}
 		ready := findCondition(got.Status.Conditions, "Ready")
-		return ready != nil && ready.Status == metav1.ConditionFalse &&
-			strings.Contains(ready.Message, "servicemonitors.monitoring.coreos.com")
+		if ready != nil && strings.Contains(ready.Message, "monitoring.coreos.com") {
+			t.Fatalf("the missing CRD is on the Ready condition: %+v", ready)
+		}
+		return ready != nil
 	})
 
 	// The CRD installed while the operator runs: the ServiceMonitor follows.
@@ -123,6 +138,7 @@ func TestServiceMonitorEnvtest(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("installing the ServiceMonitor CRD: %v", err)
 	}
+	skew.Store(int64(serviceMonitorRecheck))
 	sm := &unstructured.Unstructured{}
 	sm.SetGroupVersionKind(serviceMonitorGVK)
 	eventually("the ServiceMonitor is made once the CRD is installed", func() bool {
@@ -135,13 +151,6 @@ func TestServiceMonitorEnvtest(t *testing.T) {
 	if !metav1.IsControlledBy(sm, &got) {
 		t.Fatalf("ServiceMonitor owners = %v, want the cluster as controller", sm.GetOwnerReferences())
 	}
-	eventually("the Ready condition no longer names the CRD", func() bool {
-		if err := c.Get(ctx, key, &got); err != nil {
-			t.Fatal(err)
-		}
-		ready := findCondition(got.Status.Conditions, "Ready")
-		return ready != nil && !strings.Contains(ready.Message, "monitoring.coreos.com")
-	})
 
 	// Turned off: deleted.
 	got.Spec.Monitoring.ServiceMonitor = false
