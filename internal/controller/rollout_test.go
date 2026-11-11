@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,9 +13,11 @@ import (
 	"github.com/kividbio/kividb-operator/internal/agentapi"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -433,5 +436,79 @@ func TestReconcileRollout(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A rollout asks for the master's switchover after reconcileHandover has
+// found none wanted: a pause refused on one pass is backed off on the next,
+// not tried again at once, writes held each time (#82).
+func TestRolloutBacksOffAfterARefusedPause(t *testing.T) {
+	c := &kividbv1alpha1.KividbCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
+		Spec:       kividbv1alpha1.KividbClusterSpec{Replicas: 2},
+	}
+	objs := []client.Object{&appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default", Generation: 3},
+		Status:     appsv1.StatefulSetStatus{UpdateRevision: "new", ObservedGeneration: 3},
+	}}
+	agents := &fakeAgents{status: map[string]*agentapi.StatusResponse{
+		"10.0.0.1": master(100),
+		"10.0.0.2": replicaOf("10.0.0.1", 100),
+		"10.0.0.3": replicaOf("10.0.0.1", 100),
+	}, pauseRefused: map[string]int{"10.0.0.1": 10}}
+	var pods []corev1.Pod
+	var statuses []kividbv1alpha1.KividbPodStatus
+	for i, rev := range []string{"old", "new", "new"} {
+		name, ip := fmt.Sprintf("c1-%d", i), fmt.Sprintf("10.0.0.%d", i+1)
+		role := kividbv1alpha1.RoleReplica
+		if i == 0 {
+			role = kividbv1alpha1.RoleMaster
+		}
+		pod := corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default",
+				Labels: map[string]string{appsv1.StatefulSetRevisionLabel: rev, kividbv1alpha1.RoleLabel: string(role)}},
+			Status: corev1.PodStatus{PodIP: ip, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+		}
+		objs = append(objs, pod.DeepCopy())
+		pods = append(pods, pod)
+		statuses = append(statuses, kividbv1alpha1.KividbPodStatus{Name: name, Role: role, Ready: true, Synced: true, ReplicationOffset: 100})
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	r := &KividbClusterReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
+		Scheme:   scheme,
+		Agent:    &AgentClient{http: &http.Client{Transport: agents}},
+		Recorder: record.NewFakeRecorder(100),
+		clock:    func() time.Time { return now },
+	}
+	pauses := func() int {
+		n := 0
+		for _, call := range agents.calls {
+			if strings.Contains(call, "CLIENT PAUSE") {
+				n++
+			}
+		}
+		return n
+	}
+
+	r.reconcileRoleChanges(context.Background(), c, pods, statuses, "c1-0", authGenerations{})
+	if n := pauses(); n != 1 {
+		t.Fatalf("pass 1: %d pauses, want the rollout's switchover tried once (calls %v)", n, agents.calls)
+	}
+	now = now.Add(10 * time.Second) // the next pass
+	r.reconcileRoleChanges(context.Background(), c, pods, statuses, "c1-0", authGenerations{})
+	if n := pauses(); n != 1 {
+		t.Errorf("pass 2: %d pauses, want the switchover deferred after the abort (calls %v)", n, agents.calls)
+	}
+	cond := meta.FindStatusCondition(c.Status.Conditions, SwitchoverCondition)
+	if cond == nil || cond.Reason != "Aborted" {
+		t.Errorf("condition %+v, want %s Aborted kept while the rollout still wants the switchover", cond, SwitchoverCondition)
 	}
 }

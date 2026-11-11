@@ -49,8 +49,8 @@ master's writes (`FailoverUnfenced` Warning).
   master has answered, and tries again after a refusal: every try is given
   the whole call, and new ones start for 3 s after the first, so the fence
   takes at most two pause calls and that window against a live master that
-  cannot pause (17 s with the default timeouts, more with a longer
-  `--agent-timeout`). A pause that got no answer may have landed, so that
+  cannot pause (17 s with the default `--agent-timeout`, more with a longer
+  one). A pause that got no answer may have landed, so that
   master is recorded in `status.fencedMaster` and demoted after the
   promotion like a fenced one. The `Switchover` condition and the count of
   aborts go away once no switchover is wanted any more, or the master is

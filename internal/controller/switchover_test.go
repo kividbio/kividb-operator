@@ -280,6 +280,19 @@ func TestSwitchoverWithoutAWritePauseOnAnUnknownClientSubcommand(t *testing.T) {
 	}
 }
 
+// reconcileRoleChanges runs the role changes of one Reconcile pass, and
+// returns the master they moved the role to, if any.
+func (h *rolesHarness) reconcileRoleChanges(statuses []kividbv1alpha1.KividbPodStatus, master string) string {
+	h.t.Helper()
+	h.r.reconcileRoleChanges(context.Background(), h.cluster, h.list(), statuses, master, authGenerations{})
+	for _, p := range h.list() {
+		if p.Labels[kividbv1alpha1.RoleLabel] == string(kividbv1alpha1.RoleMaster) && p.Name != master {
+			return p.Name
+		}
+	}
+	return ""
+}
+
 // setStepDown asks pod name to hand its master role over, or not.
 func (h *rolesHarness) setStepDown(name string, on bool) {
 	h.t.Helper()
@@ -311,7 +324,7 @@ func TestSwitchoverAbortsAreForgottenWhenNoneIsWanted(t *testing.T) {
 	h.r.clock = func() time.Time { return now }
 
 	h.setStepDown("c1-0", true)
-	if got := h.r.reconcileHandover(context.Background(), h.cluster, h.list(), statuses, "c1-0"); got != "" {
+	if got := h.reconcileRoleChanges(statuses, "c1-0"); got != "" {
 		t.Fatalf("handover to %q, want it aborted", got)
 	}
 	if meta.FindStatusCondition(h.cluster.Status.Conditions, SwitchoverCondition) == nil {
@@ -319,7 +332,7 @@ func TestSwitchoverAbortsAreForgottenWhenNoneIsWanted(t *testing.T) {
 	}
 
 	h.setStepDown("c1-0", false)
-	h.r.reconcileHandover(context.Background(), h.cluster, h.list(), statuses, "c1-0")
+	h.reconcileRoleChanges(statuses, "c1-0")
 	if cond := meta.FindStatusCondition(h.cluster.Status.Conditions, SwitchoverCondition); cond != nil {
 		t.Errorf("condition %+v kept once no switchover was wanted", cond)
 	}
@@ -327,7 +340,7 @@ func TestSwitchoverAbortsAreForgottenWhenNoneIsWanted(t *testing.T) {
 	// A new request right away is not a retry: it is not deferred.
 	h.agents.catchUp["10.0.0.2"] = 0
 	h.setStepDown("c1-0", true)
-	if got := h.r.reconcileHandover(context.Background(), h.cluster, h.list(), statuses, "c1-0"); got != "c1-1" {
+	if got := h.reconcileRoleChanges(statuses, "c1-0"); got != "c1-1" {
 		t.Errorf("handover to %q, want c1-1 at once", got)
 	}
 }

@@ -204,6 +204,7 @@ func switchoverKey(c *kividbv1alpha1.KividbCluster) string { return c.Namespace 
 // writes again.
 func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []corev1.Pod, statuses []kividbv1alpha1.KividbPodStatus, masterPod string, req switchoverRequest) (string, error) {
 	log := logf.FromContext(ctx)
+	r.switchoverAsked.Store(switchoverKey(c), struct{}{}) // asked for on this pass (reconcileRoleChanges)
 	byName := make(map[string]*corev1.Pod, len(pods))
 	for i := range pods {
 		byName[pods[i].Name] = &pods[i]
