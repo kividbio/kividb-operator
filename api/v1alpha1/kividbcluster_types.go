@@ -435,7 +435,9 @@ const AllowEmptyFailoverAnnotation = "kividb.io/allow-empty-failover"
 // failover go ahead without the replicas that did not say how much they
 // hold: the replica promoted is the one that holds the most of those that
 // did, and writes only the others hold are lost. Without it the failover
-// waits for them (FailoverBlocked); see reconcileRoles.
+// waits for them (FailoverBlocked); see reconcileRoles. The operator removes
+// it once a failover has gone through, so it never skips the hold on a
+// later one.
 const AllowUnreadFailoverAnnotation = "kividb.io/allow-unread-failover"
 
 // ShardPromoteAnnotation records, on a sharded KividbCluster, the last

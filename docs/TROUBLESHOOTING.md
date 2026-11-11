@@ -143,7 +143,7 @@ losing any writes only that replica holds is acceptable:
 kubectl annotate kividbcluster my-cluster kividb.io/allow-unread-failover=true
 ```
 
-Remove the annotation again afterwards.
+The operator removes the annotation once the failover has gone through.
 
 ## Failover without a fence (`FailoverUnfenced`)
 

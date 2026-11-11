@@ -8,6 +8,7 @@ import (
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Which replica a failover promotes (#78).
@@ -144,13 +145,25 @@ func TestFailover_TheAnnotationLetsAHeldFailoverGoAhead(t *testing.T) {
 		t.Fatal("without the annotation the failover went ahead, want it held")
 	}
 	h.cluster.Annotations = map[string]string{kividbv1alpha1.AllowUnreadFailoverAnnotation: "true"}
+	if err := h.r.Update(context.Background(), h.cluster); err != nil {
+		t.Fatal(err)
+	}
 	h.assertFailoverTo("c1-2")
-	if e := eventsWith(rec, "FailoverForced"); len(e) != 1 || !strings.Contains(e[0], "c1-1") || !strings.Contains(e[0], kividbv1alpha1.AllowUnreadFailoverAnnotation) {
-		t.Errorf("events %v, want one FailoverForced naming c1-1, the replica left out, and the annotation", e)
+	if e := eventsWith(rec, "FailoverForced"); len(e) != 1 || !strings.Contains(e[0], "c1-1") || !strings.Contains(e[0], kividbv1alpha1.AllowUnreadFailoverAnnotation) || !strings.Contains(e[0], "removed") {
+		t.Errorf("events %v, want one FailoverForced naming c1-1, the replica left out, and the annotation, and saying it is removed", e)
 	}
 	// Gone ahead, the hold is forgotten: a later one counts from its own start.
 	if _, ok := h.r.failoverHolds.Load(h.cluster.Namespace + "/" + h.cluster.Name); ok {
 		t.Error("the hold is still remembered after the failover went ahead")
+	}
+	// One failover per annotation: left set, it would skip the hold on every
+	// later failover too.
+	var stored kividbv1alpha1.KividbCluster
+	if err := h.r.Get(context.Background(), client.ObjectKeyFromObject(h.cluster), &stored); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := stored.Annotations[kividbv1alpha1.AllowUnreadFailoverAnnotation]; ok {
+		t.Errorf("%s is still %q after the failover it allowed", kividbv1alpha1.AllowUnreadFailoverAnnotation, v)
 	}
 }
 

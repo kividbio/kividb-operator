@@ -413,7 +413,8 @@ which loses any writes only they hold:
 kubectl annotate kividbcluster my-cluster kividb.io/allow-unread-failover=true
 ```
 
-Remove the annotation again afterwards.
+The operator removes the annotation once the failover has gone through, so
+it never skips the hold on a later failover.
 
 **What a failover can lose.** Replication is asynchronous: a master
 acknowledges a write before its replicas have it. When a master crashes

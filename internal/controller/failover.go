@@ -12,6 +12,7 @@ import (
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -295,7 +296,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				}
 				log.Info("failing over without the replicas that did not answer", "unread", unread, "replica", candidate)
 				r.event(c, corev1.EventTypeWarning, "FailoverForced",
-					"master %s is unavailable; promoting %s without %s, which did not answer ROLE (%s is set): writes only %s held are lost",
+					"master %s is unavailable; promoting %s without %s, which did not answer ROLE (%s is set): writes only %s held are lost. The annotation is removed once this failover has gone through",
 					currentMasterName, candidate, unreadList, kividbv1alpha1.AllowUnreadFailoverAnnotation, unreadList)
 			}
 			if heldOld != "" {
@@ -368,6 +369,11 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 		newMasterName = candidate
 		failoverHappened = needsFailover
+		if needsFailover && c.Annotations[kividbv1alpha1.AllowUnreadFailoverAnnotation] == "true" {
+			// One failover per annotation: left set, it would skip the
+			// hold for an unread replica on every later failover too.
+			r.clearUnreadFailoverOverride(ctx, c)
+		}
 		// Refresh our view of the new master so downstream REPLICAOF checks
 		// below see it as master rather than stale replica state, keeping its
 		// key count: the empty-replica check above needs it if this new
@@ -780,6 +786,24 @@ func (r *KividbClusterReconciler) event(c *kividbv1alpha1.KividbCluster, eventTy
 	if r.Recorder != nil {
 		r.Recorder.Eventf(c, eventType, reason, messageFmt, args...)
 	}
+}
+
+// clearUnreadFailoverOverride removes AllowUnreadFailoverAnnotation from c,
+// once the failover it was set for has gone through. The patch goes through
+// a copy, so the status this pass has not written yet is not replaced by the
+// stored one; c takes the new resourceVersion for that write.
+func (r *KividbClusterReconciler) clearUnreadFailoverOverride(ctx context.Context, c *kividbv1alpha1.KividbCluster) {
+	stored := c.DeepCopy()
+	patch := client.MergeFrom(stored.DeepCopy())
+	delete(stored.Annotations, kividbv1alpha1.AllowUnreadFailoverAnnotation)
+	if err := r.Client.Patch(ctx, stored, patch); err != nil {
+		if !apierrors.IsNotFound(err) {
+			logf.FromContext(ctx).Error(err, "removing the annotation", "annotation", kividbv1alpha1.AllowUnreadFailoverAnnotation)
+		}
+		return
+	}
+	delete(c.Annotations, kividbv1alpha1.AllowUnreadFailoverAnnotation)
+	c.ResourceVersion = stored.ResourceVersion
 }
 
 // failoverHold is when the failover away from master was first held back

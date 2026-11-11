@@ -39,7 +39,8 @@ drops them: failovers do not hold the old master's writes
     node), so the Warning says how long the failover has been held and
     what ends it, and `kividb.io/allow-unread-failover: "true"` on the
     cluster lets it go ahead without that replica (`FailoverForced`
-    Warning).
+    Warning); the operator removes the annotation once the failover has
+    gone through.
   - A master whose pod is gone, or replaced by a new pod (a force delete),
     and whose engine no longer answers, is now waited for until its new
     pod is Ready and has reported: it may come back on its volume holding
