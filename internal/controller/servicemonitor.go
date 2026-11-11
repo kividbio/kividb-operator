@@ -39,6 +39,31 @@ func serviceMonitorEndpoints(c *kividbv1alpha1.KividbCluster) []interface{} {
 	return endpoints
 }
 
+// mergeEndpoints returns want, with the fields an endpoint of have on the
+// same port carries besides its port and path (a scrape interval, a
+// relabeling) kept.
+func mergeEndpoints(have, want []interface{}) []interface{} {
+	byPort := map[interface{}]map[string]interface{}{}
+	for _, e := range have {
+		if ep, ok := e.(map[string]interface{}); ok {
+			byPort[ep["port"]] = ep
+		}
+	}
+	out := make([]interface{}, 0, len(want))
+	for _, e := range want {
+		ep := e.(map[string]interface{})
+		merged := map[string]interface{}{}
+		for k, v := range byPort[ep["port"]] {
+			merged[k] = v
+		}
+		for k, v := range ep {
+			merged[k] = v
+		}
+		out = append(out, merged)
+	}
+	return out
+}
+
 // serviceMonitorSelector picks the cluster's headless Services: the
 // replicated cluster's one, or a sharded cluster's one per shard. Each has
 // every pod of the cluster (or shard) once.
@@ -94,10 +119,7 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 			r.serviceMonitorWarned.Delete(key)
 			return nil
 		}
-		if _, warned := r.serviceMonitorWarned.LoadOrStore(key, struct{}{}); !warned {
-			r.event(c, corev1.EventTypeWarning, "ServiceMonitorUnavailable",
-				"spec.monitoring.serviceMonitor is set, but the API server does not serve servicemonitors.monitoring.coreos.com: install the Prometheus Operator's CRDs")
-		}
+		r.warnServiceMonitorUnavailable(c, key)
 		return nil
 	}
 	r.serviceMonitorWarned.Delete(key)
@@ -144,19 +166,31 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 		if err := unstructured.SetNestedField(sm.Object, serviceMonitorSelector(c), "spec", "selector"); err != nil {
 			return err
 		}
-		if err := unstructured.SetNestedSlice(sm.Object, serviceMonitorEndpoints(c), "spec", "endpoints"); err != nil {
+		have, _, _ := unstructured.NestedSlice(sm.Object, "spec", "endpoints")
+		if err := unstructured.SetNestedSlice(sm.Object, mergeEndpoints(have, serviceMonitorEndpoints(c)), "spec", "endpoints"); err != nil {
 			return err
 		}
 		return controllerutil.SetControllerReference(c, sm, r.scheme())
 	})
 	if apierrors.IsNotFound(err) {
-		// The kind was served when last looked up; its CRD has since gone.
-		// Look it up again after serviceMonitorRecheck.
+		// The kind was served when last looked up, and its CRD has since
+		// been removed: as if it had never been installed. Look again after
+		// serviceMonitorRecheck.
 		r.serviceMonitorUnserved.Store(r.now().Add(serviceMonitorRecheck))
-		return fmt.Errorf("ServiceMonitor %s: %w (was the servicemonitors.monitoring.coreos.com CRD removed?)", c.Name, err)
+		r.warnServiceMonitorUnavailable(c, key)
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("ServiceMonitor %s: %w", c.Name, err)
 	}
 	return nil
+}
+
+// warnServiceMonitorUnavailable tells a cluster that asks for a
+// ServiceMonitor, once, that there is no CRD to make it with.
+func (r *KividbClusterReconciler) warnServiceMonitorUnavailable(c *kividbv1alpha1.KividbCluster, key string) {
+	if _, warned := r.serviceMonitorWarned.LoadOrStore(key, struct{}{}); !warned {
+		r.event(c, corev1.EventTypeWarning, "ServiceMonitorUnavailable",
+			"spec.monitoring.serviceMonitor is set, but the API server does not serve servicemonitors.monitoring.coreos.com: install the Prometheus Operator's CRDs")
+	}
 }

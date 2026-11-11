@@ -412,24 +412,6 @@ func TestServiceMonitorOffLooksOnce(t *testing.T) {
 	}
 }
 
-// A CRD removed while the operator runs: the create fails with NotFound,
-// and the kind is looked up again only after serviceMonitorRecheck.
-func TestServiceMonitorCRDRemoved(t *testing.T) {
-	t.Parallel()
-	c := smCluster(true, false)
-	now := time.Unix(1000, 0)
-	r := smReconciler(t, true, c)
-	r.clock = func() time.Time { return now }
-	r.Client = &notFoundClient{Client: r.Client}
-	err := r.reconcileServiceMonitor(context.Background(), c)
-	if err == nil || !strings.Contains(err.Error(), "CRD removed") {
-		t.Fatalf("error = %v, want one asking whether the CRD was removed", err)
-	}
-	if until, _ := r.serviceMonitorUnserved.Load().(time.Time); !until.Equal(now.Add(serviceMonitorRecheck)) {
-		t.Fatalf("not served until %v, want %v", until, now.Add(serviceMonitorRecheck))
-	}
-}
-
 // notFoundClient answers every ServiceMonitor request with NotFound, as an
 // API server does for a resource whose CRD was deleted.
 type notFoundClient struct{ client.Client }
@@ -440,4 +422,58 @@ func (c *notFoundClient) Get(ctx context.Context, key client.ObjectKey, obj clie
 
 func (c *notFoundClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
 	return apierrors.NewNotFound(schema.GroupResource{Group: "monitoring.coreos.com", Resource: "servicemonitors"}, obj.GetName())
+}
+
+// Fields added to an endpoint, such as its scrape interval, are kept for
+// as long as the endpoint is: the operator sets only its port and path.
+func TestServiceMonitorKeepsEndpointFields(t *testing.T) {
+	t.Parallel()
+	c := smCluster(true, false)
+	r := smReconciler(t, true, c)
+	ctx := context.Background()
+	if err := r.reconcileServiceMonitor(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	sm := getServiceMonitor(t, r, c)
+	if err := unstructured.SetNestedSlice(sm.Object, []interface{}{
+		map[string]interface{}{"port": AgentPortName, "path": "/stats", "interval": "30s", "scrapeTimeout": "10s"},
+	}, "spec", "endpoints"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Update(ctx, sm); err != nil {
+		t.Fatal(err)
+	}
+	c.Spec.Monitoring.Enabled = true
+	if err := r.reconcileServiceMonitor(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	eps, _, _ := unstructured.NestedSlice(getServiceMonitor(t, r, c).Object, "spec", "endpoints")
+	want := []interface{}{
+		map[string]interface{}{"port": AgentPortName, "path": "/metrics", "interval": "30s", "scrapeTimeout": "10s"},
+		map[string]interface{}{"port": ExporterPortName, "path": "/metrics"},
+	}
+	if !reflect.DeepEqual(eps, want) {
+		t.Fatalf("endpoints = %v, want %v", eps, want)
+	}
+}
+
+// A CRD removed while the operator runs is treated as a CRD not installed:
+// one Warning Event, no error, and a new look after serviceMonitorRecheck.
+func TestServiceMonitorCRDRemovedWarnsOnce(t *testing.T) {
+	t.Parallel()
+	c := smCluster(true, false)
+	now := time.Unix(1000, 0)
+	r := smReconciler(t, true, c)
+	r.clock = func() time.Time { return now }
+	r.Client = &notFoundClient{Client: r.Client}
+	rec := record.NewFakeRecorder(10)
+	r.Recorder = rec
+	for range 3 {
+		if err := r.reconcileServiceMonitor(context.Background(), c); err != nil {
+			t.Fatalf("CRD removed: error = %v, want none", err)
+		}
+	}
+	if got := len(rec.Events); got != 1 {
+		t.Fatalf("3 passes after the CRD was removed: %d Events, want 1", got)
+	}
 }

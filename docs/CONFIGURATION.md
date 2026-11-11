@@ -349,14 +349,16 @@ of every pod (the agent's metrics are always there) and, with
 `enabled: true`, on `redis-exporter`'s port too,
 through the cluster's headless Service (one per shard in a sharded
 cluster). Setting it back to `false` deletes it. The operator sets the
-selector, the endpoints and its own labels; labels and other fields you
-add (a scrape `interval`, the label your Prometheus selects by) are kept.
+selector, each endpoint's port and path, and its own labels; labels and
+fields you add (an endpoint's `interval`, `jobLabel`, the label your
+Prometheus selects by) are kept.
 A `ServiceMonitor` of the same name the cluster does not own is never
 changed or deleted; the Ready condition reports it instead.
 
 It needs the `monitoring.coreos.com` CRDs (Prometheus Operator). Without
-them the cluster gets one `ServiceMonitorUnavailable` Warning Event and is
-otherwise reconciled as usual. The operator looks for the CRDs again at
+them, or once they are removed, the cluster gets one
+`ServiceMonitorUnavailable` Warning Event and is otherwise reconciled as
+usual. The operator looks for the CRDs again at
 most once a minute, so one installed later is picked up within a minute.
 
 Prometheus picks up a `ServiceMonitor` only if its `serviceMonitorSelector`
