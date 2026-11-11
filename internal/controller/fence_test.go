@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // newFenceHarness: the master c1-0 was force-deleted -- its pod object is
@@ -112,7 +114,7 @@ func (h *rolesHarness) assertFailoverTo(want string) {
 func TestFailover_FencesTheOldMasterAtItsLastAddress(t *testing.T) {
 	h := newFenceHarness(t)
 	h.assertFailoverTo("c1-1")
-	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2")
 }
 
 // Once the replica is promoted, the old master that answered the fence
@@ -123,7 +125,7 @@ func TestFailover_MakesTheFencedMasterAReplicaAtOnce(t *testing.T) {
 	h := newFenceHarness(t)
 	h.assertFailoverTo("c1-1")
 	h.assertCallOrder(
-		"exec 10.0.0.1 CLIENT PAUSE 60000 WRITE",
+		"exec 10.0.0.1 CLIENT PAUSE 65000 WRITE",
 		"promote 10.0.0.2",
 		"replicaof 10.0.0.1 -> 10.0.0.2",
 		"exec 10.0.0.1 CLIENT KILL TYPE normal",
@@ -205,7 +207,7 @@ func TestFailover_SendsAnUnansweredPauseAgain(t *testing.T) {
 	rec := h.recordEvents()
 	h.agents.pauseUnanswered = map[string]int{"10.0.0.1": 1}
 	h.assertFailoverTo("c1-1")
-	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2")
 	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
 		t.Errorf("unexpected %v", e)
 	}
@@ -238,7 +240,7 @@ func TestFailover_UnfencedWhenThePauseIsNeverAnswered(t *testing.T) {
 func TestFailover_FenceChecksTheRunWithOneCommand(t *testing.T) {
 	h := newFenceHarness(t)
 	h.assertFailoverTo("c1-1")
-	h.assertCallOrder("exec 10.0.0.1 INFO server", "exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2")
+	h.assertCallOrder("exec 10.0.0.1 INFO server", "exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2")
 }
 
 // The StatefulSet recreated the pod under the same name, with a new
@@ -246,7 +248,7 @@ func TestFailover_FenceChecksTheRunWithOneCommand(t *testing.T) {
 func TestFailover_FencesTheOldAddressNotTheReplacementPod(t *testing.T) {
 	h := newFenceHarness(t, testPod{name: "c1-0", ip: "10.0.0.9", uid: "new", unreadyFor: time.Minute, agent: masterRun(0, "stream-b", "run-new")})
 	h.assertFailoverTo("c1-1")
-	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2")
 	for _, call := range h.agents.calls {
 		if strings.Contains(call, "10.0.0.9") {
 			t.Errorf("the replacement pod was sent %q", call)
@@ -263,25 +265,79 @@ func TestFailover_DoesNotFenceAnotherEngineAtTheOldAddress(t *testing.T) {
 	h.assertNoPause()
 }
 
-// Nothing answers at the old address any more: nothing to hold, and no
-// reason to wait.
+// Nothing listens at the old address any more (connection refused):
+// nothing to hold, and no reason to ask again.
 func TestFailover_GoesOnWhenTheOldMasterIsGone(t *testing.T) {
 	h := newFenceHarness(t)
 	delete(h.agents.status, "10.0.0.1")
+	start := time.Now()
 	h.assertFailoverTo("c1-1")
 	h.assertNoPause()
+	if took := time.Since(start); took >= fenceTimeout {
+		t.Errorf("the failover took %s: a refused connection is not asked again", took)
+	}
 }
 
-// An address nothing answers on (a dead node) holds the failover up for
-// fenceTimeout at most, and the failover says it went on unfenced.
-func TestFailover_WaitsAtMostFenceTimeoutForAHungOldMaster(t *testing.T) {
+// A slow engine, alive: its run check times out once, and is asked again.
+func TestFailover_AsksASlowOldMasterAgain(t *testing.T) {
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.infoUnanswered = map[string]int{"10.0.0.1": 1}
+	h.assertFailoverTo("c1-1")
+	h.assertCallOrder("exec 10.0.0.1 INFO server", "exec 10.0.0.1 INFO server", "exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2")
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+}
+
+// The promotion went through, but a step after it failed (the new
+// master's label): the fenced master is made its replica all the same,
+// rather than wait for a pass that may come after its pause.
+func TestFailover_DemotesTheFencedMasterWhenAStepAfterThePromotionFails(t *testing.T) {
+	h := newFenceHarness(t)
+	h.r.Client = interceptor.NewClient(h.r.Client.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if obj.GetName() == "c1-1" && obj.GetLabels()[kividbv1alpha1.RoleLabel] == string(kividbv1alpha1.RoleMaster) {
+				return errors.New("the API server is unavailable")
+			}
+			return cl.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+		t.Fatal("reconcileRoles succeeded, want the label's error")
+	}
+	h.assertCallOrder("promote 10.0.0.2", "replicaof 10.0.0.1 -> 10.0.0.2", "exec 10.0.0.1 CLIENT KILL TYPE normal", "exec 10.0.0.1 CLIENT UNPAUSE")
+	if h.cluster.Status.FencedMaster != nil {
+		t.Errorf("status.fencedMaster = %+v, want it cleared", h.cluster.Status.FencedMaster)
+	}
+}
+
+// The fenced master is only ever pointed at a master that is ready and
+// says it is one.
+func TestFailover_DemotesTheFencedMasterOnlyTowardAReadyMaster(t *testing.T) {
+	h := newRolesHarness(t, "c1-1",
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "master", unreadyFor: 5 * time.Second, agent: masterRun(100, "stream-b", "run-1")},
+	)
+	h.cluster.Status.FencedMaster = &kividbv1alpha1.FencedMaster{Name: "c1-0", PodIP: "10.0.0.1", RunID: "run-0"}
+	h.agents.status["10.0.0.1"] = masterRun(100, "stream-a", "run-0")
+	h.reconcile()
+	h.assertNoCall("replicaof 10.0.0.1")
+	if h.cluster.Status.FencedMaster == nil {
+		t.Error("status.fencedMaster cleared, want it kept until there is a ready master")
+	}
+}
+
+// An address nothing answers on (a dead node) is asked again for
+// fenceRunCheckTimeout -- a slow engine is there -- and then the failover
+// goes on, and says it went on unfenced.
+func TestFailover_WaitsAboutASecondForAHungOldMaster(t *testing.T) {
 	h := newFenceHarness(t)
 	rec := h.recordEvents()
 	h.agents.hang = map[string]bool{"10.0.0.1": true}
 	start := time.Now()
 	h.assertFailoverTo("c1-1")
-	if took := time.Since(start); took < fenceTimeout || took >= time.Second {
-		t.Errorf("the failover took %s, want at least fenceTimeout (%s) and well under a second", took, fenceTimeout)
+	if took := time.Since(start); took < fenceRunCheckTimeout || took >= fenceRunCheckTimeout+2*fenceTimeout+250*time.Millisecond {
+		t.Errorf("the failover took %s, want about fenceRunCheckTimeout (%s)", took, fenceRunCheckTimeout)
 	}
 	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 {
 		t.Errorf("events %v, want one FailoverUnfenced", e)
@@ -326,7 +382,7 @@ func TestFailover_KeepsTheFenceWhenThePromotionFails(t *testing.T) {
 	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
 		t.Fatal("reconcileRoles succeeded, want the promotion's error")
 	}
-	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2")
 	h.assertNoCall("exec 10.0.0.1 CLIENT UNPAUSE")
 	if !h.agents.paused["10.0.0.1"] {
 		t.Error("the old master's writes are no longer held")
@@ -375,6 +431,7 @@ func TestFailover_PromoteThatErrorsAfterTakingEffect(t *testing.T) {
 // each pass holds its writes again and tries, until it is done.
 func TestFailover_RetriesDemotingAForceDeletedMaster(t *testing.T) {
 	h := newFenceHarness(t)
+	rec := h.recordEvents()
 	h.agents.failReplicaOf = map[string]bool{"10.0.0.1": true}
 	h.assertFailoverTo("c1-1")
 	if h.cluster.Status.FencedMaster == nil {
@@ -384,12 +441,15 @@ func TestFailover_RetriesDemotingAForceDeletedMaster(t *testing.T) {
 	h.addPod(testPod{name: "c1-0", ip: "10.0.0.9", label: "replica", ready: true, uid: "new", agent: masterRun(0, "stream-b", "run-new")})
 	h.agents.calls = nil
 	h.reconcileAndPersist()
-	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "replicaof 10.0.0.1 -> 10.0.0.2")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "replicaof 10.0.0.1 -> 10.0.0.2")
 	if !h.agents.paused["10.0.0.1"] || h.cluster.Status.FencedMaster == nil {
 		t.Fatalf("pass 2: paused=%v fencedMaster=%+v, want the writes still held and the record kept", h.agents.paused["10.0.0.1"], h.cluster.Status.FencedMaster)
 	}
 	if got := h.podStatus("c1-0").PodIP; got != "10.0.0.9" {
 		t.Errorf("c1-0's entry records %q, want the replacement's 10.0.0.9", got)
+	}
+	if e := eventsWith(rec, "FencedMasterNotDemoted"); len(e) != 1 {
+		t.Errorf("events %v, want one FencedMasterNotDemoted over the two failed tries", e)
 	}
 
 	h.agents.failReplicaOf = nil
@@ -403,20 +463,30 @@ func TestFailover_RetriesDemotingAForceDeletedMaster(t *testing.T) {
 	h.assertNoCall("exec 10.0.0.9 CLIENT")
 }
 
-// Once another engine, or nothing, answers at the fenced master's
-// address, there is nothing left to hold: the record goes.
+// Once another engine answers at the fenced master's address, or nothing
+// does on two passes in a row, there is nothing left to hold: the record
+// goes. One unanswered check is not enough.
 func TestFailover_ForgetsTheFencedMasterOnceItIsGone(t *testing.T) {
-	for name, at := range map[string]*agentapi.StatusResponse{
-		"another engine": masterRun(5, "stream-x", "run-other"),
-		"nothing":        nil,
+	for name, tc := range map[string]struct {
+		at     *agentapi.StatusResponse
+		passes int
+	}{
+		"another engine": {masterRun(5, "stream-x", "run-other"), 1},
+		"nothing":        {nil, 2},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newRolesHarness(t, "c1-1",
 				testPod{name: "c1-1", ip: "10.0.0.2", label: "master", ready: true, agent: masterRun(100, "stream-b", "run-1")},
 			)
 			h.cluster.Status.FencedMaster = &kividbv1alpha1.FencedMaster{Name: "c1-0", PodIP: "10.0.0.1", RunID: "run-0"}
-			if at != nil {
-				h.agents.status["10.0.0.1"] = at
+			if tc.at != nil {
+				h.agents.status["10.0.0.1"] = tc.at
+			}
+			for pass := 1; pass < tc.passes; pass++ {
+				h.reconcile()
+				if h.cluster.Status.FencedMaster == nil {
+					t.Fatalf("pass %d: status.fencedMaster cleared after one unanswered check", pass)
+				}
 			}
 			h.reconcile()
 			if h.cluster.Status.FencedMaster != nil {
@@ -429,13 +499,14 @@ func TestFailover_ForgetsTheFencedMasterOnceItIsGone(t *testing.T) {
 }
 
 // terminationGracePeriodSeconds: 0 would make the pause CLIENT PAUSE 0,
-// which the engine takes as no pause at all.
-func TestFailover_PausesForAtLeastTenSeconds(t *testing.T) {
+// which the engine takes as no pause at all. And the kubelet gives a
+// preStop hook 2 s past the grace period: the pause outlasts both.
+func TestFailover_PausesForAtLeastTenSecondsAndAMargin(t *testing.T) {
 	h := newFenceHarness(t)
 	zero := int64(0)
 	h.cluster.Spec.TerminationGracePeriodSeconds = &zero
 	h.assertFailoverTo("c1-1")
-	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 10000 WRITE", "promote 10.0.0.2")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 15000 WRITE", "promote 10.0.0.2")
 }
 
 // An engine before kividb 1.1 has no CLIENT PAUSE ... WRITE: the failover
@@ -537,7 +608,7 @@ func TestFailover_RecordsTheFenceFromAStaleRead(t *testing.T) {
 	}
 
 	h.assertFailoverTo("c1-1")
-	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 60000 WRITE", "promote 10.0.0.2", "replicaof 10.0.0.1 -> 10.0.0.2")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2", "replicaof 10.0.0.1 -> 10.0.0.2")
 	if err := h.r.Get(context.Background(), client.ObjectKeyFromObject(h.cluster), &stored); err != nil {
 		t.Fatal(err)
 	}

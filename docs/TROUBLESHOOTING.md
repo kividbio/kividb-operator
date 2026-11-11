@@ -148,12 +148,18 @@ event says why:
   The address is recorded again from the next status write. Right after
   an upgrade, pods whose agent has not been replaced yet report no engine
   run either; the rollout replaces them.
-- **Nothing answered** at the old master's address within 250 ms: its
-  node is down, or cut off from the operator.
+- **No answer** at the old master's address: nothing listens there, or
+  nothing answered for about 1 s -- its node is down, or cut off from the
+  operator.
 - **No pause within 3 s**, or **the engine refused `CLIENT PAUSE WRITE`**
   (kividb before 1.1).
 - **Promoting a replica before it caught up**: it was still behind after
   5 s, or the old master stopped answering first.
+
+A `FencedMasterNotDemoted` Warning means the old master was held but could
+not yet be made the new master's replica. Its writes stay held, and the
+operator tries again every 2 s (`status.fencedMaster` shows it) until it
+is done or the old engine is gone.
 
 ## `PersistenceDisabled`, `MasterRestartedEmpty`, `ShardDataLost`
 

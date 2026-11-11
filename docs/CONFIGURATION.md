@@ -388,14 +388,15 @@ after 5 s, or as soon as the old master stops answering -- and the old
 master is then made its replica, its clients disconnected and the pause
 lifted, so the writes it held fail rather than land. The pause lasts
 `terminationGracePeriodSeconds` (60 s by default, 10 s at least), the
-longest the old pod can take to stop. The operator records the fenced
-master in `status.fencedMaster` before the promotion: should the
-re-pointing fail, or the operator restart, every pass holds its writes
-again and retries until it is done or another engine, or none, answers
-at that address (the pod's replacement has another one). An address
-nothing answers on holds the failover up for 250 ms, so a master cut off
-from the operator is not held: it acknowledges writes until it is
-demoted. A force-deleted pod's replacement is a new engine, never
+longest the old pod can take to stop, and 5 s more. The operator records
+the fenced master in `status.fencedMaster` before the promotion: should
+the re-pointing fail, or the operator restart, every pass holds its
+writes again and retries until it is done or the engine there is gone --
+another engine answers at that address (the pod's replacement has
+another one), or none does twice in a row (`FencedMasterNotDemoted`
+Warning on the first failure). An address that does not answer holds the
+failover up for about 1 s, so a master cut off from the operator is not
+held: it acknowledges writes until it is demoted. A force-deleted pod's replacement is a new engine, never
 paused, whose data stops at the fence; it rejoins as a replica. A
 failover that goes on without the fence -- nothing answers, the engine
 refuses the pause, or no address is recorded (a `kividbclusters` CRD

@@ -60,6 +60,9 @@ type fakeAgents struct {
 	// goneAfterPause: once paused, nothing answers on these addresses (the
 	// container stopped).
 	goneAfterPause map[string]bool
+	// infoUnanswered: the next this many INFO SERVERs on an address get no
+	// reply before the request's context ends (a slow engine).
+	infoUnanswered map[string]int
 }
 
 // execReply answers /exec the way kividb would, for the commands the
@@ -167,6 +170,11 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 		body = f.execReply(ip, st, r.Args)
+		if strings.EqualFold(strings.Join(r.Args, " "), "INFO server") && f.infoUnanswered[ip] > 0 {
+			f.infoUnanswered[ip]--
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		}
 		if strings.HasPrefix(strings.ToUpper(strings.Join(r.Args, " ")), "CLIENT PAUSE") {
 			if f.goneAfterPause[ip] {
 				delete(f.status, ip)
@@ -529,7 +537,7 @@ func TestReconcileRoles_MasterRestartedBehindItsReplicas(t *testing.T) {
 		t.Error("the restarted master's writes are still held")
 	}
 	for _, call := range h.agents.calls {
-		if strings.Contains(call, "CLIENT PAUSE 60000") {
+		if strings.Contains(call, "CLIENT PAUSE 65000") {
 			t.Errorf("the restarted master was fenced a second time: %q", call)
 		}
 	}

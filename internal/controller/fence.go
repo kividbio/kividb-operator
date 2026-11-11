@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -39,19 +41,25 @@ import (
 // replacement soon has its name.
 //
 // A master that is gone needs no fence, and one that is cut off from the
-// operator cannot be given one: an address nothing answers on holds the
-// failover up for fenceTimeout, once. An engine that has answered is
-// there, and paused costs availability, not writes: its pause is sent
-// again until it is answered (fenceRetryTimeout at most), and the replica
-// is waited for while it answers (switchoverCatchUpTimeout at most). A
-// failover that goes on without either says so (FailoverUnfenced).
+// operator cannot be given one: an address where nothing listens is asked
+// once, and one that does not answer is asked again for
+// fenceRunCheckTimeout (a slow engine is there). An engine that has
+// answered is there, and paused costs availability, not writes: its pause
+// is sent again until it is answered (fenceRetryTimeout at most), and the
+// replica is waited for while it answers (switchoverCatchUpTimeout at
+// most). A failover that goes on without either says so
+// (FailoverUnfenced).
 
-// fenceTimeout is how long a failover waits for the master it replaces to
-// answer at all, and for each try at holding its writes. Its agent answers
-// within milliseconds while its container still runs, and within about
-// 150 ms (p99) under a tight CPU limit and write load (250m for the
-// engine, 100m for the agent).
+// fenceTimeout is how long each request to the master a failover replaces
+// may take. Its agent answers within milliseconds while its container
+// still runs, and within about 150 ms (p99) under a tight CPU limit and
+// write load (250m for the engine, 100m for the agent).
 const fenceTimeout = 250 * time.Millisecond
+
+// fenceRunCheckTimeout is how long a failover goes on asking an address
+// that does not answer (a request that times out, not one refused) which
+// engine runs there.
+var fenceRunCheckTimeout = time.Second
 
 // fenceRetryTimeout is how long a failover goes on trying to hold the
 // writes of a master that has answered with the run recorded for it.
@@ -60,20 +68,28 @@ var fenceRetryTimeout = 3 * time.Second
 // fencePause is how long the fence holds the old master's writes, should
 // it not be made the new master's replica right after the promotion: the
 // pod's termination grace period, the longest its container can take to
-// stop, and minFencePause at least -- CLIENT PAUSE 0 holds nothing. Each
-// later try to make it a replica holds them as long again
+// stop -- minFencePause at least, CLIENT PAUSE 0 holding nothing -- and
+// fencePauseMargin past it, for the kubelet gives a preStop hook 2 s more.
+// Each later try to make it a replica holds them as long again
 // (demoteFencedMaster).
 func fencePause(c *kividbv1alpha1.KividbCluster) time.Duration {
-	return max(time.Duration(*gracePeriod(c))*time.Second, minFencePause)
+	return max(time.Duration(*gracePeriod(c))*time.Second, minFencePause) + fencePauseMargin
 }
 
 const (
-	// minFencePause is the shortest fence (terminationGracePeriodSeconds
-	// may be 0).
+	// minFencePause is the shortest fence before its margin
+	// (terminationGracePeriodSeconds may be 0).
 	minFencePause = 10 * time.Second
+	// fencePauseMargin is how long the fence outlasts the pod's grace
+	// period.
+	fencePauseMargin = 5 * time.Second
 	// fencedMasterRetry is how soon a pass that could not make the fenced
 	// master a replica comes back to try again: well within its pause.
 	fencedMasterRetry = 2 * time.Second
+	// fencedMasterMisses is how many passes in a row the fenced master's
+	// address must not answer before it is taken for gone: one may be a
+	// moment's trouble.
+	fencedMasterMisses = 2
 )
 
 // fenceOldMaster holds the writes of the master being failed away from,
@@ -98,13 +114,11 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 	// One command each for the run and the pause: under a CPU limit every
 	// round trip to a loaded engine can take tens of milliseconds, and
 	// GET /status makes seven.
-	ictx, cancel := context.WithTimeout(ctx, fenceTimeout)
-	info, err := r.Agent.Exec(ictx, last.PodIP, "INFO", "server")
-	cancel()
+	runID, err := r.runOf(ctx, last.PodIP)
 	if err != nil {
-		return unfenced("nothing answered at %s within %s (%v)", last.PodIP, fenceTimeout, err)
+		return unfenced("no answer at %s (%v)", last.PodIP, err)
 	}
-	if runID := infoField(info.Str, "run_id"); runID != last.RunID {
+	if runID != last.RunID {
 		log.Info("not holding the writes at the old master's address: another engine answers there", "runID", runID, "recordedRunID", last.RunID)
 		return ""
 	}
@@ -184,32 +198,45 @@ func (r *KividbClusterReconciler) recordFence(ctx context.Context, c *kividbv1al
 }
 
 // demoteFencedMaster makes the master a failover holds the writes of
-// (status.fencedMaster) a replica of the master at masterIP, disconnects
-// its clients and lifts the pause, and forgets it. Each try holds its
-// writes as long again first: the pause cannot get shorter. It is tried
-// right after the promotion and on every pass after that, until it is
-// done or the engine there is gone -- nothing, or another engine, answers
-// at its address. It returns the address of the master it demoted, or "".
+// (status.fencedMaster) a replica of the master at masterIP -- a ready
+// pod that reports itself master -- disconnects its clients and lifts the
+// pause, and forgets it. Each try holds its writes as long again first:
+// the pause cannot get shorter. It is tried right after the promotion and
+// on every pass after that, until it is done or the engine there is gone:
+// another engine answers at its address, or nothing does on
+// fencedMasterMisses passes in a row. It returns the address of the
+// master it demoted, or "".
 func (r *KividbClusterReconciler) demoteFencedMaster(ctx context.Context, c *kividbv1alpha1.KividbCluster, masterIP string, port int32) string {
 	fm := c.Status.FencedMaster
 	if fm == nil || masterIP == "" {
 		return ""
 	}
 	log := logf.FromContext(ctx).WithValues("pod", fm.Name, "ip", fm.PodIP)
+	key := c.Namespace + "/" + c.Name
+	tries := r.fencedTries(key, *fm)
+	forget := func() {
+		c.Status.FencedMaster = nil
+		r.fencedRetries.Delete(key)
+	}
 	if fm.PodIP == masterIP {
 		// The master answers there: it is not a master to hold.
-		c.Status.FencedMaster = nil
+		forget()
 		return ""
 	}
-	info, err := r.Agent.Exec(ctx, fm.PodIP, "INFO", "server")
+	runID, err := r.runOf(ctx, fm.PodIP)
 	if err != nil {
+		if tries.misses++; tries.misses < fencedMasterMisses {
+			log.Info("the fenced master did not answer; asking again", "error", err.Error(), "in", fencedMasterRetry)
+			return ""
+		}
 		log.Info("the fenced master no longer answers; nothing left to hold", "error", err.Error())
-		c.Status.FencedMaster = nil
+		forget()
 		return ""
 	}
-	if runID := infoField(info.Str, "run_id"); runID != fm.RunID {
+	tries.misses = 0
+	if runID != fm.RunID {
 		log.Info("another engine answers at the fenced master's address; nothing left to hold", "runID", runID, "fencedRunID", fm.RunID)
-		c.Status.FencedMaster = nil
+		forget()
 		return ""
 	}
 	if _, err := r.Agent.Exec(ctx, fm.PodIP, "CLIENT", "PAUSE", strconv.FormatInt(fencePause(c).Milliseconds(), 10), "WRITE"); err != nil {
@@ -217,12 +244,65 @@ func (r *KividbClusterReconciler) demoteFencedMaster(ctx context.Context, c *kiv
 	}
 	if err := r.Agent.ReplicaOf(ctx, fm.PodIP, masterIP, port); err != nil {
 		log.Info("could not make the fenced master a replica of the new master; trying again", "error", err.Error(), "in", fencedMasterRetry)
+		if !tries.warned {
+			// Once: the retries show in the log.
+			tries.warned = true
+			r.event(c, corev1.EventTypeWarning, "FencedMasterNotDemoted",
+				"%s: could not make it a replica of the new master (%v); its writes stay held, and this is tried again every %s",
+				fm.Name, err, fencedMasterRetry)
+		}
 		return ""
 	}
 	r.releaseDemotedMaster(ctx, fm.PodIP)
 	log.Info("made the fenced master a replica of the new master and released it")
-	c.Status.FencedMaster = nil
+	forget()
 	return fm.PodIP
+}
+
+// fencedTry is how the demotion of a cluster's fenced master has gone so
+// far, kept in memory: an operator restart only costs one more check, or
+// one more event.
+type fencedTry struct {
+	fm     kividbv1alpha1.FencedMaster
+	misses int  // passes in a row its address did not answer
+	warned bool // FencedMasterNotDemoted raised
+}
+
+// fencedTries is the fencedTry of fm, the fenced master of the cluster at
+// key: a new one for a master fenced since.
+func (r *KividbClusterReconciler) fencedTries(key string, fm kividbv1alpha1.FencedMaster) *fencedTry {
+	if v, ok := r.fencedRetries.Load(key); ok {
+		if t := v.(*fencedTry); t.fm == fm {
+			return t
+		}
+	}
+	t := &fencedTry{fm: fm}
+	r.fencedRetries.Store(key, t)
+	return t
+}
+
+// runOf is the run ID of the engine at ip (INFO server). A request that
+// times out is sent again for fenceRunCheckTimeout -- a slow engine is
+// there -- but not one that is refused or finds no route: nothing is.
+func (r *KividbClusterReconciler) runOf(ctx context.Context, ip string) (string, error) {
+	deadline := time.Now().Add(fenceRunCheckTimeout)
+	for {
+		actx, cancel := context.WithTimeout(ctx, fenceTimeout)
+		info, err := r.Agent.Exec(actx, ip, "INFO", "server")
+		cancel()
+		if err == nil {
+			return infoField(info.Str, "run_id"), nil
+		}
+		if info != nil || !isTimeout(err) || ctx.Err() != nil || time.Now().After(deadline) {
+			return "", err
+		}
+	}
+}
+
+// isTimeout reports whether err is a request that got no answer in time.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
 }
 
 // releaseDemotedMaster lets go of a master that has just been made a

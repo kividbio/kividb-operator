@@ -261,6 +261,9 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			return nil, currentMasterName, false, fmt.Errorf("promoting %s: %w", candidate, err)
 		}
 		if err := r.setRoleLabel(ctx, views[candidate].pod, kividbv1alpha1.RoleMaster); err != nil {
+			// The promotion went through: do not leave the fenced master
+			// for a pass that may come after its pause.
+			r.demoteFencedMaster(ctx, c, candidateIP, port)
 			return nil, currentMasterName, false, err
 		}
 		if fenced != "" {
@@ -302,12 +305,14 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	// The master a failover holds the writes of -- on this pass, or on one
 	// that could not make it a replica -- follows the master now, as in a
 	// switchover: it takes no write when its pause ends, and its clients
-	// are sent away.
-	if ip := r.demoteFencedMaster(ctx, c, masterIP, port); ip != "" {
-		for _, v := range views {
-			if v.status != nil && v.pod.Status.PodIP == ip {
-				v.status = &agentapi.StatusResponse{Role: agentapi.RoleReplica, MasterHost: masterIP, MasterPort: port,
-					KeyCount: v.status.KeyCount, KeyCountKnown: v.status.KeyCountKnown, RunID: v.status.RunID}
+	// are sent away. Only a master that is ready and says it is one.
+	if v, ok := views[newMasterName]; ok && v.ready && v.status != nil && v.status.Role == agentapi.RoleMaster {
+		if ip := r.demoteFencedMaster(ctx, c, masterIP, port); ip != "" {
+			for _, v := range views {
+				if v.status != nil && v.pod.Status.PodIP == ip {
+					v.status = &agentapi.StatusResponse{Role: agentapi.RoleReplica, MasterHost: masterIP, MasterPort: port,
+						KeyCount: v.status.KeyCount, KeyCountKnown: v.status.KeyCountKnown, RunID: v.status.RunID}
+				}
 			}
 		}
 	}
