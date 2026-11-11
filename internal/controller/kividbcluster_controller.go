@@ -74,6 +74,11 @@ type KividbClusterReconciler struct {
 	// since when ("<ns>/<cluster>" -> *rolloutWait), see rollout_wait.go.
 	rolloutWaits sync.Map
 
+	// fencedRetries: how the demotion of a replicated cluster's fenced
+	// master has gone ("<ns>/<cluster>" -> *fencedTry), see
+	// demoteFencedMaster.
+	fencedRetries sync.Map
+
 	// notSynced: why each replica of a replicated-mode cluster was not in
 	// sync on the last pass ("<ns>/<cluster>" -> map[pod]reason).
 	notSynced sync.Map
@@ -269,6 +274,11 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	if c.Status.FencedMaster != nil {
+		// A failover's fenced master is not a replica yet: try again
+		// before its pause runs out (demoteFencedMaster).
+		return ctrl.Result{RequeueAfter: fencedMasterRetry}, nil
 	}
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
 }

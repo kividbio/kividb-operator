@@ -46,6 +46,23 @@ type fakeAgents struct {
 	noPause bool
 	// failReplicaOf: /replicaof fails on these pods.
 	failReplicaOf map[string]bool
+	// failPromote: /promote fails on these pods.
+	failPromote map[string]bool
+	// failPromoteAfter: /promote takes effect on these pods, then fails
+	// (the reply is lost).
+	failPromoteAfter map[string]bool
+	// hang: nothing answers on these addresses -- a request waits until
+	// its context ends, as one to a dead node does.
+	hang map[string]bool
+	// pauseUnanswered: the next this many CLIENT PAUSEs on an address take
+	// effect, but no reply comes back before the request's context ends.
+	pauseUnanswered map[string]int
+	// goneAfterPause: once paused, nothing answers on these addresses (the
+	// container stopped).
+	goneAfterPause map[string]bool
+	// infoUnanswered: the next this many INFO SERVERs on an address get no
+	// reply before the request's context ends (a slow engine).
+	infoUnanswered map[string]int
 }
 
 // execReply answers /exec the way kividb would, for the commands the
@@ -92,9 +109,13 @@ func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []st
 		delete(f.paused, ip)
 	case cmd == "PING":
 		return agentapi.ExecResponse{Type: "status", Str: "PONG"}
+	case cmd == "INFO SERVER":
+		return agentapi.ExecResponse{Type: "bulk", Str: "# Server" + crlf + "kividb_version:1.2.0" + crlf + "run_id:" + st.RunID + crlf}
 	}
 	return ok
 }
+
+const crlf = "\r\n"
 
 func (f *fakeAgents) byIP(ip string) *agentapi.StatusResponse {
 	if ip == "" {
@@ -108,6 +129,10 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	if f.hang[ip] {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}
 	st, ok := f.status[ip]
 	if !ok {
 		return nil, fmt.Errorf("dial %s: connection refused", ip)
@@ -119,7 +144,15 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 		body = st
 	case "/promote":
 		f.calls = append(f.calls, "promote "+ip)
+		if f.failPromote[ip] {
+			b, _ := json.Marshal(agentapi.ErrorResponse{Error: "connection reset"})
+			return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
+		}
 		st.Role, st.MasterHost, st.MasterPort = agentapi.RoleMaster, "", 0
+		if f.failPromoteAfter[ip] {
+			b, _ := json.Marshal(agentapi.ErrorResponse{Error: "connection reset"})
+			return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
+		}
 	case "/replicaof":
 		var r agentapi.ReplicaOfRequest
 		if err := json.NewDecoder(req.Body).Decode(&r); err != nil {
@@ -137,6 +170,21 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 		body = f.execReply(ip, st, r.Args)
+		if strings.EqualFold(strings.Join(r.Args, " "), "INFO server") && f.infoUnanswered[ip] > 0 {
+			f.infoUnanswered[ip]--
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		}
+		if strings.HasPrefix(strings.ToUpper(strings.Join(r.Args, " ")), "CLIENT PAUSE") {
+			if f.goneAfterPause[ip] {
+				delete(f.status, ip)
+			}
+			if f.pauseUnanswered[ip] > 0 {
+				f.pauseUnanswered[ip]--
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			}
+		}
 	}
 	b, _ := json.Marshal(body)
 	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
@@ -149,6 +197,24 @@ type testPod struct {
 	agent           *agentapi.StatusResponse // nil: agent unreachable
 	uid             types.UID
 	restarts        int32 // of the kividb container
+}
+
+// object is p's pod object, in cluster c.
+func (p testPod) object(c *kividbv1alpha1.KividbCluster) *corev1.Pod {
+	labels := selectorLabels(c)
+	if p.label != "" {
+		labels[kividbv1alpha1.RoleLabel] = p.label
+	}
+	cond := corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue}
+	if !p.ready {
+		cond.Status = corev1.ConditionFalse
+		cond.LastTransitionTime = metav1.NewTime(time.Now().Add(-p.unreadyFor))
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: p.name, Namespace: c.Namespace, Labels: labels, UID: p.uid},
+		Status: corev1.PodStatus{PodIP: p.ip, Conditions: []corev1.PodCondition{cond},
+			ContainerStatuses: []corev1.ContainerStatus{{Name: kividbContainerName, RestartCount: p.restarts}}},
+	}
 }
 
 func master(offset int64) *agentapi.StatusResponse {
@@ -187,20 +253,7 @@ func newRolesHarness(t *testing.T, statusMaster string, pods ...testPod) *rolesH
 	agents := &fakeAgents{status: map[string]*agentapi.StatusResponse{}}
 	var objs []client.Object
 	for _, p := range pods {
-		labels := selectorLabels(c)
-		if p.label != "" {
-			labels[kividbv1alpha1.RoleLabel] = p.label
-		}
-		cond := corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue}
-		if !p.ready {
-			cond.Status = corev1.ConditionFalse
-			cond.LastTransitionTime = metav1.NewTime(time.Now().Add(-p.unreadyFor))
-		}
-		objs = append(objs, &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: p.name, Namespace: c.Namespace, Labels: labels, UID: p.uid},
-			Status: corev1.PodStatus{PodIP: p.ip, Conditions: []corev1.PodCondition{cond},
-				ContainerStatuses: []corev1.ContainerStatus{{Name: kividbContainerName, RestartCount: p.restarts}}},
-		})
+		objs = append(objs, p.object(c))
 		if p.agent != nil {
 			agents.status[p.ip] = p.agent
 		}
@@ -233,6 +286,53 @@ func (h *rolesHarness) reconcile() (masterPod string, failover bool) {
 	}
 	h.cluster.Status.MasterPod = masterPod
 	return masterPod, failover
+}
+
+// reconcileAndPersist is reconcile that also keeps the pass's pod
+// statuses, as updateStatus would: the next pass sees them as the last
+// persisted ones.
+func (h *rolesHarness) reconcileAndPersist() (masterPod string, failover bool) {
+	h.t.Helper()
+	var list corev1.PodList
+	if err := h.r.List(context.Background(), &list, client.InNamespace(h.cluster.Namespace)); err != nil {
+		h.t.Fatal(err)
+	}
+	statuses, masterPod, failover, err := h.r.reconcileRoles(context.Background(), h.cluster, list.Items)
+	if err != nil {
+		h.t.Fatalf("reconcileRoles: %v", err)
+	}
+	h.cluster.Status.MasterPod, h.cluster.Status.Pods = masterPod, statuses
+	return masterPod, failover
+}
+
+func (h *rolesHarness) podStatus(name string) kividbv1alpha1.KividbPodStatus {
+	h.t.Helper()
+	for _, ps := range h.cluster.Status.Pods {
+		if ps.Name == name {
+			return ps
+		}
+	}
+	h.t.Fatalf("no status for pod %s", name)
+	return kividbv1alpha1.KividbPodStatus{}
+}
+
+// Each pod's entry records the address its agent last answered on; one
+// that cannot be asked keeps the one it had (#53: a failover holds the
+// writes of the master it replaces there, once its pod is gone).
+func TestReconcileRoles_RecordsEachPodsAddress(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "master", ready: true, agent: masterRun(100, "s", "run-0")},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 100)},
+		testPod{name: "c1-2", ip: "10.0.0.3", label: "replica", unreadyFor: time.Second},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{{Name: "c1-2", PodIP: "10.0.0.33", RunID: "run-2"}}
+
+	h.reconcileAndPersist()
+	for name, want := range map[string]string{"c1-0": "10.0.0.1", "c1-1": "10.0.0.2", "c1-2": "10.0.0.33"} {
+		if got := h.podStatus(name).PodIP; got != want {
+			t.Errorf("%s: podIP = %q, want %q", name, got, want)
+		}
+	}
 }
 
 func (h *rolesHarness) setReady(name string, ready bool) {
@@ -435,6 +535,35 @@ func TestReconcileRoles_MasterRestartedBehindItsReplicas(t *testing.T) {
 	)
 	if h.agents.paused["10.0.0.9"] {
 		t.Error("the restarted master's writes are still held")
+	}
+	for _, call := range h.agents.calls {
+		if strings.Contains(call, "CLIENT PAUSE 65000") {
+			t.Errorf("the restarted master was fenced a second time: %q", call)
+		}
+	}
+}
+
+// The promotion failed, or seemed to: it may have gone through all the
+// same, so the restarted master's writes stay held (they end by
+// themselves, and the next pass holds them again).
+func TestReconcileRoles_RestartedBehindKeepsThePauseWhenThePromotionFails(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.9", ready: true, agent: masterRun(700, "stream-b", "run-2")},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1000)},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: false, Synced: true, ReplicationOffset: 1000, ReplID: "stream-a", RunID: "run-1"},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
+	}
+	h.agents.failPromoteAfter = map[string]bool{"10.0.0.2": true}
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.list()); err == nil {
+		t.Fatal("reconcileRoles succeeded, want the promotion's error")
+	}
+	h.assertCallOrder("exec 10.0.0.9 CLIENT PAUSE 10000 WRITE", "promote 10.0.0.2")
+	for _, call := range h.agents.calls {
+		if call == "exec 10.0.0.9 CLIENT UNPAUSE" {
+			t.Errorf("the restarted master's pause was lifted after the promotion failed (calls %v)", h.agents.calls)
+		}
 	}
 }
 

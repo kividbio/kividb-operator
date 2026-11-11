@@ -211,6 +211,21 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 		log.Info("promoting pod to master", "pod", candidate, "reason", map[bool]string{true: "failover", false: "bootstrap"}[needsFailover])
 
+		// The master being replaced may still be running, and taking
+		// writes that the promotion would discard -- after a force-delete,
+		// until its replicas have left it: hold them first (fence.go).
+		heldOld := ""
+		if needsFailover && behindOf == "" {
+			last := previous[currentMasterName]
+			heldOld = r.fenceOldMaster(ctx, c, last, views[candidate])
+			if heldOld != "" {
+				if err := r.recordFence(ctx, c, kividbv1alpha1.FencedMaster{Name: last.Name, PodIP: heldOld, RunID: last.RunID}); err != nil {
+					r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
+					return nil, currentMasterName, false, fmt.Errorf("recording the fenced master %s before promoting %s: %w", currentMasterName, candidate, err)
+				}
+			}
+		}
+
 		// Take the master label off the pod being failed away from *before*
 		// promoting its replacement. That pod is usually still there (hung,
 		// partitioned, crash-looping) and will come back believing it is a
@@ -230,16 +245,25 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 		if old, ok := views[currentMasterName]; ok {
 			if err := r.setRoleLabel(ctx, old.pod, kividbv1alpha1.RoleReplica); err != nil {
+				if heldOld != "" {
+					r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
+					c.Status.FencedMaster = nil
+				}
 				r.unpauseWrites(ctx, fenced)
 				return nil, currentMasterName, false, fmt.Errorf("demoting %s: %w", currentMasterName, err)
 			}
 		}
 		candidateIP := views[candidate].pod.Status.PodIP
 		if err := r.Agent.Promote(ctx, candidateIP); err != nil {
-			r.unpauseWrites(ctx, fenced)
+			// The promotion may have gone through all the same: the old
+			// master's writes stay held, and the next pass finishes the
+			// failover. Its pause ends by itself.
 			return nil, currentMasterName, false, fmt.Errorf("promoting %s: %w", candidate, err)
 		}
 		if err := r.setRoleLabel(ctx, views[candidate].pod, kividbv1alpha1.RoleMaster); err != nil {
+			// The promotion went through: do not leave the fenced master
+			// for a pass that may come after its pause.
+			r.demoteFencedMaster(ctx, c, candidateIP, port)
 			return nil, currentMasterName, false, err
 		}
 		if fenced != "" {
@@ -251,10 +275,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			} else {
 				old.status = &agentapi.StatusResponse{Role: agentapi.RoleReplica, MasterHost: candidateIP, MasterPort: port,
 					KeyCount: old.status.KeyCount, KeyCountKnown: old.status.KeyCountKnown, RunID: old.status.RunID}
-				if _, err := r.Agent.Exec(ctx, fenced, "CLIENT", "KILL", "TYPE", "normal"); err != nil {
-					log.V(1).Info("disconnecting the restarted master's clients", "pod", currentMasterName, "error", err.Error())
-				}
-				r.unpauseWrites(ctx, fenced)
+				r.releaseDemotedMaster(ctx, fenced)
 			}
 		}
 		switch {
@@ -281,6 +302,21 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		masterIP = v.pod.Status.PodIP
 	}
 
+	// The master a failover holds the writes of -- on this pass, or on one
+	// that could not make it a replica -- follows the master now, as in a
+	// switchover: it takes no write when its pause ends, and its clients
+	// are sent away. Only a master that is ready and says it is one.
+	if v, ok := views[newMasterName]; ok && v.ready && v.status != nil && v.status.Role == agentapi.RoleMaster {
+		if ip := r.demoteFencedMaster(ctx, c, masterIP, port); ip != "" {
+			for _, v := range views {
+				if v.status != nil && v.pod.Status.PodIP == ip {
+					v.status = &agentapi.StatusResponse{Role: agentapi.RoleReplica, MasterHost: masterIP, MasterPort: port,
+						KeyCount: v.status.KeyCount, KeyCountKnown: v.status.KeyCountKnown, RunID: v.status.RunID}
+				}
+			}
+		}
+	}
+
 	var masterStatus *agentapi.StatusResponse
 	if v, ok := views[newMasterName]; ok && v.ready {
 		masterStatus = v.status
@@ -295,12 +331,16 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		// Last observed: a pod that cannot be asked keeps what it last
 		// reported. A master's offset, stream and run are how its restart
 		// behind its replicas is recognised (regressedMaster), and its key
-		// count how emptied replicas are (withoutEmptied).
+		// count how emptied replicas are (withoutEmptied); its address and
+		// run are where, and to whom, a failover away from it holds its
+		// writes (fenceOldMaster).
 		last := previous[p.Name]
 		offset, keys, replID, runID, inc := last.ReplicationOffset, last.Keys, last.ReplID, last.RunID, last.Incarnation
+		podIP := last.PodIP
 		synced := false
 		if v.status != nil {
 			offset, keys, replID, runID, inc = 0, v.status.KeyCount, "", v.status.RunID, incarnation(v.pod)
+			podIP = p.Status.PodIP
 		}
 
 		switch {
@@ -328,6 +368,14 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			if masterIP != "" && !followsMaster(v.status, masterIP, port) {
 				if err := r.Agent.ReplicaOf(ctx, p.Status.PodIP, masterIP, port); err != nil {
 					log.Error(err, "failed to point replica at master", "pod", p.Name, "master", masterIP)
+				} else if v.status.Role == agentapi.RoleMaster && v.status.RunID != "" && v.status.RunID == previous[p.Name].RunID {
+					// A master demoted here that has kept running since it
+					// was last recorded -- the one a failover replaced, back
+					// -- may still be holding writes (fenceOldMaster). A pod
+					// that has just started reports role master too (an
+					// engine starts as one), with a new run: it holds
+					// nothing, and its clients are left alone.
+					r.releaseDemotedMaster(ctx, p.Status.PodIP)
 				}
 			}
 			if err := r.setRoleLabel(ctx, v.pod, kividbv1alpha1.RoleReplica); err != nil {
@@ -355,6 +403,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			ReplID:            replID,
 			RunID:             runID,
 			Incarnation:       inc,
+			PodIP:             podIP,
 		})
 	}
 

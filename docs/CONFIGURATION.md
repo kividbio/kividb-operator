@@ -374,13 +374,34 @@ or its pod is force-deleted, the writes it acknowledged in its last moments
 and had not yet streamed are lost with it, and a master that is cut off
 (not dead) goes on acknowledging writes on the connections it still has
 until it is demoted -- in the AKS test, 150 ms after the promotion, 120
-writes. The operator does not fence it. The same holds for a master pod
-deleted with `--grace-period=0 --force`: the operator promotes a replica
-in the same second, but the deleted pod's container keeps running, and
-taking writes, for a moment after its pod object is gone, with no address
-left for the operator to pause it at (in the AKS test, 188 writes; its
-other replica, which had read past the promotion point from it, resynced
-in full). `min-replicas-to-write` /
+writes. Before it promotes a replica, the operator holds the old master's
+writes (`CLIENT PAUSE WRITE` through its agent) at the address the status
+last recorded for it (`status.pods[].podIP`), if the engine answering
+there still has the run recorded for it (`runID`). That covers a master
+pod deleted with `--grace-period=0 --force`: its pod object is gone at
+once, but its container keeps running, and taking writes, until its
+replicas have left it (176 acknowledged writes lost in the AKS test on
+engine 1.2.1; on kind, 689 to 954 per force-delete without the fence,
+none with it). As in a switchover, the replica is promoted once it has
+everything the old master acknowledged before the pause -- the wait ends
+after 5 s, or as soon as the old master stops answering -- and the old
+master is then made its replica, its clients disconnected and the pause
+lifted, so the writes it held fail rather than land. The pause lasts
+`terminationGracePeriodSeconds` (60 s by default, 10 s at least), the
+longest the old pod can take to stop, and 5 s more. The operator records
+the fenced master in `status.fencedMaster` before the promotion: should
+the re-pointing fail, or the operator restart, every pass holds its
+writes again and retries until it is done or the engine there is gone --
+another engine answers at that address (the pod's replacement has
+another one), or none does twice in a row (`FencedMasterNotDemoted`
+Warning on the first failure). An address that does not answer holds the
+failover up for about 1 s, so a master cut off from the operator is not
+held: it acknowledges writes until it is demoted. A force-deleted pod's replacement is a new engine, never
+paused, whose data stops at the fence; it rejoins as a replica. A
+failover that goes on without the fence -- nothing answers, the engine
+refuses the pause, or no address is recorded (a `kividbclusters` CRD
+from before `podIP`, which Helm does not upgrade) -- or before the
+replica caught up raises a `FailoverUnfenced` Warning. `min-replicas-to-write` /
 `min-replicas-max-lag` narrow this window: a master refuses writes
 (`NOREPLICAS`) unless that many replicas acknowledged within the lag. The
 operator does not set them in a replicated cluster (it does in a sharded

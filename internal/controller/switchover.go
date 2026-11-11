@@ -211,7 +211,7 @@ func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alp
 	started := time.Now()
 	var offset int64
 	if paused {
-		caughtUp, at, why := r.waitCaughtUp(ctx, oldIP, targetIP)
+		caughtUp, at, why := r.waitCaughtUp(ctx, oldIP, targetIP, false)
 		if !caughtUp {
 			return abort(why)
 		}
@@ -274,8 +274,10 @@ func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alp
 // replica at targetIP has applied everything the (paused) master at oldIP
 // has: the master's offset read before and after the replica's is the
 // same, and the replica's is not below it, with its link up. It returns
-// that offset, or why it gave up.
-func (r *KividbClusterReconciler) waitCaughtUp(ctx context.Context, oldIP, targetIP string) (bool, int64, string) {
+// that offset, or why it gave up. With stopIfMasterGone, it gives up as
+// soon as the master does not answer: a master that has stopped takes no
+// more writes, so there is nothing more to wait for.
+func (r *KividbClusterReconciler) waitCaughtUp(ctx context.Context, oldIP, targetIP string, stopIfMasterGone bool) (bool, int64, string) {
 	deadline := time.Now().Add(switchoverCatchUpTimeout)
 	why := "no answer yet"
 	for {
@@ -283,6 +285,9 @@ func (r *KividbClusterReconciler) waitCaughtUp(ctx context.Context, oldIP, targe
 		switch {
 		case err != nil:
 			why = fmt.Sprintf("reading the master's offset: %v", err)
+			if stopIfMasterGone {
+				return false, 0, "the master stopped answering: " + err.Error()
+			}
 		case !m1.master:
 			return false, 0, "the old master is no longer a master"
 		default:
@@ -293,6 +298,9 @@ func (r *KividbClusterReconciler) waitCaughtUp(ctx context.Context, oldIP, targe
 				why = fmt.Sprintf("reading the replica's offset: %v", terr)
 			case merr != nil:
 				why = fmt.Sprintf("reading the master's offset: %v", merr)
+				if stopIfMasterGone {
+					return false, 0, "the master stopped answering: " + merr.Error()
+				}
 			case t.master || t.host != oldIP:
 				return false, 0, "the replica no longer replicates from the master"
 			case !t.linkUp:
