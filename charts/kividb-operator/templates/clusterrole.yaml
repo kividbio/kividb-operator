@@ -165,4 +165,15 @@ rules:
     verbs:
       - create
       - patch
+  # spec.monitoring.serviceMonitor: a KividbCluster's ServiceMonitor, read
+  # and written only when the Prometheus Operator's CRDs are installed.
+  - apiGroups:
+      - monitoring.coreos.com
+    resources:
+      - servicemonitors
+    verbs:
+      - get
+      - create
+      - update
+      - delete
 {{- end }}
