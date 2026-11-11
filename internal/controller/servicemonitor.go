@@ -122,8 +122,8 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 		r.warnServiceMonitorUnavailable(c, key)
 		return nil
 	}
-	r.serviceMonitorWarned.Delete(key)
 	if !want {
+		r.serviceMonitorWarned.Delete(key)
 		if _, gone := r.serviceMonitorGone.Load(key); gone {
 			return nil
 		}
@@ -183,6 +183,9 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 	if err != nil {
 		return fmt.Errorf("ServiceMonitor %s: %w", c.Name, err)
 	}
+	// Made: if the CRD goes again, the cluster is told again. Not before,
+	// as a removed CRD can still be in the mapper.
+	r.serviceMonitorWarned.Delete(key)
 	return nil
 }
 

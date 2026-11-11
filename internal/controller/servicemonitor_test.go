@@ -468,12 +468,17 @@ func TestServiceMonitorCRDRemovedWarnsOnce(t *testing.T) {
 	r.Client = &notFoundClient{Client: r.Client}
 	rec := record.NewFakeRecorder(10)
 	r.Recorder = rec
+	// The mapper still has the kind after serviceMonitorRecheck, so every
+	// minute the create is tried again and fails the same way.
 	for range 3 {
-		if err := r.reconcileServiceMonitor(context.Background(), c); err != nil {
-			t.Fatalf("CRD removed: error = %v, want none", err)
+		for range 3 {
+			if err := r.reconcileServiceMonitor(context.Background(), c); err != nil {
+				t.Fatalf("CRD removed: error = %v, want none", err)
+			}
 		}
+		now = now.Add(serviceMonitorRecheck)
 	}
 	if got := len(rec.Events); got != 1 {
-		t.Fatalf("3 passes after the CRD was removed: %d Events, want 1", got)
+		t.Fatalf("3 minutes after the CRD was removed: %d Events, want 1", got)
 	}
 }
