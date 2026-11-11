@@ -43,14 +43,19 @@ drops them: failovers do not hold the old master's writes
     wait lasts `failover.restartWaitSeconds` at most (new, 15 s by
     default, 0 for not at all), counted from when the master was found
     gone, whether its pod comes back or not, so a force-deleted master
-    costs that much at most. A master that restarts in place keeps
+    costs that much at most (and up to 5 s more: the wait is checked on
+    each pass). A wait that ran out is not started again for that pod of
+    the master. A master that restarts in place keeps
     `unhealthyThresholdSeconds`. A replacement pod that cannot be scheduled
-    is not waited for. The operator does not read Nodes, so that its RBAC
-    stays as it is: a replacement pinned by its volume to a node that is
-    not Ready shows as unschedulable, as the scheduler keeps new pods off
-    such a node. `FailoverWait` events say when a wait starts and how it
-    ended, and the Ready condition's reason is `WaitingForMaster`
-    meanwhile.
+    is not waited for, nor a master with no address or engine run
+    recorded. The operator does not read Nodes, so that its RBAC stays as
+    it is: a replacement pinned by its volume to a node that is not Ready
+    shows as unschedulable, as the scheduler keeps new pods off such a
+    node. The cap covers a volume that cannot attach yet: on AKS or EBS a
+    replacement schedules on another node in the zone and sits in
+    `ContainerCreating` (Multi-Attach), never unschedulable.
+    `FailoverWait` events say when a wait starts and how it ended, and the
+    Ready condition's reason is `WaitingForMaster` meanwhile.
 
 - **A switchover no longer hands over without holding writes when the pause
   could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),

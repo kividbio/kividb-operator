@@ -155,15 +155,17 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	if mv, exists := views[currentMasterName]; currentMasterName != "" && failoverEnabled && (!exists || podReplaced(previous[currentMasterName], mv.pod)) {
 		switch {
 		case exists && mv.ready && mv.status != nil:
-			r.restartWaitOver(c)
+			r.restartWaitOver(c, waitCameBack, currentMasterName)
 		default:
 			if err := r.waitForRestart(ctx, c, currentMasterName, mv, previous[currentMasterName]); err != nil {
 				return nil, currentMasterName, false, err
 			}
 			needsFailover = true
 		}
+	} else if !failoverEnabled {
+		r.restartWaitOver(c, waitFailoverOff, currentMasterName)
 	} else {
-		r.restartWaitOver(c)
+		r.restartWaitOver(c, waitMasterChanged, currentMasterName)
 	}
 
 	// A master that restarted and came back with less than its replicas

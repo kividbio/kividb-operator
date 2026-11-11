@@ -379,12 +379,19 @@ the new pod is Ready and has reported (a `FailoverWait` Warning, and
 replicas as for a master that restarted in place, keeping it if it holds
 as much. It waits `restartWaitSeconds` at most, counted from when the
 master was found gone (or its new pod made), whether the pod comes back or
-not: a force-deleted master costs that much at most. A replacement pod that
-cannot be scheduled is not waited for. The operator does not read Nodes,
-so that its RBAC stays as small as it is: the scheduler keeps new pods off
-a node that is not Ready, so a replacement pinned there by its volume shows
-as unschedulable, and the cap covers the rest. A master that restarts in
-place, as the same pod, keeps `unhealthyThresholdSeconds`.
+not: a force-deleted master costs that much at most, and up to 5 s more,
+for the wait is checked on each pass. A replacement pod that cannot be
+scheduled is not waited for, nor a master with no address or engine run
+recorded (the CRD not applied again, or an agent before 0.7.0): nothing
+then tells whether its engine is still there. The operator does not read
+Nodes, so that its RBAC stays as small as it is: the scheduler keeps new
+pods off a node that is not Ready, so a replacement pinned there by its
+volume shows as unschedulable. The cap covers the rest, a volume that
+cannot attach yet in particular: on AKS or EBS a zonal disk lets the
+replacement schedule on another node in the zone, where it sits in
+`ContainerCreating` (a Multi-Attach error) while the disk is still
+attached to the old node, and is never unschedulable. A master that
+restarts in place, as the same pod, keeps `unhealthyThresholdSeconds`.
 
 The replica promoted is the one that holds the most when the old master's
 writes are held, by its offset read then; replicas that hold as much go by

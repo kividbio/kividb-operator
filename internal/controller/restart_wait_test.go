@@ -211,3 +211,100 @@ func TestAWaitForTheMasterIsNotLoggedAsAnError(t *testing.T) {
 		t.Errorf("the failure was logged as %v, want at error level", failed)
 	}
 }
+
+// promotes counts the promotions tried on ip.
+func (h *rolesHarness) promotes(ip string) int {
+	n := 0
+	for _, call := range h.agents.calls {
+		if call == "promote "+ip {
+			n++
+		}
+	}
+	return n
+}
+
+// The wait ran out, and the failover after it did not go through (the
+// promotion failed). The next pass fails over again at once: the wait is
+// over for this master -- this pod of it -- until the master changes. It
+// does not wait again, or say again that it waits and did not come back.
+func TestFailover_DoesNotWaitAgainOnceTheWaitRanOut(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		replacement bool
+	}{{"its pod gone", false}, {"its replacement pending", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, now := newGoneMasterHarness(t)
+			rec := h.recordEvents()
+			if tc.replacement {
+				h.addPod(testPod{name: "c1-0", uid: "new", pending: true, createdAgo: time.Second})
+			}
+			h.assertWaiting("at once")
+			*now = now.Add(16 * time.Second)
+			h.agents.failPromote = map[string]bool{"10.0.0.2": true}
+			if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+				t.Fatal("reconcileRoles succeeded, want the promotion's error")
+			}
+			if e := eventsWith(rec, "FailoverWait"); len(e) != 2 || !strings.Contains(e[1], "did not come back") {
+				t.Fatalf("events %v, want the wait and that it ran out", e)
+			}
+			*now = now.Add(5 * time.Second)
+			tried := h.promotes("10.0.0.2")
+			if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+				t.Fatal("reconcileRoles succeeded, want the promotion's error")
+			}
+			if h.promotes("10.0.0.2") == tried {
+				t.Error("no promotion tried on the next pass: it waited again")
+			}
+			if e := eventsWith(rec, "FailoverWait"); len(e) > 0 {
+				t.Errorf("events %v on the next pass, want none: the wait ran out already", e)
+			}
+			h.agents.failPromote = nil
+			h.assertFailoverTo("c1-1")
+		})
+	}
+}
+
+// A wait that ends other than by the master coming back says how it ended.
+func TestFailover_SaysWhyTheWaitEnded(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		end        func(h *rolesHarness)
+	}{
+		{"failover turned off", "failover is disabled", func(h *rolesHarness) {
+			off := false
+			h.cluster.Spec.Failover.Enabled = &off
+		}},
+		{"another master", "the master is now c1-1", func(h *rolesHarness) {
+			h.cluster.Status.MasterPod = "c1-1"
+		}},
+		{"the wait turned off", "restartWaitSeconds is 0", func(h *rolesHarness) {
+			h.noRestartWait()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := newGoneMasterHarness(t)
+			rec := h.recordEvents()
+			h.assertWaiting("at once")
+			eventsWith(rec, "")
+			tc.end(h)
+			_, _, _, _ = h.r.reconcileRoles(context.Background(), h.cluster, h.pods())
+			e := eventsWith(rec, "FailoverWait")
+			if len(e) != 1 || !strings.Contains(e[0], tc.want) || strings.Contains(e[0], "came back") {
+				t.Errorf("events %v, want one FailoverWait saying %q", e, tc.want)
+			}
+		})
+	}
+}
+
+// Nothing recorded for the master -- no address or engine run: the CRD was
+// not applied again, or its agent is from before 0.7.0 -- tells nothing
+// about whether its engine is still there: it is not waited for.
+func TestFailover_DoesNotWaitWithNothingRecorded(t *testing.T) {
+	h, _ := newGoneMasterHarness(t)
+	rec := h.recordEvents()
+	h.cluster.Status.Pods[0].PodIP, h.cluster.Status.Pods[0].RunID = "", ""
+	h.assertFailoverTo("c1-1")
+	if e := eventsWith(rec, "FailoverWait"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+}

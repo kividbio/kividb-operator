@@ -205,9 +205,16 @@ does, in order:
    UID), and whose engine no longer answers, is first waited for until
    its new pod is Ready and has reported, for `failover.restartWaitSeconds`
    at most from when it was found gone (`FailoverWait`): back on its
-   volume in time, it goes through step 4's comparison instead. Before
-   promoting anyone,
-   hold the old master's writes
+   volume in time, it goes through step 4's comparison instead. Not when
+   its replacement pod is unschedulable, or nothing (no address, no
+   engine run) was recorded for it. The cap is what covers a volume that
+   cannot attach yet (on AKS or EBS the replacement schedules on another
+   node in the zone, then sits in `ContainerCreating` with a Multi-Attach
+   error, never unschedulable); it is checked on each pass, so it can be
+   overshot by up to the 5 s between passes. A wait that ran out is
+   remembered, by master and pod, until the master changes: a failover
+   that does not go through after it is tried again at once, without
+   another wait. Before promoting anyone, hold the old master's writes
    (`CLIENT PAUSE <ms> WRITE` through its agent, for the pod's
    termination grace period -- 10 s at least -- and 5 s more) at the
    address and to the engine run its status entry recorded
