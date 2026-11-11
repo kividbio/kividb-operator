@@ -135,7 +135,11 @@ func (r *KividbClusterReconciler) reconcileHandover(ctx context.Context, c *kivi
 
 	newMaster := ""
 	if master != nil && statuses != nil {
-		if req, want := handoverReason(c, master); want {
+		req, want := handoverReason(c, master)
+		if !want {
+			r.switchoverNotWanted(c)
+		}
+		if want {
 			name, err := r.switchover(ctx, c, pods, statuses, masterPod, req)
 			switch {
 			case err == nil:

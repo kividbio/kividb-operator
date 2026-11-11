@@ -279,6 +279,23 @@ func TestFailover_SendsAPauseAgainAfterASlowRefusal(t *testing.T) {
 	}
 }
 
+// A try after the first is given the whole pause call too, not what is left
+// of the window: the engine may take its 5 s before it answers, and a pause
+// that lands after we gave up on it is left running with nothing to demote
+// the master (#82).
+func TestFailover_ARetryIsGivenTheWholePauseCall(t *testing.T) {
+	defer func(r, p time.Duration) { fenceRetryTimeout, pauseCallTimeout = r, p }(fenceRetryTimeout, pauseCallTimeout)
+	fenceRetryTimeout, pauseCallTimeout = 300*time.Millisecond, time.Second
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.pauseUnanswered = map[string]int{"10.0.0.1": 1}
+	h.agents.pauseDelay = map[string]time.Duration{"10.0.0.1": 500 * time.Millisecond}
+	h.assertFailoverTo("c1-1")
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+}
+
 // An agent error on the pause (an agent before 0.7.1 cut it at 5 s) is sent
 // again, as no answer is.
 func TestFailover_SendsThePauseAgainAfterAnAgentError(t *testing.T) {
@@ -304,10 +321,17 @@ func TestFailover_UnfencedWhenThePauseIsNeverAnswered(t *testing.T) {
 	if took := time.Since(start); took < fenceRetryTimeout {
 		t.Errorf("the failover went on after %s, before fenceRetryTimeout (%s)", took, fenceRetryTimeout)
 	}
-	// One try, then tries for fenceRetryTimeout, none past it: at most
-	// pauseCallTimeout + fenceRetryTimeout (about 10 s as shipped).
-	if took, most := time.Since(start), pauseCallTimeout+fenceRetryTimeout+150*time.Millisecond; took > most {
-		t.Errorf("the fence took %s, more than a try and the retry window (%s)", took, most)
+	// Tries start for fenceRetryTimeout after the first, each given the
+	// whole pause call: at most two calls and the window -- and here the
+	// demotion's pause, unanswered too, one more call.
+	if took, most := time.Since(start), 3*pauseCallTimeout+fenceRetryTimeout+150*time.Millisecond; took > most {
+		t.Errorf("the failover took %s, more than three calls and the retry window (%s)", took, most)
+	}
+	// None was answered, so any of them may have landed once its write
+	// finished: the old master is recorded, and demoted as a fenced one,
+	// rather than wake up a master when the pause runs out (#82).
+	if h.storedFence() == nil {
+		t.Error("no status.fencedMaster: a pause that may have landed is left to run out")
 	}
 	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 {
 		t.Errorf("events %v, want one FailoverUnfenced", e)

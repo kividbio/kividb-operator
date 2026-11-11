@@ -46,9 +46,15 @@ master's writes (`FailoverUnfenced` Warning).
   for a master pod being deleted; a `Switchover` condition (`False`,
   `Aborted`) says why and when the next try is, until one goes through.
   The failover fence (#53) waits for a pause the same way once the old
-  master has answered, and tries again after a refusal: the first try is
-  not counted against its 3 s window, so the fence now takes 10 s at most
-  against a live master that cannot pause.
+  master has answered, and tries again after a refusal: every try is given
+  the whole call, and new ones start for 3 s after the first, so the fence
+  takes at most two pause calls and that window against a live master that
+  cannot pause (17 s with the default timeouts, more with a longer
+  `--agent-timeout`). A pause that got no answer may have landed, so that
+  master is recorded in `status.fencedMaster` and demoted after the
+  promotion like a fenced one. The `Switchover` condition and the count of
+  aborts go away once no switchover is wanted any more, or the master is
+  another pod.
 
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install

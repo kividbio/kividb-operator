@@ -271,6 +271,95 @@ func TestSwitchoverWithoutAWritePauseOnAnUnknownCommand(t *testing.T) {
 	}
 }
 
+// kividb 1.0.0's own words for a command it does not have.
+func TestSwitchoverWithoutAWritePauseOnAnUnknownClientSubcommand(t *testing.T) {
+	h, statuses := newSwitchoverHarness(t)
+	h.agents.pauseError = "ERR unknown CLIENT subcommand 'PAUSE'"
+	if got, err := h.r.switchover(context.Background(), h.cluster, h.list(), statuses, "c1-0", switchoverRequest{reason: "rollout"}); err != nil || got != "c1-1" {
+		t.Fatalf("switchover = %q, %v", got, err)
+	}
+}
+
+// setStepDown asks pod name to hand its master role over, or not.
+func (h *rolesHarness) setStepDown(name string, on bool) {
+	h.t.Helper()
+	var p corev1.Pod
+	if err := h.r.Get(context.Background(), client.ObjectKey{Namespace: h.cluster.Namespace, Name: name}, &p); err != nil {
+		h.t.Fatal(err)
+	}
+	if p.Annotations == nil {
+		p.Annotations = map[string]string{}
+	}
+	delete(p.Annotations, StepDownAnnotation)
+	if on {
+		p.Annotations[StepDownAnnotation] = "true"
+	}
+	if err := h.r.Update(context.Background(), &p); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// A switchover no longer wanted -- the step-down was cancelled, the rollout
+// no longer needs one -- leaves no Switchover condition behind, nor a count
+// of aborts that a later request would wait out.
+func TestSwitchoverAbortsAreForgottenWhenNoneIsWanted(t *testing.T) {
+	shortSwitchoverWaits(t)
+	h, statuses := newSwitchoverHarness(t)
+	h.agents.status["10.0.0.2"].ReplicationOffset = 80
+	h.agents.catchUp = map[string]int{"10.0.0.2": -1}
+	now := time.Now()
+	h.r.clock = func() time.Time { return now }
+
+	h.setStepDown("c1-0", true)
+	if got := h.r.reconcileHandover(context.Background(), h.cluster, h.list(), statuses, "c1-0"); got != "" {
+		t.Fatalf("handover to %q, want it aborted", got)
+	}
+	if meta.FindStatusCondition(h.cluster.Status.Conditions, SwitchoverCondition) == nil {
+		t.Fatal("no Switchover condition after the abort")
+	}
+
+	h.setStepDown("c1-0", false)
+	h.r.reconcileHandover(context.Background(), h.cluster, h.list(), statuses, "c1-0")
+	if cond := meta.FindStatusCondition(h.cluster.Status.Conditions, SwitchoverCondition); cond != nil {
+		t.Errorf("condition %+v kept once no switchover was wanted", cond)
+	}
+
+	// A new request right away is not a retry: it is not deferred.
+	h.agents.catchUp["10.0.0.2"] = 0
+	h.setStepDown("c1-0", true)
+	if got := h.r.reconcileHandover(context.Background(), h.cluster, h.list(), statuses, "c1-0"); got != "c1-1" {
+		t.Errorf("handover to %q, want c1-1 at once", got)
+	}
+}
+
+// Aborts counted against one master do not hold up a switchover from
+// another: the master changed since (a failover, say).
+func TestSwitchoverAbortsOfAnotherMasterDoNotCount(t *testing.T) {
+	shortSwitchoverWaits(t)
+	h, statuses := newSwitchoverHarness(t)
+	h.agents.status["10.0.0.2"].ReplicationOffset = 80
+	h.agents.catchUp = map[string]int{"10.0.0.2": -1}
+	now := time.Now()
+	h.r.clock = func() time.Time { return now }
+	if _, err := h.r.switchover(context.Background(), h.cluster, h.list(), statuses, "c1-0", switchoverRequest{reason: "rollout"}); err == nil {
+		t.Fatal("switchover succeeded, want it aborted")
+	}
+
+	// c1-1 is the master now, c1-0 and c1-2 its replicas.
+	h.agents.status["10.0.0.2"] = master(100)
+	h.agents.status["10.0.0.1"] = replicaOf("10.0.0.2", 100)
+	h.agents.status["10.0.0.3"] = replicaOf("10.0.0.2", 100)
+	h.agents.catchUp = nil
+	statuses = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 100},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 100},
+		{Name: "c1-2", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 100},
+	}
+	if _, err := h.r.switchover(context.Background(), h.cluster, h.list(), statuses, "c1-1", switchoverRequest{reason: "rollout"}); errors.Is(err, errSwitchoverDeferred) {
+		t.Fatalf("a switchover from the new master was deferred by the old one's aborts")
+	}
+}
+
 // Any other refusal is one the engine may not repeat: aborted.
 func TestSwitchoverIsAbortedOnASyntaxError(t *testing.T) {
 	h, statuses := newSwitchoverHarness(t)

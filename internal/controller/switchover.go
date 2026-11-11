@@ -81,10 +81,20 @@ func switchoverPause() time.Duration {
 }
 
 // switchoverAborts is how many switchovers of a cluster were aborted in a
-// row, and when the last one was.
+// row, from which master, and when the last one was.
 type switchoverAborts struct {
-	n  int
-	at time.Time
+	n      int
+	master string
+	at     time.Time
+}
+
+// switchoverNotWanted forgets the aborted switchovers of c and takes its
+// Switchover condition away: none is wanted any more (the step-down was
+// cancelled, the rollout no longer needs one), or the master is another
+// pod now. A later one is a new request, not a retry to wait for (#82).
+func (r *KividbClusterReconciler) switchoverNotWanted(c *kividbv1alpha1.KividbCluster) {
+	r.switchovers.Delete(switchoverKey(c))
+	removeCondition(&c.Status.Conditions, SwitchoverCondition)
 }
 
 // switchoverWait is how long after its n-th aborted switchover in a row a
@@ -207,7 +217,10 @@ func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alp
 		return "", err
 	}
 	if v, ok := r.switchovers.Load(switchoverKey(c)); ok {
-		if a := v.(*switchoverAborts); r.now().Sub(a.at) < switchoverWait(a.n, req.urgent) {
+		switch a := v.(*switchoverAborts); {
+		case a.master != masterPod:
+			r.switchoverNotWanted(c) // aborted from another master
+		case r.now().Sub(a.at) < switchoverWait(a.n, req.urgent):
 			return "", errSwitchoverDeferred
 		}
 	}
@@ -234,8 +247,8 @@ func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alp
 	}
 	abort := func(why string) (string, error) {
 		unpause()
-		a := &switchoverAborts{n: 1, at: r.now()}
-		if v, ok := r.switchovers.Load(switchoverKey(c)); ok {
+		a := &switchoverAborts{n: 1, master: masterPod, at: r.now()}
+		if v, ok := r.switchovers.Load(switchoverKey(c)); ok && v.(*switchoverAborts).master == masterPod {
 			a.n = v.(*switchoverAborts).n + 1
 		}
 		r.switchovers.Store(switchoverKey(c), a)

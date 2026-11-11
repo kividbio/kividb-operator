@@ -211,8 +211,11 @@ does, in order:
    wait for the candidate to catch up with it, as a switchover does (5 s
    at most, less once the old master stops answering). An address that
    does not answer is asked again for 1 s (`fenceRunCheckTimeout`; one
-   that refuses the connection, once); an unanswered pause is sent again
-   for up to 3 s (`fenceRetryTimeout`). A failover that
+   that refuses the connection, once); a pause that gets no answer, or
+   is refused because a write did not finish, is sent again, each try
+   given the whole call, for 3 s after the first (`fenceRetryTimeout`). If
+   none got through, the master is still recorded and demoted below when
+   any try went unanswered: it may have landed. A failover that
    goes on without the fence, or before the candidate caught up, raises
    `FailoverUnfenced`. Record the fenced master in
    `status.fencedMaster`, call `POST /promote` on the candidate (a

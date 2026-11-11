@@ -138,29 +138,35 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 	// shorter), until it is answered, or refused by an engine without it.
 	// Each try may take pauseCallTimeout, for the engine waits out the
 	// writes in progress before it answers.
-	// The first try is not counted against fenceRetryTimeout: a refusal
-	// comes back only after the engine's own wait, past that window, and
-	// there would be no second try. No later try outlasts the window, so
-	// that the fence takes pauseCallTimeout + fenceRetryTimeout at most
-	// (about 10 s; #82).
+	// Every try is given the whole call: the engine may take its 5 s
+	// before it answers, and a pause cut short on this side may still land
+	// on the engine. fenceRetryTimeout, counted from the end of the first
+	// try (a refusal comes back only after the engine's wait), only says
+	// whether a new try may start: two calls and the window at most, 17 s
+	// with the default timeouts (#82).
 	pauseMs := strconv.FormatInt(fencePause(c).Milliseconds(), 10)
 	var deadline time.Time
+	unanswered := false
 	for {
-		tctx, cancel := ctx, context.CancelFunc(func() {})
-		if !deadline.IsZero() {
-			tctx, cancel = context.WithDeadline(ctx, deadline)
-		}
-		reply, err := r.Agent.ExecWithin(tctx, pauseCallTimeout, last.PodIP, "CLIENT", "PAUSE", pauseMs, "WRITE")
-		cancel()
+		reply, err := r.Agent.ExecWithin(ctx, pauseCallTimeout, last.PodIP, "CLIENT", "PAUSE", pauseMs, "WRITE")
 		if err == nil {
 			break
 		}
 		if reply != nil && pauseUnsupported(err) {
 			return unfenced("its engine does not have CLIENT PAUSE WRITE (%v)", err)
 		}
+		unanswered = unanswered || reply == nil
 		if deadline.IsZero() {
 			deadline = time.Now().Add(fenceRetryTimeout)
 		} else if !time.Now().Before(deadline) {
+			if unanswered {
+				// A try that got no answer may have landed, once the write
+				// it waited for finished: the master is recorded and
+				// demoted as a fenced one, rather than left to wake up a
+				// master when that pause runs out (#82).
+				unfenced("its engine answered, but no pause of its writes was confirmed (%v); it is demoted after the promotion in case one landed", err)
+				return last.PodIP
+			}
 			return unfenced("its engine answered, but its writes could not be paused (%v)", err)
 		}
 		log.Info("holding the old master's writes did not take; trying again", "error", err.Error())
@@ -261,7 +267,9 @@ func (r *KividbClusterReconciler) demoteFencedMaster(ctx context.Context, c *kiv
 		forget()
 		return ""
 	}
-	if _, err := r.Agent.Exec(ctx, fm.PodIP, "CLIENT", "PAUSE", strconv.FormatInt(fencePause(c).Milliseconds(), 10), "WRITE"); err != nil {
+	// The engine may wait out a write in progress before it answers, as for
+	// the fence's own pause.
+	if _, err := r.Agent.ExecWithin(ctx, pauseCallTimeout, fm.PodIP, "CLIENT", "PAUSE", strconv.FormatInt(fencePause(c).Milliseconds(), 10), "WRITE"); err != nil {
 		log.Info("could not hold the fenced master's writes again", "error", err.Error())
 	}
 	if err := r.Agent.ReplicaOf(ctx, fm.PodIP, masterIP, port); err != nil {
@@ -334,7 +342,8 @@ func isTimeout(err error) bool {
 // one the engine may not repeat, and is not taken for that (#82).
 func pauseUnsupported(err error) bool {
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unknown command") || strings.Contains(msg, "unknown subcommand")
+	return strings.Contains(msg, "unknown command") || strings.Contains(msg, "unknown subcommand") ||
+		strings.Contains(msg, "unknown client subcommand") // kividb 1.0.0
 }
 
 // releaseDemotedMaster lets go of a master that has just been made a
