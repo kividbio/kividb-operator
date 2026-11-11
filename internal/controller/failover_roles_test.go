@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,18 @@ type fakeAgents struct {
 	pauseTimeoutMs []int64
 	// pauseError: what CLIENT PAUSE answers, if set (an engine's own words).
 	pauseError string
+	// pauseRefusedAfter: how long a pauseRefused refusal takes to come back
+	// (the engine's own wait for the writes in progress, up to 5 s).
+	pauseRefusedAfter time.Duration
+	// pauseHTTP500: the next this many CLIENT PAUSEs on an address get an
+	// agent error, as an agent before 0.7.1 gives one it cut at 5 s; the
+	// pause may have landed.
+	pauseHTTP500 map[string]int
+	// pausedUntil: when each address's pause runs out, counted from the
+	// request, as the engine counts it; pauseRanOut: the addresses made a
+	// replica after it had.
+	pausedUntil map[string]time.Time
+	pauseRanOut map[string]bool
 }
 
 // pauseDidNotTakeHold is what CLIENT PAUSE answers, since kividb 1.2.1, when
@@ -116,7 +129,7 @@ func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []st
 		}}
 	case strings.HasPrefix(cmd, "CLIENT PAUSE"):
 		if f.noPause {
-			return agentapi.ExecResponse{Type: "error", Str: "ERR syntax error"}
+			return agentapi.ExecResponse{Type: "error", Str: "ERR unknown subcommand 'PAUSE'. Try CLIENT HELP."}
 		}
 		if f.pauseRefused[ip] > 0 {
 			f.pauseRefused[ip]--
@@ -129,6 +142,12 @@ func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []st
 			f.paused = map[string]bool{}
 		}
 		f.paused[ip] = true
+		if ms, err := strconv.ParseInt(args[2], 10, 64); err == nil {
+			if f.pausedUntil == nil {
+				f.pausedUntil = map[string]time.Time{}
+			}
+			f.pausedUntil[ip] = time.Now().Add(time.Duration(ms) * time.Millisecond)
+		}
 	case cmd == "CLIENT UNPAUSE":
 		delete(f.paused, ip)
 	case cmd == "PING":
@@ -194,6 +213,12 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 		f.calls = append(f.calls, fmt.Sprintf("replicaof %s -> %s", ip, r.Host))
+		if until, ok := f.pausedUntil[ip]; ok && f.paused[ip] && time.Now().After(until) {
+			if f.pauseRanOut == nil {
+				f.pauseRanOut = map[string]bool{}
+			}
+			f.pauseRanOut[ip] = true
+		}
 		if f.failReplicaOf[ip] {
 			b, _ := json.Marshal(agentapi.ErrorResponse{Error: "connection reset"})
 			return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
@@ -206,6 +231,16 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		if strings.HasPrefix(strings.ToUpper(strings.Join(r.Args, " ")), "CLIENT PAUSE") {
 			f.pauseTimeoutMs = append(f.pauseTimeoutMs, r.TimeoutMs)
+			if f.pauseHTTP500[ip] > 0 {
+				f.pauseHTTP500[ip]--
+				f.calls = append(f.calls, "exec "+ip+" "+strings.Join(r.Args, " "))
+				if f.paused == nil {
+					f.paused = map[string]bool{}
+				}
+				f.paused[ip] = true
+				b, _ := json.Marshal(agentapi.ErrorResponse{Error: "respclient: read: i/o timeout"})
+				return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
+			}
 		}
 		body = f.execReply(ip, st, r.Args)
 		if strings.EqualFold(strings.Join(r.Args, " "), "INFO server") && f.infoUnanswered[ip] > 0 {
@@ -221,6 +256,13 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 				f.pauseUnanswered[ip]--
 				<-req.Context().Done()
 				return nil, req.Context().Err()
+			}
+			if reply, ok := body.(agentapi.ExecResponse); ok && reply.Str == pauseDidNotTakeHold && f.pauseRefusedAfter > 0 {
+				select {
+				case <-time.After(f.pauseRefusedAfter):
+				case <-req.Context().Done():
+					return nil, req.Context().Err()
+				}
 			}
 			if delay := f.pauseDelay[ip]; delay > 0 {
 				select {

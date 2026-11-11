@@ -388,7 +388,7 @@ func TestReconcileRollout(t *testing.T) {
 			var wantCalls []string
 			if tt.wantPromoted != "" {
 				wantCalls = []string{
-					"exec " + ips[master] + " CLIENT PAUSE 10000 WRITE",
+					fmt.Sprintf("exec %s CLIENT PAUSE %d WRITE", ips[master], switchoverPause().Milliseconds()),
 					"promote " + ips[tt.wantPromoted],
 					fmt.Sprintf("replicaof %s -> %s", ips[master], ips[tt.wantPromoted]),
 				}

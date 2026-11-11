@@ -66,11 +66,12 @@ var fenceRunCheckTimeout = time.Second
 // try starts after it.
 var fenceRetryTimeout = 3 * time.Second
 
-// pauseCallTimeout is how long a CLIENT PAUSE call may take, at the
-// operator and at the agent (agentapi.ExecRequest.TimeoutMs). Since kividb
-// 1.2.1 the engine waits out the writes in progress before it answers, up
-// to 5 s, and refuses after that (kividbio/kividb#629): longer than that
-// wait, and than the agent's and the agent client's usual 5 s.
+// pauseCallTimeout is how long a CLIENT PAUSE call may take (the agent is
+// asked for a little less, agentWait), or the agent client's per-call
+// timeout if that is longer. Since kividb 1.2.1 the engine waits out the
+// writes in progress before it answers, up to 5 s, and refuses after that
+// (kividbio/kividb#629): longer than that wait, and than the agent's and
+// the agent client's usual 5 s.
 var pauseCallTimeout = 7 * time.Second
 
 // fencePause is how long the fence holds the old master's writes, should
@@ -137,19 +138,29 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 	// shorter), until it is answered, or refused by an engine without it.
 	// Each try may take pauseCallTimeout, for the engine waits out the
 	// writes in progress before it answers.
+	// The first try is not counted against fenceRetryTimeout: a refusal
+	// comes back only after the engine's own wait, past that window, and
+	// there would be no second try. No later try outlasts the window, so
+	// that the fence takes pauseCallTimeout + fenceRetryTimeout at most
+	// (about 10 s; #82).
 	pauseMs := strconv.FormatInt(fencePause(c).Milliseconds(), 10)
-	deadline := time.Now().Add(fenceRetryTimeout)
+	var deadline time.Time
 	for {
-		pctx, cancel := context.WithTimeout(ctx, pauseCallTimeout)
-		reply, err := r.Agent.ExecWithin(pctx, pauseCallTimeout, last.PodIP, "CLIENT", "PAUSE", pauseMs, "WRITE")
+		tctx, cancel := ctx, context.CancelFunc(func() {})
+		if !deadline.IsZero() {
+			tctx, cancel = context.WithDeadline(ctx, deadline)
+		}
+		reply, err := r.Agent.ExecWithin(tctx, pauseCallTimeout, last.PodIP, "CLIENT", "PAUSE", pauseMs, "WRITE")
 		cancel()
 		if err == nil {
 			break
 		}
-		if reply != nil && r.pauseUnsupported(ctx, last.PodIP, err) {
+		if reply != nil && pauseUnsupported(err) {
 			return unfenced("its engine does not have CLIENT PAUSE WRITE (%v)", err)
 		}
-		if time.Now().After(deadline) {
+		if deadline.IsZero() {
+			deadline = time.Now().Add(fenceRetryTimeout)
+		} else if !time.Now().Before(deadline) {
 			return unfenced("its engine answered, but its writes could not be paused (%v)", err)
 		}
 		log.Info("holding the old master's writes did not take; trying again", "error", err.Error())
@@ -316,20 +327,14 @@ func isTimeout(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
 }
 
-// pauseUnsupported reports whether the engine at ip refused CLIENT PAUSE
-// ... WRITE, with err, because it does not have it (before kividb 1.1),
-// rather than because it could not pause just then: since kividb 1.2.1 it
-// refuses while a write in progress does not finish (kividbio/kividb#629),
-// and pauses later. Its version says, when it gives one; else the error.
-func (r *KividbClusterReconciler) pauseUnsupported(ctx context.Context, ip string, err error) bool {
-	if info, ierr := r.Agent.Exec(ctx, ip, "INFO", "server"); ierr == nil {
-		if version := infoField(info.Str, "kividb_version"); version != "" {
-			return !engineAtLeast(version, 1, 1)
-		}
-	}
+// pauseUnsupported reports whether err, an engine's refusal of CLIENT PAUSE
+// ... WRITE, says it does not know the command. Every kividb shipped has it,
+// so any other refusal -- since kividb 1.2.1 one for a write in progress
+// that did not finish (kividbio/kividb#629), LOADING, BUSY, NOPERM -- is
+// one the engine may not repeat, and is not taken for that (#82).
+func pauseUnsupported(err error) bool {
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unknown command") || strings.Contains(msg, "unknown subcommand") ||
-		strings.Contains(msg, "syntax error")
+	return strings.Contains(msg, "unknown command") || strings.Contains(msg, "unknown subcommand")
 }
 
 // releaseDemotedMaster lets go of a master that has just been made a

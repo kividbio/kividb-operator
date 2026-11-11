@@ -240,19 +240,51 @@ func TestFailover_SendsAPauseThatCouldNotTakeHoldAgain(t *testing.T) {
 // that, not fenceTimeout -- a write a second long would have made the
 // failover go on unfenced against a live master (#81).
 func TestFailover_WaitsOutASlowPause(t *testing.T) {
+	defer func(d time.Duration) { pauseCallTimeout = d }(pauseCallTimeout)
+	pauseCallTimeout = 700 * time.Millisecond
 	h := newFenceHarness(t)
 	rec := h.recordEvents()
-	h.r.Agent.http.Timeout = 5 * time.Second // as --agent-timeout has it
-	h.agents.pauseDelay = map[string]time.Duration{"10.0.0.1": 6 * time.Second}
+	h.r.Agent.http.Timeout = 300 * time.Millisecond // the usual per-call timeout, shorter
+	h.agents.pauseDelay = map[string]time.Duration{"10.0.0.1": 500 * time.Millisecond}
 	h.assertFailoverTo("c1-1")
 	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
 		t.Errorf("unexpected %v", e)
 	}
 	// The agent cuts an engine command at 5 s unless told otherwise. (The
 	// demotion's pause comes after it, with writes held: nothing to wait for.)
-	if got, want := h.agents.pauseTimeoutMs, pauseCallTimeout.Milliseconds(); len(got) == 0 || got[0] != want {
+	if got, want := h.agents.pauseTimeoutMs, agentWait(pauseCallTimeout).Milliseconds(); len(got) == 0 || got[0] != want {
 		t.Errorf("the fence's pause was sent with timeoutMs %v, want %d first", got, want)
 	}
+	if h.storedFence() == nil {
+		t.Error("no status.fencedMaster: the failover went on unfenced")
+	}
+}
+
+// A real refusal comes back only after the engine's wait for the writes in
+// progress, past fenceRetryTimeout: the window for trying again starts
+// after the first try, so that there is a second (#82).
+func TestFailover_SendsAPauseAgainAfterASlowRefusal(t *testing.T) {
+	defer func(r, p time.Duration) { fenceRetryTimeout, pauseCallTimeout = r, p }(fenceRetryTimeout, pauseCallTimeout)
+	fenceRetryTimeout, pauseCallTimeout = 300*time.Millisecond, time.Second
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.pauseRefused = map[string]int{"10.0.0.1": 1}
+	h.agents.pauseRefusedAfter = 500 * time.Millisecond
+	h.assertFailoverTo("c1-1")
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+	if h.storedFence() == nil {
+		t.Error("no status.fencedMaster: the failover went on unfenced")
+	}
+}
+
+// An agent error on the pause (an agent before 0.7.1 cut it at 5 s) is sent
+// again, as no answer is.
+func TestFailover_SendsThePauseAgainAfterAnAgentError(t *testing.T) {
+	h := newFenceHarness(t)
+	h.agents.pauseHTTP500 = map[string]int{"10.0.0.1": 1}
+	h.assertFailoverTo("c1-1")
 	if h.storedFence() == nil {
 		t.Error("no status.fencedMaster: the failover went on unfenced")
 	}
@@ -262,7 +294,8 @@ func TestFailover_WaitsOutASlowPause(t *testing.T) {
 // unfenced, and says so.
 func TestFailover_UnfencedWhenThePauseIsNeverAnswered(t *testing.T) {
 	defer func(d, p time.Duration) { fenceRetryTimeout, pauseCallTimeout = d, p }(fenceRetryTimeout, pauseCallTimeout)
-	fenceRetryTimeout, pauseCallTimeout = 3*fenceTimeout, fenceTimeout
+	// A try longer than the window, as shipped (7 s and 3 s).
+	fenceRetryTimeout, pauseCallTimeout = 300*time.Millisecond, 600*time.Millisecond
 	h := newFenceHarness(t)
 	rec := h.recordEvents()
 	h.agents.pauseUnanswered = map[string]int{"10.0.0.1": 1000}
@@ -270,6 +303,11 @@ func TestFailover_UnfencedWhenThePauseIsNeverAnswered(t *testing.T) {
 	h.assertFailoverTo("c1-1")
 	if took := time.Since(start); took < fenceRetryTimeout {
 		t.Errorf("the failover went on after %s, before fenceRetryTimeout (%s)", took, fenceRetryTimeout)
+	}
+	// One try, then tries for fenceRetryTimeout, none past it: at most
+	// pauseCallTimeout + fenceRetryTimeout (about 10 s as shipped).
+	if took, most := time.Since(start), pauseCallTimeout+fenceRetryTimeout+150*time.Millisecond; took > most {
+		t.Errorf("the fence took %s, more than a try and the retry window (%s)", took, most)
 	}
 	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 {
 		t.Errorf("events %v, want one FailoverUnfenced", e)

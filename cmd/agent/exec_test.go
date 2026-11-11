@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,6 +45,7 @@ func TestExecGivesTheCommandTheDeadlineAskedFor(t *testing.T) {
 		{"longer than the command takes", 300, http.StatusOK},
 		{"shorter than the command takes", 150, http.StatusInternalServerError},
 		{"past the cap: the cap", 60_000, http.StatusOK},
+		{"far past it: still the cap", math.MaxInt64, http.StatusOK},
 	} {
 		if got := exec(tc.timeoutMs); got != tc.want {
 			t.Errorf("%s (timeoutMs %d): status %d, want %d", tc.name, tc.timeoutMs, got, tc.want)

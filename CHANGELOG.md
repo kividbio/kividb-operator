@@ -30,16 +30,25 @@ master's writes (`FailoverUnfenced` Warning).
   kividb 1.1: it promoted the target without waiting for it to catch up,
   and raised `SwitchoverWithoutPause` telling the user to upgrade an engine
   that was already new. A write the old master acknowledged then could be
-  lost. Now such a switchover is called off (`SwitchoverAborted`), the pause
-  lifted, and it is tried again. Only an engine whose version is before
-  1.1, or that does not know the command, is switched over without the
-  pause. The pause is given 7 s, past the engine's wait: the agent's exec
-  request takes a `timeoutMs` (capped at 15 s), which the operator sends
-  for the pause only. An agent before this release ignores it and cuts the
-  pause at 5 s, which now aborts the switchover rather than dropping the
-  pause. The failover fence (#53) waits for a pause the same way once the
-  old master has answered, and asks again after a refusal, rather than
-  going on unfenced.
+  lost. Now such a switchover is called off (`SwitchoverAborted`) and tried
+  again; a pause that got no answer is lifted, in case it landed. Only an
+  engine that answers that it does not know the command is switched over
+  without the pause: every kividb has it, so any other refusal (`LOADING`,
+  `BUSY`) aborts too. The pause call is given 7 s, past the engine's wait
+  (or `--agent-timeout`, if longer), and the agent is asked to wait 6 s:
+  its exec request takes a `timeoutMs` (capped at 15 s), which the
+  operator sends for the pause only. An agent before this release ignores
+  it and cuts the pause at 5 s, which now aborts the switchover rather than
+  dropping the pause. The engine counts the pause from the request, so it
+  now lasts the call, the catch-up and a margin (17 s), and the old master
+  is a replica before it runs out. Aborted switchovers back off: 30 s,
+  doubling with each abort in a row up to 10 min, and 2 s between the tries
+  for a master pod being deleted; a `Switchover` condition (`False`,
+  `Aborted`) says why and when the next try is, until one goes through.
+  The failover fence (#53) waits for a pause the same way once the old
+  master has answered, and tries again after a refusal: the first try is
+  not counted against its 3 s window, so the fence now takes 10 s at most
+  against a live master that cannot pause.
 
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install

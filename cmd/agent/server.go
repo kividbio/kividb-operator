@@ -473,7 +473,11 @@ func (s *server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	timeout := respTimeout
 	if req.TimeoutMs > 0 {
-		timeout = min(time.Duration(req.TimeoutMs)*time.Millisecond, maxExecTimeout)
+		// Clamped before it is made a Duration: a huge value overflows.
+		timeout = maxExecTimeout
+		if req.TimeoutMs < maxExecTimeout.Milliseconds() {
+			timeout = time.Duration(req.TimeoutMs) * time.Millisecond
+		}
 	}
 	c, err := s.dialWithin(timeout)
 	if err != nil {
