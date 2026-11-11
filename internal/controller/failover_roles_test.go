@@ -89,6 +89,12 @@ type fakeAgents struct {
 	// replica after it had.
 	pausedUntil map[string]time.Time
 	pauseRanOut map[string]bool
+	// priority: the replica-priority INFO REPLICATION reports, by address
+	// (100, the default, if not set).
+	priority map[string]int
+	// liveOffset: the offset a replica's ROLE reports, past the one its
+	// /status gave (it went on receiving since).
+	liveOffset map[string]int64
 }
 
 // pauseDidNotTakeHold is what CLIENT PAUSE answers, since kividb 1.2.1, when
@@ -111,6 +117,9 @@ func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []st
 			}}
 		}
 		offset := st.ReplicationOffset
+		if o, ok := f.liveOffset[ip]; ok {
+			offset = o
+		}
 		if m := f.byIP(st.MasterHost); m != nil {
 			switch n := f.catchUp[ip]; {
 			case n == 0:
@@ -152,6 +161,12 @@ func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []st
 		delete(f.paused, ip)
 	case cmd == "PING":
 		return agentapi.ExecResponse{Type: "status", Str: "PONG"}
+	case cmd == "INFO REPLICATION":
+		priority, ok := f.priority[ip]
+		if !ok {
+			priority = 100
+		}
+		return agentapi.ExecResponse{Type: "bulk", Str: fmt.Sprintf("# Replication%srole:%s%sslave_priority:%d%s", crlf, st.Role, crlf, priority, crlf)}
 	case cmd == "INFO SERVER":
 		version := f.version
 		switch {
@@ -284,6 +299,11 @@ type testPod struct {
 	agent           *agentapi.StatusResponse // nil: agent unreachable
 	uid             types.UID
 	restarts        int32 // of the kividb container
+	// pending: just created, with no Ready condition yet; unschedulable:
+	// no node will take it.
+	pending, unschedulable bool
+	// createdAgo: when the pod object was made, if not left out.
+	createdAgo time.Duration
 }
 
 // object is p's pod object, in cluster c.
@@ -297,9 +317,21 @@ func (p testPod) object(c *kividbv1alpha1.KividbCluster) *corev1.Pod {
 		cond.Status = corev1.ConditionFalse
 		cond.LastTransitionTime = metav1.NewTime(time.Now().Add(-p.unreadyFor))
 	}
+	conds := []corev1.PodCondition{cond}
+	switch {
+	case p.unschedulable:
+		conds = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+			Message: "0/3 nodes are available: 1 node(s) had volume node affinity conflict, 2 node(s) had untolerated taint {node.kubernetes.io/not-ready: }"}}
+	case p.pending:
+		conds = nil
+	}
+	var created metav1.Time
+	if p.createdAgo > 0 {
+		created = metav1.NewTime(time.Now().Add(-p.createdAgo))
+	}
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: p.name, Namespace: c.Namespace, Labels: labels, UID: p.uid},
-		Status: corev1.PodStatus{PodIP: p.ip, Conditions: []corev1.PodCondition{cond},
+		ObjectMeta: metav1.ObjectMeta{Name: p.name, Namespace: c.Namespace, Labels: labels, UID: p.uid, CreationTimestamp: created},
+		Status: corev1.PodStatus{PodIP: p.ip, Conditions: conds,
 			ContainerStatuses: []corev1.ContainerStatus{{Name: kividbContainerName, RestartCount: p.restarts}}},
 	}
 }

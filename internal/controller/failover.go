@@ -142,6 +142,29 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 	}
 
+	// A master whose pod is gone, or is another pod than the one recorded
+	// (deleted, force-deleted most likely, and made again by the
+	// StatefulSet), and whose engine no longer answers, may be coming back
+	// on its volume with writes no replica has (#78). Until its new pod is
+	// Ready and has reported -- the check below then compares it with its
+	// replicas, as a master that restarted in place -- it is waited for, and
+	// failed away from once failover.restartWaitSeconds have passed since
+	// it was found gone, whether its pod came back or not. A master that
+	// restarts in place keeps the unhealthy threshold above.
+	if mv, exists := views[currentMasterName]; currentMasterName != "" && failoverEnabled && (!exists || podReplaced(previous[currentMasterName], mv.pod)) {
+		switch {
+		case exists && mv.ready && mv.status != nil:
+			r.restartWaitOver(c)
+		default:
+			if err := r.waitForRestart(ctx, c, currentMasterName, mv, previous[currentMasterName]); err != nil {
+				return nil, currentMasterName, false, err
+			}
+			needsFailover = true
+		}
+	} else {
+		r.restartWaitOver(c)
+	}
+
 	// A master that restarted and came back with less than its replicas
 	// hold -- from a snapshot older than its last writes -- must not have
 	// them resync from it: that discards, on every copy, the writes it had
@@ -183,12 +206,27 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				return nil, currentMasterName, false, fmt.Errorf("failover blocked: no ready replica holds any data, master %s last reported %d keys", currentMasterName, masterKeysLastSeen)
 			}
 		}
+		// replica-priority 0 means never promoted, as in Sentinel: when
+		// every replica that could take over has it, the master stays gone
+		// rather than one of them be promoted (#78).
+		if needsFailover {
+			promotable := r.withoutUnpromotable(ctx, eligible, currentMasterName)
+			if electReplica(promotable, currentMasterName) == "" && electReplica(eligible, currentMasterName) != "" {
+				r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
+					"master %s is unavailable, but every replica that could take over has replica-priority 0, which means never promoted; waiting for the master rather than promoting one of them",
+					currentMasterName)
+				return nil, currentMasterName, false, fmt.Errorf("failover blocked: every replica that could take over from %s has replica-priority 0", currentMasterName)
+			}
+			eligible = promotable
+		}
 
 		// Prefer a replica that was in sync the last time that could be
 		// established. Offsets alone do not rule out a replica that had
 		// only just started resyncing when the master went away.
-		candidate := electReplica(onlySynced(eligible, previouslySynced), currentMasterName)
+		tier := onlySynced(eligible, previouslySynced)
+		candidate := electReplica(tier, currentMasterName)
 		if candidate == "" {
+			tier = eligible
 			candidate = electReplica(eligible, currentMasterName)
 		}
 		if _, ok := eligible[behindOf]; ok {
@@ -209,15 +247,28 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		if candidate == "" {
 			return nil, currentMasterName, false, fmt.Errorf("no ready pod available to elect as master")
 		}
-		log.Info("promoting pod to master", "pod", candidate, "reason", map[bool]string{true: "failover", false: "bootstrap"}[needsFailover])
-
 		// The master being replaced may still be running, and taking
 		// writes that the promotion would discard -- after a force-delete,
 		// until its replicas have left it: hold them first (fence.go).
+		// Then pick the replica again, by what each holds now: the offsets
+		// above were read one after the other at the start of the pass,
+		// maybe while the master still streamed, and one read early looks
+		// behind (#78). With the master held, or gone, they no longer move.
 		heldOld := ""
 		if needsFailover && behindOf == "" {
 			last := previous[currentMasterName]
-			heldOld = r.fenceOldMaster(ctx, c, last, views[candidate])
+			picked := false
+			pick := func() *podView {
+				picked = true
+				candidate = r.electLive(ctx, tier, currentMasterName, candidate)
+				return views[candidate]
+			}
+			heldOld = r.fenceOldMaster(ctx, c, last, pick)
+			if !picked {
+				// Not held, or a pause with no answer (it may have
+				// landed): picked all the same, by what each holds now.
+				pick()
+			}
 			if heldOld != "" {
 				if err := r.recordFence(ctx, c, kividbv1alpha1.FencedMaster{Name: last.Name, PodIP: heldOld, RunID: last.RunID}); err != nil {
 					r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
@@ -225,6 +276,8 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				}
 			}
 		}
+
+		log.Info("promoting pod to master", "pod", candidate, "reason", map[bool]string{true: "failover", false: "bootstrap"}[needsFailover])
 
 		// Take the master label off the pod being failed away from *before*
 		// promoting its replacement. That pod is usually still there (hung,
@@ -568,6 +621,13 @@ func engineAtLeast(version string, major, minor int) bool {
 	return n[1] >= minor
 }
 
+// podReplaced reports whether pod is another pod than the one last
+// recorded under its name: a new UID. Nothing recorded is no.
+func podReplaced(last kividbv1alpha1.KividbPodStatus, pod *corev1.Pod) bool {
+	uid, _, _ := strings.Cut(last.Incarnation, "/")
+	return uid != "" && pod.UID != "" && string(pod.UID) != uid
+}
+
 // engineRestarted reports whether pod's engine has restarted since last
 // was recorded: its run_id changed or, when either reading has none (an
 // agent before 0.7.0), the pod was recreated or its kividb container
@@ -691,6 +751,101 @@ func (r *KividbClusterReconciler) event(c *kividbv1alpha1.KividbCluster, eventTy
 	if r.Recorder != nil {
 		r.Recorder.Eventf(c, eventType, reason, messageFmt, args...)
 	}
+}
+
+// liveOffsetTimeout bounds how long a failover waits for each replica's
+// offset when it picks the one to promote (electLive).
+const liveOffsetTimeout = time.Second
+
+// electLive picks, among the ready pods of views other than exclude, the
+// one that holds the most now: its replication offset asked for at this
+// moment (ROLE), not the one the pass started from (#78). A pod that does
+// not answer in time keeps that one. Pods that hold as much go by their
+// replica-priority, the lower first, as Sentinel does, then by name.
+// fallback when there is none.
+func (r *KividbClusterReconciler) electLive(ctx context.Context, views map[string]*podView, exclude, fallback string) string {
+	type replica struct {
+		name   string
+		ip     string
+		offset int64
+	}
+	var replicas []replica
+	most := int64(-1)
+	atStart, now := map[string]int64{}, map[string]int64{}
+	for name, v := range views {
+		if name == exclude || !v.ready {
+			continue
+		}
+		offset := int64(0)
+		if v.status != nil {
+			offset = v.status.ReplicationOffset
+		}
+		atStart[name] = offset
+		rctx, cancel := context.WithTimeout(ctx, liveOffsetTimeout)
+		if role, err := r.roleOf(rctx, v.pod.Status.PodIP); err == nil {
+			offset = role.offset
+		}
+		cancel()
+		now[name] = offset
+		replicas = append(replicas, replica{name, v.pod.Status.PodIP, offset})
+		most = max(most, offset)
+	}
+	defer func() {
+		logf.FromContext(ctx).Info("picked the replica to promote by what each holds now", "offsetsNow", now, "offsetsAtPassStart", atStart)
+	}()
+	var tied []replica
+	for _, rp := range replicas {
+		if rp.offset == most {
+			tied = append(tied, rp)
+		}
+	}
+	switch len(tied) {
+	case 0:
+		return fallback
+	case 1:
+		return tied[0].name
+	}
+	priority := make(map[string]int64, len(tied))
+	for _, rp := range tied {
+		priority[rp.name] = r.replicaPriority(ctx, rp.ip)
+	}
+	sort.Slice(tied, func(i, j int) bool {
+		if pi, pj := priority[tied[i].name], priority[tied[j].name]; pi != pj {
+			return pi < pj
+		}
+		return tied[i].name < tied[j].name
+	})
+	return tied[0].name
+}
+
+// replicaPriority is the replica-priority of the engine at ip (INFO's
+// slave_priority): 100, the default, when it does not say.
+func (r *KividbClusterReconciler) replicaPriority(ctx context.Context, ip string) int64 {
+	rctx, cancel := context.WithTimeout(ctx, liveOffsetTimeout)
+	defer cancel()
+	info, err := r.Agent.Exec(rctx, ip, "INFO", "replication")
+	if err != nil {
+		return 100
+	}
+	p, err := strconv.ParseInt(infoField(info.Str, "slave_priority"), 10, 64)
+	if err != nil {
+		return 100
+	}
+	return p
+}
+
+// withoutUnpromotable is views without the ready replicas whose
+// replica-priority is 0, which, as in Sentinel, are never promoted (#78).
+// exclude, the master, is kept.
+func (r *KividbClusterReconciler) withoutUnpromotable(ctx context.Context, views map[string]*podView, exclude string) map[string]*podView {
+	out := make(map[string]*podView, len(views))
+	for name, v := range views {
+		if name != exclude && v.ready && r.replicaPriority(ctx, v.pod.Status.PodIP) == 0 {
+			continue
+		}
+		out[name] = v
+	}
+	return out
 }
 
 // electReplica picks the ready, non-excluded pod with the highest reported

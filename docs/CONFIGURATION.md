@@ -356,6 +356,7 @@ spec:
   failover:
     enabled: true                    # default
     unhealthyThresholdSeconds: 30    # default
+    restartWaitSeconds: 15           # default; 0 turns the wait off
 ```
 
 Set `enabled: false` to disable automatic promotion entirely (you'll need
@@ -367,6 +368,29 @@ aggressive at the cost of being more sensitive to transient blips (a slow
 container's liveness probe restarts an engine that has answered nothing
 for about 90 s, and a hung master should be failed over before that, not
 come back as the master (see [Liveness](#liveness)).
+
+A master whose pod is gone (deleted with `--grace-period=0 --force`, say),
+or replaced by a new pod, does not wait for `unhealthyThresholdSeconds`.
+If its engine still answers, the failover holds its writes and goes ahead
+(see below). If it no longer answers, its pod may be coming back on the
+same volume, holding writes its replicas do not: the failover waits until
+the new pod is Ready and has reported (a `FailoverWait` Warning, and
+`WaitingForMaster` on the Ready condition), then compares it with its
+replicas as for a master that restarted in place, keeping it if it holds
+as much. It waits `restartWaitSeconds` at most, counted from when the
+master was found gone (or its new pod made), whether the pod comes back or
+not: a force-deleted master costs that much at most. A replacement pod that
+cannot be scheduled is not waited for. The operator does not read Nodes,
+so that its RBAC stays as small as it is: the scheduler keeps new pods off
+a node that is not Ready, so a replacement pinned there by its volume shows
+as unschedulable, and the cap covers the rest. A master that restarts in
+place, as the same pod, keeps `unhealthyThresholdSeconds`.
+
+The replica promoted is the one that holds the most when the old master's
+writes are held, by its offset read then. `replica-priority` (a
+`KividbConfig` directive) breaks ties, the lower first, and `0` means never
+promoted, as in Sentinel: if every replica that could take over has it,
+the master stays gone (`FailoverBlocked` Warning).
 
 **What a failover can lose.** Replication is asynchronous: a master
 acknowledges a write before its replicas have it. When a master crashes

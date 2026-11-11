@@ -102,10 +102,13 @@ const (
 )
 
 // fenceOldMaster holds the writes of the master being failed away from,
-// last being its entry in the last persisted status, and waits for the
-// replica cand to catch up with it. It returns the address it holds the
-// writes at, or "" when it does not (the failover goes on either way).
-func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv1alpha1.KividbCluster, last kividbv1alpha1.KividbPodStatus, cand *podView) string {
+// last being its entry in the last persisted status, has pick choose the
+// replica to promote -- with the old master held, the replicas' offsets
+// stop moving (#78) -- and waits for that replica to catch up with it. It
+// returns the address it holds the writes at, or may hold them at, or ""
+// when it does not (the failover goes on either way). pick is called only
+// once a pause was answered; the caller picks otherwise.
+func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv1alpha1.KividbCluster, last kividbv1alpha1.KividbPodStatus, pick func() *podView) string {
 	log := logf.FromContext(ctx).WithValues("pod", last.Name, "ip", last.PodIP)
 	unfenced := func(why string, args ...any) string {
 		msg := fmt.Sprintf(why, args...)
@@ -178,6 +181,7 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 	}
 	log.Info("fenced the master being failed away from")
 
+	cand := pick()
 	if fm := c.Status.FencedMaster; fm != nil && *fm == (kividbv1alpha1.FencedMaster{Name: last.Name, PodIP: last.PodIP, RunID: last.RunID}) &&
 		cand.status != nil && cand.status.Role == agentapi.RoleMaster {
 		// An earlier pass fenced it and promoted this replica, the reply of

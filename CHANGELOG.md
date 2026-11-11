@@ -7,9 +7,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 **Apply the new `kividbclusters` CRD before `helm upgrade`:** Helm does not
-upgrade it, and the status gains `pods[].podIP` and `fencedMaster`. Until it
-is applied, the API server drops them and failovers do not hold the old
-master's writes (`FailoverUnfenced` Warning).
+upgrade it, the status gains `pods[].podIP` and `fencedMaster`, and the spec
+gains `failover.restartWaitSeconds`. Until it is applied, the API server
+drops them: failovers do not hold the old master's writes
+(`FailoverUnfenced` Warning), and the restart wait keeps its default.
 
 ### Added
 
@@ -20,6 +21,35 @@ master's writes (`FailoverUnfenced` Warning).
   AllNamespaces mode.
 
 ### Fixed
+
+- **A failover could promote a replica that held less than another, and
+  did not wait for a force-deleted master coming back on its volume
+  (#78).** In an AKS run, a force-deleted master lost 176 acknowledged
+  writes, and the replica promoted was 640 bytes behind the other.
+  - The replica is now picked after the old master's writes are held (or
+    it is found gone), by each replica's offset read then with `ROLE`, not
+    by the offsets read at the start of the pass, which may be from before
+    the master stopped streaming. Replicas that hold as much go by
+    `replica-priority`, the lower first, then by name. A replica with
+    `replica-priority 0` is never promoted, as in Sentinel; when every
+    replica that could take over has it, the master stays gone and a
+    `FailoverBlocked` Warning says why.
+  - A master whose pod is gone, or replaced by a new pod (a force delete),
+    and whose engine no longer answers, is now waited for until its new
+    pod is Ready and has reported: it may come back on its volume holding
+    writes its replicas do not. Then it is compared with them as a master
+    that restarted in place is (#42), and kept if it holds as much. The
+    wait lasts `failover.restartWaitSeconds` at most (new, 15 s by
+    default, 0 for not at all), counted from when the master was found
+    gone, whether its pod comes back or not, so a force-deleted master
+    costs that much at most. A master that restarts in place keeps
+    `unhealthyThresholdSeconds`. A replacement pod that cannot be scheduled
+    is not waited for. The operator does not read Nodes, so that its RBAC
+    stays as it is: a replacement pinned by its volume to a node that is
+    not Ready shows as unschedulable, as the scheduler keeps new pods off
+    such a node. `FailoverWait` events say when a wait starts and how it
+    ended, and the Ready condition's reason is `WaitingForMaster`
+    meanwhile.
 
 - **A switchover no longer hands over without holding writes when the pause
   could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),
