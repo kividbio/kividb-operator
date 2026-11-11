@@ -21,6 +21,26 @@ master's writes (`FailoverUnfenced` Warning).
 
 ### Fixed
 
+- **A switchover no longer hands over without holding writes when the pause
+  could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),
+  `CLIENT PAUSE ... WRITE` waits up to 5 s for the writes already in progress
+  and refuses, pausing nothing, if one has not finished (a big `FLUSHALL`, a
+  `DEL` of a huge key, a long script). The switchover took that refusal, and
+  a pause that got no answer within the agent's 5 s, for an engine before
+  kividb 1.1: it promoted the target without waiting for it to catch up,
+  and raised `SwitchoverWithoutPause` telling the user to upgrade an engine
+  that was already new. A write the old master acknowledged then could be
+  lost. Now such a switchover is called off (`SwitchoverAborted`), the pause
+  lifted, and it is tried again. Only an engine whose version is before
+  1.1, or that does not know the command, is switched over without the
+  pause. The pause is given 7 s, past the engine's wait: the agent's exec
+  request takes a `timeoutMs` (capped at 15 s), which the operator sends
+  for the pause only. An agent before this release ignores it and cuts the
+  pause at 5 s, which now aborts the switchover rather than dropping the
+  pause. The failover fence (#53) waits for a pause the same way once the
+  old master has answered, and asks again after a refusal, rather than
+  going on unfenced.
+
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install
   could not run `KividbDbOps` operations. After applying it again, restart

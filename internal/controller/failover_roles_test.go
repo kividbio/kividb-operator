@@ -63,7 +63,24 @@ type fakeAgents struct {
 	// infoUnanswered: the next this many INFO SERVERs on an address get no
 	// reply before the request's context ends (a slow engine).
 	infoUnanswered map[string]int
+	// pauseRefused: the next this many CLIENT PAUSEs on an address answer
+	// kividb 1.2.1's refusal (kividbio/kividb#629) and pause nothing.
+	pauseRefused map[string]int
+	// pauseDelay: CLIENT PAUSE on an address answers this late (the engine
+	// waits out a write in progress), unless the request ends first.
+	pauseDelay map[string]time.Duration
+	// version: the kividb_version INFO SERVER reports; "" is 1.2.0, or
+	// 1.0.0 with noPause, and "-" none at all.
+	version string
+	// pauseTimeoutMs: the timeoutMs each CLIENT PAUSE was sent with.
+	pauseTimeoutMs []int64
+	// pauseError: what CLIENT PAUSE answers, if set (an engine's own words).
+	pauseError string
 }
+
+// pauseDidNotTakeHold is what CLIENT PAUSE answers, since kividb 1.2.1, when
+// a write in progress does not finish within 5 s.
+const pauseDidNotTakeHold = "ERR writes in progress did not finish before the pause could take hold"
 
 // execReply answers /exec the way kividb would, for the commands the
 // operator sends: ROLE, CLIENT PAUSE / UNPAUSE / KILL, ACL SETUSER, PING.
@@ -101,6 +118,13 @@ func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []st
 		if f.noPause {
 			return agentapi.ExecResponse{Type: "error", Str: "ERR syntax error"}
 		}
+		if f.pauseRefused[ip] > 0 {
+			f.pauseRefused[ip]--
+			return agentapi.ExecResponse{Type: "error", Str: pauseDidNotTakeHold}
+		}
+		if f.pauseError != "" {
+			return agentapi.ExecResponse{Type: "error", Str: f.pauseError}
+		}
 		if f.paused == nil {
 			f.paused = map[string]bool{}
 		}
@@ -110,7 +134,18 @@ func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []st
 	case cmd == "PING":
 		return agentapi.ExecResponse{Type: "status", Str: "PONG"}
 	case cmd == "INFO SERVER":
-		return agentapi.ExecResponse{Type: "bulk", Str: "# Server" + crlf + "kividb_version:1.2.0" + crlf + "run_id:" + st.RunID + crlf}
+		version := f.version
+		switch {
+		case version == "" && f.noPause:
+			version = "1.0.0"
+		case version == "":
+			version = "1.2.0"
+		}
+		info := "# Server" + crlf
+		if version != "-" {
+			info += "kividb_version:" + version + crlf
+		}
+		return agentapi.ExecResponse{Type: "bulk", Str: info + "run_id:" + st.RunID + crlf}
 	}
 	return ok
 }
@@ -169,6 +204,9 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err := json.NewDecoder(req.Body).Decode(&r); err != nil {
 			return nil, err
 		}
+		if strings.HasPrefix(strings.ToUpper(strings.Join(r.Args, " ")), "CLIENT PAUSE") {
+			f.pauseTimeoutMs = append(f.pauseTimeoutMs, r.TimeoutMs)
+		}
 		body = f.execReply(ip, st, r.Args)
 		if strings.EqualFold(strings.Join(r.Args, " "), "INFO server") && f.infoUnanswered[ip] > 0 {
 			f.infoUnanswered[ip]--
@@ -183,6 +221,13 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 				f.pauseUnanswered[ip]--
 				<-req.Context().Done()
 				return nil, req.Context().Err()
+			}
+			if delay := f.pauseDelay[ip]; delay > 0 {
+				select {
+				case <-time.After(delay):
+				case <-req.Context().Done():
+					return nil, req.Context().Err()
+				}
 			}
 		}
 	}

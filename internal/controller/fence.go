@@ -62,8 +62,16 @@ const fenceTimeout = 250 * time.Millisecond
 var fenceRunCheckTimeout = time.Second
 
 // fenceRetryTimeout is how long a failover goes on trying to hold the
-// writes of a master that has answered with the run recorded for it.
+// writes of a master that has answered with the run recorded for it: no new
+// try starts after it.
 var fenceRetryTimeout = 3 * time.Second
+
+// pauseCallTimeout is how long a CLIENT PAUSE call may take, at the
+// operator and at the agent (agentapi.ExecRequest.TimeoutMs). Since kividb
+// 1.2.1 the engine waits out the writes in progress before it answers, up
+// to 5 s, and refuses after that (kividbio/kividb#629): longer than that
+// wait, and than the agent's and the agent client's usual 5 s.
+var pauseCallTimeout = 7 * time.Second
 
 // fencePause is how long the fence holds the old master's writes, should
 // it not be made the new master's replica right after the promotion: the
@@ -124,24 +132,27 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 	}
 
 	// It is there. A pause that is not answered may have landed all the
-	// same: send it again (it cannot get shorter), until it is answered or
-	// refused.
+	// same, and one that could not take hold yet (a write in progress, see
+	// pauseCallTimeout) may next time: send it again (it cannot get
+	// shorter), until it is answered, or refused by an engine without it.
+	// Each try may take pauseCallTimeout, for the engine waits out the
+	// writes in progress before it answers.
 	pauseMs := strconv.FormatInt(fencePause(c).Milliseconds(), 10)
 	deadline := time.Now().Add(fenceRetryTimeout)
 	for {
-		pctx, cancel := context.WithTimeout(ctx, fenceTimeout)
-		reply, err := r.Agent.Exec(pctx, last.PodIP, "CLIENT", "PAUSE", pauseMs, "WRITE")
+		pctx, cancel := context.WithTimeout(ctx, pauseCallTimeout)
+		reply, err := r.Agent.ExecWithin(pctx, pauseCallTimeout, last.PodIP, "CLIENT", "PAUSE", pauseMs, "WRITE")
 		cancel()
 		if err == nil {
 			break
 		}
-		if reply != nil {
-			return unfenced("its engine refused CLIENT PAUSE WRITE (%v)", err)
+		if reply != nil && r.pauseUnsupported(ctx, last.PodIP, err) {
+			return unfenced("its engine does not have CLIENT PAUSE WRITE (%v)", err)
 		}
 		if time.Now().After(deadline) {
-			return unfenced("its engine answered, but no pause of its writes was within %s (%v)", fenceRetryTimeout, err)
+			return unfenced("its engine answered, but its writes could not be paused (%v)", err)
 		}
-		log.Info("holding the old master's writes went unanswered; trying again", "error", err.Error())
+		log.Info("holding the old master's writes did not take; trying again", "error", err.Error())
 		select {
 		case <-ctx.Done():
 			return unfenced("%v", ctx.Err())
@@ -303,6 +314,22 @@ func (r *KividbClusterReconciler) runOf(ctx context.Context, ip string) (string,
 func isTimeout(err error) bool {
 	var ne net.Error
 	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
+}
+
+// pauseUnsupported reports whether the engine at ip refused CLIENT PAUSE
+// ... WRITE, with err, because it does not have it (before kividb 1.1),
+// rather than because it could not pause just then: since kividb 1.2.1 it
+// refuses while a write in progress does not finish (kividbio/kividb#629),
+// and pauses later. Its version says, when it gives one; else the error.
+func (r *KividbClusterReconciler) pauseUnsupported(ctx context.Context, ip string, err error) bool {
+	if info, ierr := r.Agent.Exec(ctx, ip, "INFO", "server"); ierr == nil {
+		if version := infoField(info.Str, "kividb_version"); version != "" {
+			return !engineAtLeast(version, 1, 1)
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unknown command") || strings.Contains(msg, "unknown subcommand") ||
+		strings.Contains(msg, "syntax error")
 }
 
 // releaseDemotedMaster lets go of a master that has just been made a

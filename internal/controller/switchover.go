@@ -178,19 +178,6 @@ func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alp
 	log.Info("switchover: pausing writes on the master until the replica has caught up", "from", masterPod, "to", target.Name, "reason", req.reason)
 	pauseMs := strconv.FormatInt((switchoverCatchUpTimeout + switchoverPauseMargin).Milliseconds(), 10)
 	paused := true
-	if _, err := r.Agent.Exec(ctx, oldIP, "CLIENT", "PAUSE", pauseMs, "WRITE"); err != nil {
-		var reply *agentapi.ExecResponse
-		if reply, _ = r.Agent.Exec(ctx, oldIP, "PING"); reply == nil {
-			return "", fmt.Errorf("pausing writes on %s: %w", masterPod, err)
-		}
-		// The engine is up and refuses the command: one from before
-		// kividb 1.1, which has no CLIENT PAUSE ... WRITE. Hand over
-		// without it, as earlier operators did, and say what that costs.
-		paused = false
-		r.event(c, corev1.EventTypeWarning, "SwitchoverWithoutPause",
-			"%s refused CLIENT PAUSE ... WRITE (%v): its engine predates kividb 1.1. Moving the master role to %s without holding writes; a write acknowledged by %s during the next moments can be lost. Upgrade the engine to make switchovers lossless.",
-			masterPod, err, target.Name, masterPod)
-	}
 	unpause := func() {
 		if !paused {
 			return
@@ -206,6 +193,30 @@ func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alp
 			"did not move the master role from %s to %s (%s): %s; writes go on on %s, which stays the master",
 			masterPod, target.Name, req.reason, why, masterPod)
 		return "", fmt.Errorf("switchover from %s to %s aborted: %s", masterPod, target.Name, why)
+	}
+
+	pctx, cancel := context.WithTimeout(ctx, pauseCallTimeout)
+	reply, err := r.Agent.ExecWithin(pctx, pauseCallTimeout, oldIP, "CLIENT", "PAUSE", pauseMs, "WRITE")
+	cancel()
+	if err != nil {
+		if reply == nil || !r.pauseUnsupported(ctx, oldIP, err) {
+			// No answer -- an agent error or a timeout, which is also what
+			// an agent before 0.7.1 gives for a pause that waits out a
+			// write; the pause may have taken hold all the same, and is
+			// lifted -- or an engine that pauses could not just then: since
+			// kividb 1.2.1 it refuses while a write in progress does not
+			// finish (kividbio/kividb#629). Handing over without the pause
+			// would promote the target before it caught up, and lose that
+			// write: try again later (#81).
+			return abort(fmt.Sprintf("could not pause its writes: %v", err))
+		}
+		// An engine without CLIENT PAUSE ... WRITE (before kividb 1.1).
+		// Hand over without it, as earlier operators did, and say what
+		// that costs.
+		paused = false
+		r.event(c, corev1.EventTypeWarning, "SwitchoverWithoutPause",
+			"%s refused CLIENT PAUSE ... WRITE (%v): its engine predates kividb 1.1. Moving the master role to %s without holding writes; a write acknowledged by %s during the next moments can be lost. Upgrade the engine to make switchovers lossless.",
+			masterPod, err, target.Name, masterPod)
 	}
 
 	started := time.Now()

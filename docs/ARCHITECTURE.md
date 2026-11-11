@@ -267,7 +267,12 @@ supported", so the operator runs the steps Redis's `FAILOVER` does:
 1. `CLIENT PAUSE <ms> WRITE` on the old master (through the agent's
    `/exec`): it acknowledges no write from here on; reads go on. The pause
    has its own timeout (10 s), so an operator that dies half-way leaves a
-   master that resumes by itself.
+   master that resumes by itself. Since kividb 1.2.1 the engine waits for
+   the writes in progress before it answers, up to 5 s, so the call is
+   given 7 s (`timeoutMs` on the agent's `/exec`). A pause refused because
+   a write did not finish, or not answered, aborts the switchover (step 2's
+   `SwitchoverAborted`); only an engine without the command (before kividb
+   1.1) is switched over without it.
 2. Poll `ROLE` on both until the old master's offset stays put and the
    target's applied offset has reached it, with its link `connected` --
    at most 5 s. Otherwise: `CLIENT UNPAUSE`, a `SwitchoverAborted`

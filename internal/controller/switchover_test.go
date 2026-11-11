@@ -188,6 +188,92 @@ func TestSwitchoverWithoutAWritePause(t *testing.T) {
 	}
 }
 
+// An engine whose version is before kividb 1.1 has no CLIENT PAUSE ...
+// WRITE, whatever words it refuses it in: it is switched over without it.
+func TestSwitchoverWithoutAWritePauseOnAnEngineBeforeIt(t *testing.T) {
+	h, statuses := newSwitchoverHarness(t)
+	h.agents.version, h.agents.pauseError = "1.0.3", "ERR mode 'WRITE' is not supported"
+	if got, err := h.r.switchover(context.Background(), h.cluster, h.list(), statuses, "c1-0", switchoverRequest{reason: "rollout"}); err != nil || got != "c1-1" {
+		t.Fatalf("switchover = %q, %v", got, err)
+	}
+	if ev := events(h.r); !strings.Contains(ev, "SwitchoverWithoutPause") {
+		t.Fatalf("events: %s", ev)
+	}
+}
+
+// An engine that gives no version, and has no CLIENT PAUSE ... WRITE, is
+// switched over without it all the same.
+func TestSwitchoverWithoutAWritePauseOnAnEngineWithoutAVersion(t *testing.T) {
+	h, statuses := newSwitchoverHarness(t)
+	h.agents.noPause, h.agents.version = true, "-"
+	if got, err := h.r.switchover(context.Background(), h.cluster, h.list(), statuses, "c1-0", switchoverRequest{reason: "rollout"}); err != nil || got != "c1-1" {
+		t.Fatalf("switchover = %q, %v", got, err)
+	}
+	if ev := events(h.r); !strings.Contains(ev, "SwitchoverWithoutPause") {
+		t.Fatalf("events: %s", ev)
+	}
+}
+
+// Since kividb 1.2.1, CLIENT PAUSE refuses, and pauses nothing, when a write
+// in progress does not finish within 5 s (kividbio/kividb#629). That engine
+// does pause: the switchover is called off and tried again, rather than
+// done without the pause and without the replica catching up (#81).
+func TestSwitchoverIsAbortedWhenThePauseCannotTakeHold(t *testing.T) {
+	h, statuses := newSwitchoverHarness(t)
+	h.agents.pauseRefused = map[string]int{"10.0.0.1": 1}
+	if got, err := h.r.switchover(context.Background(), h.cluster, h.list(), statuses, "c1-0", switchoverRequest{reason: "rollout"}); err == nil || got != "" {
+		t.Fatalf("switchover = %q, %v; want it aborted", got, err)
+	}
+	h.assertNoCall("promote")
+	ev := events(h.r)
+	if !strings.Contains(ev, "SwitchoverAborted") || strings.Contains(ev, "SwitchoverWithoutPause") {
+		t.Fatalf("events: %s", ev)
+	}
+	h.assertRole("10.0.0.1", agentapi.RoleMaster, "")
+}
+
+// A pause that gets no answer may have taken hold all the same: the
+// switchover is called off, the pause lifted, and tried again (#81).
+func TestSwitchoverIsAbortedWhenThePauseIsNotAnswered(t *testing.T) {
+	defer func(d time.Duration) { pauseCallTimeout = d }(pauseCallTimeout)
+	pauseCallTimeout = 200 * time.Millisecond
+	h, statuses := newSwitchoverHarness(t)
+	h.agents.pauseUnanswered = map[string]int{"10.0.0.1": 1}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if got, err := h.r.switchover(ctx, h.cluster, h.list(), statuses, "c1-0", switchoverRequest{reason: "rollout"}); err == nil || got != "" {
+		t.Fatalf("switchover = %q, %v; want it aborted", got, err)
+	}
+	h.assertNoCall("promote")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 10000 WRITE", "exec 10.0.0.1 CLIENT UNPAUSE")
+	if ev := events(h.r); !strings.Contains(ev, "SwitchoverAborted") {
+		t.Fatalf("events: %s", ev)
+	}
+	if h.agents.paused["10.0.0.1"] {
+		t.Error("the master's writes are still held")
+	}
+}
+
+// The engine waits out a write in progress before it answers the pause, up
+// to 5 s: the call is given longer than that, rather than the agent client's
+// usual 5 s, and the switchover goes on with writes held (#81).
+func TestSwitchoverWaitsOutASlowPause(t *testing.T) {
+	h, statuses := newSwitchoverHarness(t)
+	h.r.Agent.http.Timeout = 5 * time.Second // as --agent-timeout has it
+	h.agents.pauseDelay = map[string]time.Duration{"10.0.0.1": 6 * time.Second}
+	if got, err := h.r.switchover(context.Background(), h.cluster, h.list(), statuses, "c1-0", switchoverRequest{reason: "rollout"}); err != nil || got != "c1-1" {
+		t.Fatalf("switchover = %q, %v", got, err)
+	}
+	if ev := events(h.r); strings.Contains(ev, "SwitchoverWithoutPause") || strings.Contains(ev, "SwitchoverAborted") {
+		t.Fatalf("events: %s", ev)
+	}
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 10000 WRITE", "promote 10.0.0.2")
+	// The agent cuts an engine command at 5 s unless told otherwise.
+	if got, want := h.agents.pauseTimeoutMs, pauseCallTimeout.Milliseconds(); len(got) == 0 || got[0] != want {
+		t.Errorf("the pause was sent with timeoutMs %v, want %d", got, want)
+	}
+}
+
 // The master label goes onto the new master before it comes off the old
 // one: the master Service never has no endpoint.
 func TestSwitchoverMovesTheLabelWithoutAGap(t *testing.T) {
