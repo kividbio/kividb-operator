@@ -94,10 +94,6 @@ type fakeAgents struct {
 	// replica after it had.
 	pausedUntil map[string]time.Time
 	pauseRanOut map[string]bool
-	// priority: the replica-priority INFO REPLICATION reports, by address
-	// (100, the default, if not set). The operator does not read it: it is
-	// a KividbConfig directive, the same on every pod.
-	priority map[string]int
 	// liveOffset: the offset a replica's ROLE reports, past the one its
 	// /status gave (it went on receiving since).
 	liveOffset map[string]int64
@@ -195,12 +191,6 @@ func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []st
 		delete(f.paused, ip)
 	case cmd == "PING":
 		return agentapi.ExecResponse{Type: "status", Str: "PONG"}
-	case cmd == "INFO REPLICATION":
-		priority, ok := f.priority[ip]
-		if !ok {
-			priority = 100
-		}
-		return agentapi.ExecResponse{Type: "bulk", Str: fmt.Sprintf("# Replication%srole:%s%sslave_priority:%d%s", crlf, st.Role, crlf, priority, crlf)}
 	case cmd == "INFO SERVER":
 		version := f.version
 		switch {

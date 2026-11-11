@@ -34,7 +34,12 @@ drops them: failovers do not hold the old master's writes
     answer may hold more than the one picked: unless that one caught up
     with the held master, no one is promoted on that pass
     (`FailoverBlocked` Warning, `WaitingForReplica` on the Ready
-    condition) until it answers or is no longer Ready.
+    condition) until it answers or is no longer Ready. A replica the
+    operator cannot reach stays Ready (its readiness probe runs on its own
+    node), so the Warning says how long the failover has been held and
+    what ends it, and `kividb.io/allow-unread-failover: "true"` on the
+    cluster lets it go ahead without that replica (`FailoverForced`
+    Warning).
   - A master whose pod is gone, or replaced by a new pod (a force delete),
     and whose engine no longer answers, is now waited for until its new
     pod is Ready and has reported: it may come back on its volume holding

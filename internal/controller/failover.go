@@ -62,6 +62,15 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	log := logf.FromContext(ctx)
 	port := getPort(c)
 
+	// held: this pass held a failover back for a replica that did not say
+	// what it holds (failoverHeld). Any other pass forgets when that began.
+	held := false
+	defer func() {
+		if !held {
+			r.failoverHolds.Delete(c.Namespace + "/" + c.Name)
+		}
+	}()
+
 	sort.Slice(pods, func(i, j int) bool { return pods[i].Name < pods[j].Name })
 
 	views := make(map[string]*podView, len(pods))
@@ -265,15 +274,29 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				// the one picked, which would have it resynced away. Only a
 				// replica that caught up with the held master is known to
 				// hold everything: none can be ahead of it. Otherwise no one
-				// is promoted on this pass; the next asks again, and a
-				// replica that cannot be asked for long stops being Ready
-				// (its readiness probe goes through the same agent).
-				r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
-				r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
-					"master %s is unavailable, but %s did not answer ROLE within %s and may hold more than %s; not promoting anyone until each answers or is no longer Ready",
-					currentMasterName, strings.Join(unread, ", "), liveOffsetBudget, candidate)
-				return nil, currentMasterName, false, heldBack("WaitingForReplica",
-					fmt.Errorf("failover held: %s did not answer ROLE within %s and may hold more than %s", strings.Join(unread, ", "), liveOffsetBudget, candidate))
+				// is promoted on this pass, and the next asks again. That
+				// need not end on its own: a replica the operator cannot
+				// reach (a NetworkPolicy, a partition between nodes) stays
+				// Ready, for its readiness goes from the kubelet on its own
+				// node to its agent, not along the operator's path. So the
+				// event says how long it has been held and what ends it, and
+				// kividb.io/allow-unread-failover lets it go ahead without
+				// the replicas that did not answer.
+				unreadList := strings.Join(unread, ", ")
+				if c.Annotations[kividbv1alpha1.AllowUnreadFailoverAnnotation] != "true" {
+					held = true
+					heldFor := r.failoverHeld(c, currentMasterName).Round(time.Second)
+					r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
+					r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
+						"master %s is unavailable, but %s did not answer ROLE within %s and may hold more than %s; no one promoted, held for %s. If the operator cannot reach %s (a NetworkPolicy, a network partition), fix the network, delete its pod, or annotate the cluster %s=true to fail over without it",
+						currentMasterName, unreadList, liveOffsetBudget, candidate, heldFor, unreadList, kividbv1alpha1.AllowUnreadFailoverAnnotation)
+					return nil, currentMasterName, false, heldBack("WaitingForReplica",
+						fmt.Errorf("failover held for %s: %s did not answer ROLE within %s and may hold more than %s", heldFor, unreadList, liveOffsetBudget, candidate))
+				}
+				log.Info("failing over without the replicas that did not answer", "unread", unread, "replica", candidate)
+				r.event(c, corev1.EventTypeWarning, "FailoverForced",
+					"master %s is unavailable; promoting %s without %s, which did not answer ROLE (%s is set): writes only %s held are lost",
+					currentMasterName, candidate, unreadList, kividbv1alpha1.AllowUnreadFailoverAnnotation, unreadList)
 			}
 			if heldOld != "" {
 				if err := r.recordFence(ctx, c, kividbv1alpha1.FencedMaster{Name: last.Name, PodIP: heldOld, RunID: last.RunID}); err != nil {
@@ -757,6 +780,24 @@ func (r *KividbClusterReconciler) event(c *kividbv1alpha1.KividbCluster, eventTy
 	if r.Recorder != nil {
 		r.Recorder.Eventf(c, eventType, reason, messageFmt, args...)
 	}
+}
+
+// failoverHold is when the failover away from master was first held back
+// for a replica that did not say what it holds.
+type failoverHold struct {
+	master string
+	since  time.Time
+}
+
+// failoverHeld returns how long the failover of c away from master has been
+// held back, counted from the first pass that held it.
+func (r *KividbClusterReconciler) failoverHeld(c *kividbv1alpha1.KividbCluster, master string) time.Duration {
+	key, now := c.Namespace+"/"+c.Name, r.now()
+	if v, ok := r.failoverHolds.Load(key); ok && v.(*failoverHold).master == master {
+		return now.Sub(v.(*failoverHold).since)
+	}
+	r.failoverHolds.Store(key, &failoverHold{master: master, since: now})
+	return 0
 }
 
 // liveOffsetBudget is how long a failover gives the replicas, together,

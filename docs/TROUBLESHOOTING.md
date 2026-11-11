@@ -128,6 +128,23 @@ kubectl annotate kividbcluster my-cluster kividb.io/allow-empty-failover=true
 
 Remove the annotation again afterwards.
 
+## Failover held for a replica that did not answer (`FailoverBlocked`, `WaitingForReplica`)
+
+The master is gone, and a Ready replica did not say how much it holds
+(`ROLE`, asked through its agent) within 1 s. It may hold writes the
+others do not, so no one is promoted; the event says how long the failover
+has been held. A replica stays Ready while the operator cannot reach it,
+because its readiness probe runs from the kubelet on its own node: check
+NetworkPolicies and whether the operator's pod reaches the replica's agent
+on port 8081. Then fix the network, or delete the replica's pod, or, if
+losing any writes only that replica holds is acceptable:
+
+```bash
+kubectl annotate kividbcluster my-cluster kividb.io/allow-unread-failover=true
+```
+
+Remove the annotation again afterwards.
+
 ## Failover without a fence (`FailoverUnfenced`)
 
 A failover went ahead without first holding the old master's writes, or

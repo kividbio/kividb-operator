@@ -431,6 +431,13 @@ type BootstrapPhase string
 // master to come back instead; see reconcileRoles.
 const AllowEmptyFailoverAnnotation = "kividb.io/allow-empty-failover"
 
+// AllowUnreadFailoverAnnotation, set to "true" on a KividbCluster, lets a
+// failover go ahead without the replicas that did not say how much they
+// hold: the replica promoted is the one that holds the most of those that
+// did, and writes only the others hold are lost. Without it the failover
+// waits for them (FailoverBlocked); see reconcileRoles.
+const AllowUnreadFailoverAnnotation = "kividb.io/allow-unread-failover"
+
 // ShardPromoteAnnotation records, on a sharded KividbCluster, the last
 // replica someone asked to take over its shard outside the operator (the
 // console's Promote): "<pod> <RFC 3339 time>". The operator reports the

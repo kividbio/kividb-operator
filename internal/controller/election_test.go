@@ -68,10 +68,10 @@ func TestFailover_PromotesTheReplicaThatHoldsTheMostNowWithoutAFence(t *testing.
 }
 
 // replica-priority is a KividbConfig directive, so it is the same on every
-// pod and tells no replica from another: the failover does not read it. A
-// replica that holds what a restarted master lost is promoted whatever its
-// replica-priority; passing it over would resync those writes away.
-func TestFailover_PromotesTheReplicaAheadOfARestartedMasterWhateverItsPriority(t *testing.T) {
+// pod and tells no replica from another: the failover does not read it. The
+// replica that holds what a restarted master lost is promoted, and no
+// replica is asked for its replica-priority.
+func TestFailover_PromotesTheReplicaAheadOfARestartedMasterWithoutReadingPriority(t *testing.T) {
 	h := newRolesHarness(t, "c1-0",
 		testPod{name: "c1-0", ip: "10.0.0.9", ready: true, agent: masterRun(700, "stream-b", "run-2")},
 		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1000)},
@@ -82,7 +82,6 @@ func TestFailover_PromotesTheReplicaAheadOfARestartedMasterWhateverItsPriority(t
 		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
 		{Name: "c1-2", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 990},
 	}
-	h.agents.priority = map[string]int{"10.0.0.2": 0}
 	if m, failover := h.reconcile(); m != "c1-1" || !failover {
 		t.Fatalf("master=%q failover=%v, want a failover to c1-1, which holds what c1-0 lost", m, failover)
 	}
@@ -123,6 +122,69 @@ func TestFailover_HoldsWhenAReplicaThatMayBeAheadCannotBeRead(t *testing.T) {
 	}
 	h.agents.roleUnanswered = nil
 	h.assertFailoverTo("c1-1")
+}
+
+// A replica the operator cannot reach while it stays Ready -- its
+// readiness goes kubelet -> agent -> engine on its own node, not through
+// the operator's network path -- holds the failover for as long as that
+// lasts. kividb.io/allow-unread-failover lets it go ahead without that
+// replica: the one that holds the most of those that answered is promoted,
+// and a Warning says what was given up.
+func TestFailover_TheAnnotationLetsAHeldFailoverGoAhead(t *testing.T) {
+	shortLiveOffsetBudget(t, 200*time.Millisecond)
+	h := newFenceHarness(t)
+	h.noRestartWait() // the old master is gone for good here
+	rec := h.recordEvents()
+	delete(h.agents.status, "10.0.0.1")
+	h.agents.status["10.0.0.2"].ReplicationOffset = 1000
+	h.agents.status["10.0.0.3"].ReplicationOffset = 1200
+	h.agents.liveOffset = map[string]int64{"10.0.0.2": 1500, "10.0.0.3": 1400}
+	h.agents.roleUnanswered = map[string]bool{"10.0.0.2": true}
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+		t.Fatal("without the annotation the failover went ahead, want it held")
+	}
+	h.cluster.Annotations = map[string]string{kividbv1alpha1.AllowUnreadFailoverAnnotation: "true"}
+	h.assertFailoverTo("c1-2")
+	if e := eventsWith(rec, "FailoverForced"); len(e) != 1 || !strings.Contains(e[0], "c1-1") || !strings.Contains(e[0], kividbv1alpha1.AllowUnreadFailoverAnnotation) {
+		t.Errorf("events %v, want one FailoverForced naming c1-1, the replica left out, and the annotation", e)
+	}
+	// Gone ahead, the hold is forgotten: a later one counts from its own start.
+	if _, ok := h.r.failoverHolds.Load(h.cluster.Namespace + "/" + h.cluster.Name); ok {
+		t.Error("the hold is still remembered after the failover went ahead")
+	}
+}
+
+// A held failover says how long it has been held, from the first pass that
+// held it, and what ends it: the network fixed, the replica's pod deleted,
+// or the annotation.
+func TestFailover_SaysHowLongItHasBeenHeldAndWhatEndsIt(t *testing.T) {
+	shortLiveOffsetBudget(t, 200*time.Millisecond)
+	h := newFenceHarness(t)
+	h.noRestartWait()
+	rec := h.recordEvents()
+	now := time.Now()
+	h.r.clock = func() time.Time { return now }
+	delete(h.agents.status, "10.0.0.1")
+	h.agents.status["10.0.0.2"].ReplicationOffset = 1000
+	h.agents.status["10.0.0.3"].ReplicationOffset = 1200
+	h.agents.roleUnanswered = map[string]bool{"10.0.0.2": true}
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+		t.Fatal("pass 1: the failover went ahead, want it held")
+	}
+	now = now.Add(95 * time.Second)
+	_, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods())
+	if err == nil || !strings.Contains(err.Error(), "1m35s") {
+		t.Errorf("pass 2: error %v, want the failover held, for 1m35s", err)
+	}
+	e := eventsWith(rec, "FailoverBlocked")
+	if len(e) != 2 {
+		t.Fatalf("events %v, want a FailoverBlocked on each pass", e)
+	}
+	for _, want := range []string{"1m35s", "network", "delete", kividbv1alpha1.AllowUnreadFailoverAnnotation} {
+		if !strings.Contains(e[1], want) {
+			t.Errorf("pass 2 event %q, want it to say %q", e[1], want)
+		}
+	}
 }
 
 // liveViews is the views of h's pods, as a pass starts with.

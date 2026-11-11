@@ -400,7 +400,20 @@ the same on every pod. The replicas are asked at once, for 1 s in all. A
 replica that does not answer may hold more than the one picked: unless that
 one has caught up with the held master, the failover waits for the next
 pass (a `FailoverBlocked` Warning, and `WaitingForReplica` on the Ready
-condition) until it answers or stops being Ready.
+condition) until it answers or stops being Ready. That need not happen on
+its own: a replica the operator cannot reach (a NetworkPolicy, a network
+partition between nodes) stays Ready, because its readiness probe runs from
+the kubelet on its own node. The Warning says how long the failover has
+been held. To end it, fix the network between the operator and that
+replica, delete the replica's pod, or annotate the cluster to fail over
+without the replicas that did not answer (a `FailoverForced` Warning),
+which loses any writes only they hold:
+
+```bash
+kubectl annotate kividbcluster my-cluster kividb.io/allow-unread-failover=true
+```
+
+Remove the annotation again afterwards.
 
 **What a failover can lose.** Replication is asynchronous: a master
 acknowledges a write before its replicas have it. When a master crashes

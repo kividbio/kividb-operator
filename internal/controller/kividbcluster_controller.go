@@ -87,6 +87,10 @@ type KividbClusterReconciler struct {
 	// its volume ("<ns>/<cluster>" -> *restartWaiting), see restart_wait.go.
 	restartWaits sync.Map
 
+	// failoverHolds: the failovers held back for a replica that did not say
+	// what it holds ("<ns>/<cluster>" -> *failoverHold), see reconcileRoles.
+	failoverHolds sync.Map
+
 	// notSynced: why each replica of a replicated-mode cluster was not in
 	// sync on the last pass ("<ns>/<cluster>" -> map[pod]reason).
 	notSynced sync.Map
