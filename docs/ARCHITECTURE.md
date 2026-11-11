@@ -218,7 +218,13 @@ does, in order:
    read at the start of the pass may be from before the master stopped
    streaming -- ties going to the name -- and wait for it to catch up
    with the old master, as a switchover does (5 s at most, less once the
-   old master stops answering). An address that
+   old master stops answering). The replicas are asked at once, for 1 s
+   in all (`liveOffsetBudget`), inside the old master's pause. One that
+   does not answer may hold more than the one picked: unless that one
+   caught up with the held master, which none can be ahead of, no one is
+   promoted on this pass (`FailoverBlocked`, and the old master's pause is
+   lifted) -- until it answers, or stops being Ready (its readiness probe
+   goes through the same agent). An address that
    does not answer is asked again for 1 s (`fenceRunCheckTimeout`; one
    that refuses the connection, once); a pause that gets no answer, or
    is refused because a write did not finish, is sent again, each try

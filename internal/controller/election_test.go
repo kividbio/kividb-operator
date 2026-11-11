@@ -1,6 +1,9 @@
 package controller
 
 import (
+	"context"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,4 +88,146 @@ func TestFailover_PromotesTheReplicaAheadOfARestartedMasterWhateverItsPriority(t
 	}
 	h.assertNoCall("exec 10.0.0.2 INFO replication")
 	h.assertNoCall("exec 10.0.0.3 INFO replication")
+}
+
+// shortLiveOffsetBudget makes the replicas' reads end sooner, for a test.
+func shortLiveOffsetBudget(t *testing.T, d time.Duration) {
+	t.Helper()
+	budget := liveOffsetBudget
+	liveOffsetBudget = d
+	t.Cleanup(func() { liveOffsetBudget = budget })
+}
+
+// A replica that cannot say what it holds may hold more than the others:
+// with the master gone -- nothing to hold, nothing to catch up with --
+// promoting another resyncs away what only it has. c1-1 was read early at
+// 1000 and c1-2 at 1200; now c1-1 does not answer (it holds 1500) and
+// c1-2 answers 1400. No one is promoted on this pass, a Warning says why,
+// and once c1-1 answers it is promoted.
+func TestFailover_HoldsWhenAReplicaThatMayBeAheadCannotBeRead(t *testing.T) {
+	shortLiveOffsetBudget(t, 200*time.Millisecond)
+	h := newFenceHarness(t)
+	h.noRestartWait() // the old master is gone for good here
+	rec := h.recordEvents()
+	delete(h.agents.status, "10.0.0.1")
+	h.agents.status["10.0.0.2"].ReplicationOffset = 1000
+	h.agents.status["10.0.0.3"].ReplicationOffset = 1200
+	h.agents.liveOffset = map[string]int64{"10.0.0.2": 1500, "10.0.0.3": 1400}
+	h.agents.roleUnanswered = map[string]bool{"10.0.0.2": true}
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+		t.Fatalf("reconcileRoles succeeded, want the failover held (calls %v)", h.agents.calls)
+	}
+	h.assertNoCall("promote")
+	if e := eventsWith(rec, "FailoverBlocked"); len(e) != 1 || !strings.Contains(e[0], "c1-1") {
+		t.Errorf("events %v, want one FailoverBlocked naming c1-1", e)
+	}
+	h.agents.roleUnanswered = nil
+	h.assertFailoverTo("c1-1")
+}
+
+// liveViews is the views of h's pods, as a pass starts with.
+func liveViews(h *rolesHarness) map[string]*podView {
+	views := map[string]*podView{}
+	for _, p := range h.pods() {
+		v := &podView{pod: &p, ready: isPodReady(&p)}
+		v.status = h.agents.status[p.Status.PodIP]
+		views[p.Name] = v
+	}
+	return views
+}
+
+// newReplicasHarness: c1-0 is the master of three replicas, each at 100.
+func newReplicasHarness(t *testing.T) *rolesHarness {
+	t.Helper()
+	return newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.1", label: "master", ready: true, agent: master(100)},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 100)},
+		testPod{name: "c1-2", ip: "10.0.0.3", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 100)},
+		testPod{name: "c1-3", ip: "10.0.0.4", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 100)},
+	)
+}
+
+// The replicas are asked at once: inside the old master's pause, slow ones
+// one after another could outlast it, and it would take writes again
+// before the promotion.
+func TestFailover_AsksTheReplicasForTheirOffsetsAtOnce(t *testing.T) {
+	h := newReplicasHarness(t)
+	delay := 300 * time.Millisecond
+	h.agents.roleDelay = map[string]time.Duration{"10.0.0.2": delay, "10.0.0.3": delay, "10.0.0.4": delay}
+	h.agents.liveOffset = map[string]int64{"10.0.0.4": 150}
+	start := time.Now()
+	name, unread := h.r.electLive(context.Background(), liveViews(h), "c1-0", "")
+	// One after another takes 3*delay; at once, delay and some scheduling.
+	if took := time.Since(start); took >= 2*delay+delay/2 {
+		t.Errorf("reading three replicas that answer in %s took %s: one after another, not at once", delay, took)
+	}
+	if name != "c1-3" || len(unread) > 0 {
+		t.Errorf("picked %q, unread %v; want c1-3, which holds the most, and every replica read", name, unread)
+	}
+}
+
+// A read that fails at once -- a refused connection, an agent error -- is
+// tried again within the budget.
+func TestFailover_AsksAReplicaAgainWithinTheBudget(t *testing.T) {
+	h := newReplicasHarness(t)
+	h.agents.roleFails = map[string]int{"10.0.0.2": 2}
+	h.agents.liveOffset = map[string]int64{"10.0.0.2": 150}
+	name, unread := h.r.electLive(context.Background(), liveViews(h), "c1-0", "")
+	if name != "c1-1" || len(unread) > 0 {
+		t.Errorf("picked %q, unread %v; want c1-1, read on a later try", name, unread)
+	}
+}
+
+// Replicas that never answer cost one budget between them, not one each.
+func TestFailover_GivesUpOnTheReplicasAtOneDeadline(t *testing.T) {
+	budget := 400 * time.Millisecond
+	shortLiveOffsetBudget(t, budget)
+	h := newReplicasHarness(t)
+	h.agents.roleUnanswered = map[string]bool{"10.0.0.2": true, "10.0.0.3": true}
+	start := time.Now()
+	name, unread := h.r.electLive(context.Background(), liveViews(h), "c1-0", "")
+	// One budget each would be 2*budget.
+	if took := time.Since(start); took > budget+300*time.Millisecond {
+		t.Errorf("two replicas that never answer took %s, more than the budget (%s)", took, budget)
+	}
+	slices.Sort(unread)
+	if name != "c1-3" || !slices.Equal(unread, []string{"c1-1", "c1-2"}) {
+		t.Errorf("picked %q, unread %v; want c1-3, and c1-1 and c1-2 unread", name, unread)
+	}
+}
+
+// With the old master held, a replica that caught up with it holds
+// everything it acknowledged, and no replica can be ahead of that: it is
+// promoted though another did not answer.
+func TestFailover_PromotesAReplicaThatCaughtUpWithTheHeldMaster(t *testing.T) {
+	shortLiveOffsetBudget(t, 200*time.Millisecond)
+	shortSwitchoverWaits(t)
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.roleUnanswered = map[string]bool{"10.0.0.3": true}
+	h.assertFailoverTo("c1-1")
+	if e := eventsWith(rec, "FailoverBlocked"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+}
+
+// Held, but the replica picked did not catch up: the one that did not
+// answer may hold more. No one is promoted, and the old master's writes are
+// let go until the next pass holds them again.
+func TestFailover_HoldsWhenThePickDidNotCatchUpAndAReplicaCannotBeRead(t *testing.T) {
+	shortLiveOffsetBudget(t, 200*time.Millisecond)
+	shortSwitchoverWaits(t)
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.status["10.0.0.1"] = masterRun(130, "stream-a", "run-0")
+	h.agents.catchUp = map[string]int{"10.0.0.2": -1} // c1-1 stays at 100
+	h.agents.roleUnanswered = map[string]bool{"10.0.0.3": true}
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+		t.Fatalf("reconcileRoles succeeded, want the failover held (calls %v)", h.agents.calls)
+	}
+	h.assertNoCall("promote")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "exec 10.0.0.1 CLIENT UNPAUSE")
+	if e := eventsWith(rec, "FailoverBlocked"); len(e) != 1 || !strings.Contains(e[0], "c1-2") {
+		t.Errorf("events %v, want one FailoverBlocked naming c1-2", e)
+	}
 }

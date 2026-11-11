@@ -108,7 +108,7 @@ const (
 // returns the address it holds the writes at, or may hold them at, or ""
 // when it does not (the failover goes on either way). pick is called only
 // once a pause was answered; the caller picks otherwise.
-func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv1alpha1.KividbCluster, last kividbv1alpha1.KividbPodStatus, pick func() *podView) string {
+func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv1alpha1.KividbCluster, last kividbv1alpha1.KividbPodStatus, pick func() *podView) (string, bool) {
 	log := logf.FromContext(ctx).WithValues("pod", last.Name, "ip", last.PodIP)
 	unfenced := func(why string, args ...any) string {
 		msg := fmt.Sprintf(why, args...)
@@ -120,7 +120,7 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 	if last.PodIP == "" || last.RunID == "" {
 		// A kividbclusters CRD from before status.pods[].podIP drops the
 		// field on every status write (Helm does not upgrade CRDs).
-		return unfenced("no address or engine run recorded for it, so its writes were not held before the failover; apply the current kividbclusters CRD (Helm does not upgrade it)")
+		return unfenced("no address or engine run recorded for it, so its writes were not held before the failover; apply the current kividbclusters CRD (Helm does not upgrade it)"), false
 	}
 
 	// One command each for the run and the pause: under a CPU limit every
@@ -128,11 +128,11 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 	// GET /status makes seven.
 	runID, err := r.runOf(ctx, last.PodIP)
 	if err != nil {
-		return unfenced("no answer at %s (%v)", last.PodIP, err)
+		return unfenced("no answer at %s (%v)", last.PodIP, err), false
 	}
 	if runID != last.RunID {
 		log.Info("not holding the writes at the old master's address: another engine answers there", "runID", runID, "recordedRunID", last.RunID)
-		return ""
+		return "", false
 	}
 
 	// It is there. A pause that is not answered may have landed all the
@@ -156,7 +156,7 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 			break
 		}
 		if reply != nil && pauseUnsupported(err) {
-			return unfenced("its engine does not have CLIENT PAUSE WRITE (%v)", err)
+			return unfenced("its engine does not have CLIENT PAUSE WRITE (%v)", err), false
 		}
 		unanswered = unanswered || reply == nil
 		if deadline.IsZero() {
@@ -168,14 +168,14 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 				// demoted as a fenced one, rather than left to wake up a
 				// master when that pause runs out (#82).
 				unfenced("its engine answered, but no pause of its writes was confirmed (%v); it is demoted after the promotion in case one landed", err)
-				return last.PodIP
+				return last.PodIP, false
 			}
-			return unfenced("its engine answered, but its writes could not be paused (%v)", err)
+			return unfenced("its engine answered, but its writes could not be paused (%v)", err), false
 		}
 		log.Info("holding the old master's writes did not take; trying again", "error", err.Error())
 		select {
 		case <-ctx.Done():
-			return unfenced("%v", ctx.Err())
+			return unfenced("%v", ctx.Err()), false
 		case <-time.After(switchoverPoll):
 		}
 	}
@@ -186,15 +186,16 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 		cand.status != nil && cand.status.Role == agentapi.RoleMaster {
 		// An earlier pass fenced it and promoted this replica, the reply of
 		// which was lost: it has waited for the replica already.
-		return last.PodIP
+		return last.PodIP, true
 	}
-	if ok, _, why := r.waitCaughtUp(ctx, last.PodIP, cand.pod.Status.PodIP, true); !ok {
+	ok, _, why := r.waitCaughtUp(ctx, last.PodIP, cand.pod.Status.PodIP, true)
+	if !ok {
 		log.Info("promoting a replica that has not caught up with the fenced master", "replica", cand.pod.Name, "why", why)
 		r.event(c, corev1.EventTypeWarning, "FailoverUnfenced",
 			"%s: promoting %s before it caught up with it (%s); writes %s acknowledged that %s does not have are lost",
 			last.Name, cand.pod.Name, why, last.Name, cand.pod.Name)
 	}
-	return last.PodIP
+	return last.PodIP, ok
 }
 
 // recordFence persists, before the promotion, which master the failover

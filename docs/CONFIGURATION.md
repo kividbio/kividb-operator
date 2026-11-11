@@ -389,7 +389,11 @@ place, as the same pod, keeps `unhealthyThresholdSeconds`.
 The replica promoted is the one that holds the most when the old master's
 writes are held, by its offset read then; replicas that hold as much go by
 name. `replica-priority` plays no part: a `KividbConfig` directive, it is
-the same on every pod.
+the same on every pod. The replicas are asked at once, for 1 s in all. A
+replica that does not answer may hold more than the one picked: unless that
+one has caught up with the held master, the failover waits for the next
+pass (a `FailoverBlocked` Warning, and `WaitingForReplica` on the Ready
+condition) until it answers or stops being Ready.
 
 **What a failover can lose.** Replication is asynchronous: a master
 acknowledges a write before its replicas have it. When a master crashes

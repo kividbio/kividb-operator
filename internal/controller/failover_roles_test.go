@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +36,10 @@ import (
 // applies /promote and /replicaof to its own state the way kividb would,
 // so a test can run several reconcile passes and watch them converge.
 type fakeAgents struct {
+	// mu: requests may come in at once (the failover asks every replica
+	// for ROLE together); a request that waits releases it meanwhile.
+	mu sync.Mutex
+
 	status map[string]*agentapi.StatusResponse
 	calls  []string
 
@@ -96,6 +101,34 @@ type fakeAgents struct {
 	// liveOffset: the offset a replica's ROLE reports, past the one its
 	// /status gave (it went on receiving since).
 	liveOffset map[string]int64
+	// roleUnanswered: ROLE on these addresses gets no reply before the
+	// request's context ends (a slow or stuck engine).
+	roleUnanswered map[string]bool
+	// roleFails: the next this many ROLEs on an address fail at once.
+	roleFails map[string]int
+	// roleDelay: ROLE on an address answers this late, unless the request
+	// ends first.
+	roleDelay map[string]time.Duration
+}
+
+// waitDone waits, with the lock released, for ctx to end.
+func (f *fakeAgents) waitDone(ctx context.Context) error {
+	f.mu.Unlock()
+	defer f.mu.Lock()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// sleep waits d, with the lock released, unless ctx ends first.
+func (f *fakeAgents) sleep(ctx context.Context, d time.Duration) error {
+	f.mu.Unlock()
+	defer f.mu.Lock()
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // pauseDidNotTakeHold is what CLIENT PAUSE answers, since kividb 1.2.1, when
@@ -199,9 +232,10 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.hang[ip] {
-		<-req.Context().Done()
-		return nil, req.Context().Err()
+		return nil, f.waitDone(req.Context())
 	}
 	st, ok := f.status[ip]
 	if !ok {
@@ -258,11 +292,24 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
 			}
 		}
+		if strings.EqualFold(strings.Join(r.Args, " "), "ROLE") {
+			if f.roleUnanswered[ip] {
+				return nil, f.waitDone(req.Context())
+			}
+			if f.roleFails[ip] > 0 {
+				f.roleFails[ip]--
+				return nil, fmt.Errorf("dial %s: connection refused", ip)
+			}
+			if d := f.roleDelay[ip]; d > 0 {
+				if err := f.sleep(req.Context(), d); err != nil {
+					return nil, err
+				}
+			}
+		}
 		body = f.execReply(ip, st, r.Args)
 		if strings.EqualFold(strings.Join(r.Args, " "), "INFO server") && f.infoUnanswered[ip] > 0 {
 			f.infoUnanswered[ip]--
-			<-req.Context().Done()
-			return nil, req.Context().Err()
+			return nil, f.waitDone(req.Context())
 		}
 		if strings.HasPrefix(strings.ToUpper(strings.Join(r.Args, " ")), "CLIENT PAUSE") {
 			if f.goneAfterPause[ip] {
@@ -270,21 +317,16 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			if f.pauseUnanswered[ip] > 0 {
 				f.pauseUnanswered[ip]--
-				<-req.Context().Done()
-				return nil, req.Context().Err()
+				return nil, f.waitDone(req.Context())
 			}
 			if reply, ok := body.(agentapi.ExecResponse); ok && reply.Str == pauseDidNotTakeHold && f.pauseRefusedAfter > 0 {
-				select {
-				case <-time.After(f.pauseRefusedAfter):
-				case <-req.Context().Done():
-					return nil, req.Context().Err()
+				if err := f.sleep(req.Context(), f.pauseRefusedAfter); err != nil {
+					return nil, err
 				}
 			}
 			if delay := f.pauseDelay[ip]; delay > 0 {
-				select {
-				case <-time.After(delay):
-				case <-req.Context().Done():
-					return nil, req.Context().Err()
+				if err := f.sleep(req.Context(), delay); err != nil {
+					return nil, err
 				}
 			}
 		}

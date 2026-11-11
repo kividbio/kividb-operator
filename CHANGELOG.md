@@ -30,6 +30,11 @@ drops them: failovers do not hold the old master's writes
     it is found gone), by each replica's offset read then with `ROLE`, not
     by the offsets read at the start of the pass, which may be from before
     the master stopped streaming. Replicas that hold as much go by name.
+    The replicas are asked at once, for 1 s in all. One that does not
+    answer may hold more than the one picked: unless that one caught up
+    with the held master, no one is promoted on that pass
+    (`FailoverBlocked` Warning, `WaitingForReplica` on the Ready
+    condition) until it answers or is no longer Ready.
   - A master whose pod is gone, or replaced by a new pod (a force delete),
     and whose engine no longer answers, is now waited for until its new
     pod is Ready and has reported: it may come back on its volume holding

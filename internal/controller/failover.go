@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -244,16 +245,33 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		if needsFailover && behindOf == "" {
 			last := previous[currentMasterName]
 			picked := false
+			var unread []string
 			pick := func() *podView {
 				picked = true
-				candidate = r.electLive(ctx, tier, currentMasterName, candidate)
+				candidate, unread = r.electLive(ctx, tier, currentMasterName, candidate)
 				return views[candidate]
 			}
-			heldOld = r.fenceOldMaster(ctx, c, last, pick)
+			var caughtUp bool
+			heldOld, caughtUp = r.fenceOldMaster(ctx, c, last, pick)
 			if !picked {
 				// Not held, or a pause with no answer (it may have
 				// landed): picked all the same, by what each holds now.
 				pick()
+			}
+			if len(unread) > 0 && !caughtUp {
+				// A replica that did not say what it holds may hold more than
+				// the one picked, which would have it resynced away. Only a
+				// replica that caught up with the held master is known to
+				// hold everything: none can be ahead of it. Otherwise no one
+				// is promoted on this pass; the next asks again, and a
+				// replica that cannot be asked for long stops being Ready
+				// (its readiness probe goes through the same agent).
+				r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
+				r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
+					"master %s is unavailable, but %s did not answer ROLE within %s and may hold more than %s; not promoting anyone until each answers or is no longer Ready",
+					currentMasterName, strings.Join(unread, ", "), liveOffsetBudget, candidate)
+				return nil, currentMasterName, false, heldBack("WaitingForReplica",
+					fmt.Errorf("failover held: %s did not answer ROLE within %s and may hold more than %s", strings.Join(unread, ", "), liveOffsetBudget, candidate))
 			}
 			if heldOld != "" {
 				if err := r.recordFence(ctx, c, kividbv1alpha1.FencedMaster{Name: last.Name, PodIP: heldOld, RunID: last.RunID}); err != nil {
@@ -739,54 +757,83 @@ func (r *KividbClusterReconciler) event(c *kividbv1alpha1.KividbCluster, eventTy
 	}
 }
 
-// liveOffsetTimeout bounds how long a failover waits for each replica's
-// offset when it picks the one to promote (electLive).
-const liveOffsetTimeout = time.Second
+// liveOffsetBudget is how long a failover gives the replicas, together,
+// to say how much they hold when it picks the one to promote (electLive).
+// They are asked at once, inside the old master's pause and before the
+// catch-up: the pause (fencePause, 15 s at least) covers a pause call that
+// took pauseCallTimeout, this, switchoverCatchUpTimeout and the promotion.
+var liveOffsetBudget = time.Second
+
+// liveOffsetRetry is how soon a replica whose read failed is asked again,
+// within liveOffsetBudget.
+var liveOffsetRetry = 50 * time.Millisecond
 
 // electLive picks, among the ready pods of views other than exclude, the
 // one that holds the most now: its replication offset asked for at this
-// moment (ROLE), not the one the pass started from (#78). A pod that does
-// not answer in time keeps that one. Pods that hold as much go by name.
-// fallback when there is none.
-func (r *KividbClusterReconciler) electLive(ctx context.Context, views map[string]*podView, exclude, fallback string) string {
-	type replica struct {
-		name   string
-		offset int64
-	}
-	var replicas []replica
-	most := int64(-1)
-	atStart, now := map[string]int64{}, map[string]int64{}
+// moment (ROLE), not the one the pass started from (#78). They are asked
+// at once, and one whose read fails is asked again, until
+// liveOffsetBudget is up. Pods that hold as much go by name; fallback when
+// none answered. It also returns the pods that did not answer: what each
+// of those holds now is not known -- the offset it had at the start of the
+// pass is only a floor -- so it may be ahead of the one picked, and the
+// caller decides whether that one may be promoted all the same.
+func (r *KividbClusterReconciler) electLive(ctx context.Context, views map[string]*podView, exclude, fallback string) (string, []string) {
+	var names []string
 	for name, v := range views {
-		if name == exclude || !v.ready {
+		if name != exclude && v.ready {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names) // ties go by name: the first read keeps them
+	type reading struct {
+		offset int64
+		ok     bool
+	}
+	readings := make([]reading, len(names))
+	rctx, cancel := context.WithTimeout(ctx, liveOffsetBudget)
+	defer cancel()
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func(rd *reading, ip string) {
+			defer wg.Done()
+			for {
+				if role, err := r.roleOf(rctx, ip); err == nil {
+					rd.offset, rd.ok = role.offset, true
+					return
+				}
+				select {
+				case <-rctx.Done():
+					return
+				case <-time.After(liveOffsetRetry):
+				}
+			}
+		}(&readings[i], views[name].pod.Status.PodIP)
+	}
+	wg.Wait()
+
+	best, most := "", int64(-1)
+	var unread []string
+	atStart, now := map[string]int64{}, map[string]int64{}
+	for i, name := range names {
+		if st := views[name].status; st != nil {
+			atStart[name] = st.ReplicationOffset
+		}
+		if !readings[i].ok {
+			unread = append(unread, name)
 			continue
 		}
-		offset := int64(0)
-		if v.status != nil {
-			offset = v.status.ReplicationOffset
-		}
-		atStart[name] = offset
-		rctx, cancel := context.WithTimeout(ctx, liveOffsetTimeout)
-		if role, err := r.roleOf(rctx, v.pod.Status.PodIP); err == nil {
-			offset = role.offset
-		}
-		cancel()
-		now[name] = offset
-		replicas = append(replicas, replica{name, offset})
-		most = max(most, offset)
-	}
-	defer func() {
-		logf.FromContext(ctx).Info("picked the replica to promote by what each holds now", "offsetsNow", now, "offsetsAtPassStart", atStart)
-	}()
-	best := ""
-	for _, rp := range replicas {
-		if rp.offset == most && (best == "" || rp.name < best) {
-			best = rp.name
+		now[name] = readings[i].offset
+		if readings[i].offset > most {
+			best, most = name, readings[i].offset
 		}
 	}
+	logf.FromContext(ctx).Info("picked the replica to promote by what each holds now",
+		"pick", best, "offsetsNow", now, "offsetsAtPassStart", atStart, "unread", unread)
 	if best == "" {
-		return fallback
+		return fallback, unread
 	}
-	return best
+	return best, unread
 }
 
 // electReplica picks the ready, non-excluded pod with the highest reported
