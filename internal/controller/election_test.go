@@ -1,10 +1,10 @@
 package controller
 
 import (
-	"context"
-	"strings"
 	"testing"
 	"time"
+
+	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 )
 
 // Which replica a failover promotes (#78).
@@ -44,17 +44,8 @@ func TestFailover_PromotesTheReplicaThatHoldsTheMostNowAfterAnUnansweredPause(t 
 	}
 }
 
-// Replicas that hold as much are told apart by their replica-priority, the
-// lower first, as Sentinel does.
-func TestFailover_BreaksATieByReplicaPriority(t *testing.T) {
-	h := newFenceHarness(t)
-	h.agents.status["10.0.0.3"].ReplicationOffset = 100
-	h.agents.priority = map[string]int{"10.0.0.2": 100, "10.0.0.3": 10}
-	h.assertFailoverTo("c1-2")
-}
-
-// And by name when their priorities are the same too.
-func TestFailover_BreaksATieByNameLast(t *testing.T) {
+// Replicas that hold as much go by name.
+func TestFailover_BreaksATieByName(t *testing.T) {
 	h := newFenceHarness(t)
 	h.agents.status["10.0.0.3"].ReplicationOffset = 100
 	h.assertFailoverTo("c1-1")
@@ -73,29 +64,25 @@ func TestFailover_PromotesTheReplicaThatHoldsTheMostNowWithoutAFence(t *testing.
 	h.assertNoPause()
 }
 
-// replica-priority 0 means never promoted, as in Sentinel: even a replica
-// that holds the most is passed over.
-func TestFailover_NeverPromotesAReplicaWithPriorityZero(t *testing.T) {
-	shortSwitchoverWaits(t)
-	h := newFenceHarness(t)
-	h.agents.priority = map[string]int{"10.0.0.2": 0} // c1-1 holds 100 ...
-	h.agents.catchUp = map[string]int{"10.0.0.3": -1} // ... c1-2 only 90
-	h.assertFailoverTo("c1-2")
-}
-
-// Every replica that could take over has replica-priority 0: no failover,
-// and the master stays gone, with a Warning saying why. Its writes are not
-// held for a promotion that does not come.
-func TestFailover_WaitsWhenEveryReplicaHasPriorityZero(t *testing.T) {
-	h := newFenceHarness(t)
-	rec := h.recordEvents()
-	h.agents.priority = map[string]int{"10.0.0.2": 0, "10.0.0.3": 0}
-	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
-		t.Fatal("reconcileRoles succeeded, want the failover blocked")
+// replica-priority is a KividbConfig directive, so it is the same on every
+// pod and tells no replica from another: the failover does not read it. A
+// replica that holds what a restarted master lost is promoted whatever its
+// replica-priority; passing it over would resync those writes away.
+func TestFailover_PromotesTheReplicaAheadOfARestartedMasterWhateverItsPriority(t *testing.T) {
+	h := newRolesHarness(t, "c1-0",
+		testPod{name: "c1-0", ip: "10.0.0.9", ready: true, agent: masterRun(700, "stream-b", "run-2")},
+		testPod{name: "c1-1", ip: "10.0.0.2", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 1000)},
+		testPod{name: "c1-2", ip: "10.0.0.3", label: "replica", ready: true, agent: replicaOf("10.0.0.1", 990)},
+	)
+	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: false, Synced: true, ReplicationOffset: 1000, ReplID: "stream-a", RunID: "run-1"},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
+		{Name: "c1-2", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 990},
 	}
-	h.assertNoCall("promote")
-	h.assertNoPause()
-	if e := eventsWith(rec, "FailoverBlocked"); len(e) != 1 || !strings.Contains(e[0], "replica-priority 0") {
-		t.Errorf("events %v, want one FailoverBlocked naming replica-priority 0", e)
+	h.agents.priority = map[string]int{"10.0.0.2": 0}
+	if m, failover := h.reconcile(); m != "c1-1" || !failover {
+		t.Fatalf("master=%q failover=%v, want a failover to c1-1, which holds what c1-0 lost", m, failover)
 	}
+	h.assertNoCall("exec 10.0.0.2 INFO replication")
+	h.assertNoCall("exec 10.0.0.3 INFO replication")
 }

@@ -90,7 +90,8 @@ type fakeAgents struct {
 	pausedUntil map[string]time.Time
 	pauseRanOut map[string]bool
 	// priority: the replica-priority INFO REPLICATION reports, by address
-	// (100, the default, if not set).
+	// (100, the default, if not set). The operator does not read it: it is
+	// a KividbConfig directive, the same on every pod.
 	priority map[string]int
 	// liveOffset: the offset a replica's ROLE reports, past the one its
 	// /status gave (it went on receiving since).

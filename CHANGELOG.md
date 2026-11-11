@@ -29,11 +29,7 @@ drops them: failovers do not hold the old master's writes
   - The replica is now picked after the old master's writes are held (or
     it is found gone), by each replica's offset read then with `ROLE`, not
     by the offsets read at the start of the pass, which may be from before
-    the master stopped streaming. Replicas that hold as much go by
-    `replica-priority`, the lower first, then by name. A replica with
-    `replica-priority 0` is never promoted, as in Sentinel; when every
-    replica that could take over has it, the master stays gone and a
-    `FailoverBlocked` Warning says why.
+    the master stopped streaming. Replicas that hold as much go by name.
   - A master whose pod is gone, or replaced by a new pod (a force delete),
     and whose engine no longer answers, is now waited for until its new
     pod is Ready and has reported: it may come back on its volume holding

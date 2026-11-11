@@ -387,10 +387,9 @@ as unschedulable, and the cap covers the rest. A master that restarts in
 place, as the same pod, keeps `unhealthyThresholdSeconds`.
 
 The replica promoted is the one that holds the most when the old master's
-writes are held, by its offset read then. `replica-priority` (a
-`KividbConfig` directive) breaks ties, the lower first, and `0` means never
-promoted, as in Sentinel: if every replica that could take over has it,
-the master stays gone (`FailoverBlocked` Warning).
+writes are held, by its offset read then; replicas that hold as much go by
+name. `replica-priority` plays no part: a `KividbConfig` directive, it is
+the same on every pod.
 
 **What a failover can lose.** Replication is asynchronous: a master
 acknowledges a write before its replicas have it. When a master crashes

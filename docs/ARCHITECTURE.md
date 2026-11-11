@@ -200,9 +200,7 @@ does, in order:
    keeps a pod's last offset, key count, run and stream while it cannot be
    asked, which is what makes this, and the empty-replica check below,
    work across the pod's restart.
-5. **Election**: among the remaining ready pods with a
-   `replica-priority` other than 0 (never promoted, as in Sentinel; none
-   left: `FailoverBlocked`, no failover), the one with the highest
+5. **Election**: among the remaining ready pods, the one with the highest
    `replicationOffset`. A master whose pod is gone or replaced (a new
    UID), and whose engine no longer answers, is first waited for until
    its new pod is Ready and has reported, for `failover.restartWaitSeconds`
@@ -218,9 +216,9 @@ does, in order:
    still runs, and takes writes, until its replicas have left it. Then
    pick the replica by each one's offset read now with `ROLE` -- the ones
    read at the start of the pass may be from before the master stopped
-   streaming -- ties going to the lower `replica-priority`, then the name,
-   and wait for it to catch up with the old master, as a switchover does (5 s
-   at most, less once the old master stops answering). An address that
+   streaming -- ties going to the name -- and wait for it to catch up
+   with the old master, as a switchover does (5 s at most, less once the
+   old master stops answering). An address that
    does not answer is asked again for 1 s (`fenceRunCheckTimeout`; one
    that refuses the connection, once); a pause that gets no answer, or
    is refused because a write did not finish, is sent again, each try
