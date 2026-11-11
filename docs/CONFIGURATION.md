@@ -484,14 +484,22 @@ It loses no acknowledged write:
 Writes wait for as long as the replica takes to catch up: milliseconds
 for a replica in sync. If it has not caught up in 5 s, nothing changes:
 the pause ends, the old master stays the master, a `SwitchoverAborted`
-Warning says why, and the next attempt waits 30 s. A replica is a
+Warning says why, and the next attempt waits 30 s, twice as long after
+each abort in a row, up to 10 min (2 s for a master pod being deleted).
+The `Switchover` condition (`False`, reason `Aborted`) says why and when
+the next try is, until one goes through. A replica is a
 candidate only when Ready and `synced`: following the master with
 `master_link_status:up`, having heard from it in the last 20 s, and at
 most 1 MiB behind. The most caught-up candidate is chosen, or the one
-`kividb.io/switchover-to` names. On an engine before kividb 1.1, which has
-no `CLIENT PAUSE ... WRITE`, the operator switches over without the pause
-and says so (`SwitchoverWithoutPause` Warning): writes acknowledged by the
-old master during the handover can be lost there.
+`kividb.io/switchover-to` names. Since kividb 1.2.1 the pause waits for the
+writes already in progress, up to 5 s, and is refused if one has not
+finished then (a big `FLUSHALL`, say); the operator gives it 7 s, and the
+pause lasts that, the catch-up and a margin: 17 s. A pause that is refused,
+or gets no answer, calls the switchover off (`SwitchoverAborted`) and it is
+tried again. Only on an engine that answers that it does not know `CLIENT
+PAUSE ... WRITE` does the operator switch over without the pause, and say
+so (`SwitchoverWithoutPause` Warning): writes acknowledged by the old
+master during the handover can be lost there.
 
 **Stopping a master.** Both containers of every pod have a `preStop`
 hook, the agent's `GET /prestop`. On a master with replicas attached it

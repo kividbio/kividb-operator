@@ -10,6 +10,7 @@ import (
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -49,15 +50,68 @@ var (
 	// switchoverPoll is how often the offsets are compared meanwhile.
 	switchoverPoll = 20 * time.Millisecond
 	// switchoverRetryAfter is how long after an aborted switchover the
-	// next one is tried (unless the master is being deleted: then there is
-	// no later). Every attempt holds writes for up to the catch-up timeout.
+	// next one is tried, doubled with each abort in a row up to
+	// switchoverRetryMax (switchoverWait). Every attempt holds writes for
+	// up to the pause call and the catch-up timeout.
 	switchoverRetryAfter = 30 * time.Second
+	switchoverRetryMax   = 10 * time.Minute
+	// switchoverUrgentRetryAfter is the least time between tries for a
+	// master being deleted, which has only its preStop hold to wait in.
+	switchoverUrgentRetryAfter = 2 * time.Second
+	// switchoverPauseMargin is how much longer than the pause call and the
+	// catch-up the pause lasts, for the promotion and the relabelling that
+	// follow (switchoverPause). The pause is lifted as soon as they are
+	// done.
+	switchoverPauseMargin = 5 * time.Second
 )
 
-// switchoverPauseMargin is how much longer than the catch-up timeout the
-// pause lasts, for the promotion and the relabelling that follow. The
-// pause is lifted as soon as they are done.
-const switchoverPauseMargin = 5 * time.Second
+// SwitchoverCondition is set False, with reason Aborted, while switchovers
+// of a cluster keep being aborted, and removed once one goes through.
+const SwitchoverCondition = "Switchover"
+
+// switchoverPause is how long a switchover holds the master's writes. The
+// engine counts the pause from the request, and since kividb 1.2.1 may
+// spend up to 5 s of it waiting out a write in progress before it answers
+// (kividbio/kividb#629), up to the call's pauseCallTimeout; the target,
+// which has that write to apply too, then has switchoverCatchUpTimeout to
+// catch up; and the margin covers the promotion and the re-pointing of the
+// old master after that (#82).
+func switchoverPause() time.Duration {
+	return pauseCallTimeout + switchoverCatchUpTimeout + switchoverPauseMargin
+}
+
+// switchoverAborts is how many switchovers of a cluster were aborted in a
+// row, from which master, and when the last one was.
+type switchoverAborts struct {
+	n      int
+	master string
+	at     time.Time
+}
+
+// switchoverNotWanted forgets the aborted switchovers of c and takes its
+// Switchover condition away: none is wanted any more (the step-down was
+// cancelled, the rollout no longer needs one), or the master is another
+// pod now. A later one is a new request, not a retry to wait for (#82).
+func (r *KividbClusterReconciler) switchoverNotWanted(c *kividbv1alpha1.KividbCluster) {
+	r.switchovers.Delete(switchoverKey(c))
+	removeCondition(&c.Status.Conditions, SwitchoverCondition)
+}
+
+// switchoverWait is how long after its n-th aborted switchover in a row a
+// cluster waits before the next: switchoverRetryAfter, doubled with each
+// abort up to switchoverRetryMax, so that a workload whose writes keep a
+// pause from taking hold is not held up every 30 s for good; for a master
+// being deleted, switchoverUrgentRetryAfter.
+func switchoverWait(n int, urgent bool) time.Duration {
+	if urgent {
+		return switchoverUrgentRetryAfter
+	}
+	d := switchoverRetryAfter
+	for i := 1; i < n && d < switchoverRetryMax; i++ {
+		d *= 2
+	}
+	return min(d, switchoverRetryMax)
+}
 
 // switchoverRequest says why a switchover is wanted, and to whom.
 type switchoverRequest struct {
@@ -150,6 +204,7 @@ func switchoverKey(c *kividbv1alpha1.KividbCluster) string { return c.Namespace 
 // writes again.
 func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []corev1.Pod, statuses []kividbv1alpha1.KividbPodStatus, masterPod string, req switchoverRequest) (string, error) {
 	log := logf.FromContext(ctx)
+	r.switchoverAsked.Store(switchoverKey(c), struct{}{}) // asked for on this pass (reconcileRoleChanges)
 	byName := make(map[string]*corev1.Pod, len(pods))
 	for i := range pods {
 		byName[pods[i].Name] = &pods[i]
@@ -162,8 +217,13 @@ func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alp
 	if err != nil {
 		return "", err
 	}
-	if at, ok := r.switchovers.Load(switchoverKey(c)); ok && !req.urgent && r.now().Sub(at.(time.Time)) < switchoverRetryAfter {
-		return "", errSwitchoverDeferred
+	if v, ok := r.switchovers.Load(switchoverKey(c)); ok {
+		switch a := v.(*switchoverAborts); {
+		case a.master != masterPod:
+			r.switchoverNotWanted(c) // aborted from another master
+		case r.now().Sub(a.at) < switchoverWait(a.n, req.urgent):
+			return "", errSwitchoverDeferred
+		}
 	}
 	oldIP, targetIP, port := old.Status.PodIP, target.Status.PodIP, getPort(c)
 
@@ -176,21 +236,8 @@ func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alp
 	}
 
 	log.Info("switchover: pausing writes on the master until the replica has caught up", "from", masterPod, "to", target.Name, "reason", req.reason)
-	pauseMs := strconv.FormatInt((switchoverCatchUpTimeout + switchoverPauseMargin).Milliseconds(), 10)
+	pauseMs := strconv.FormatInt(switchoverPause().Milliseconds(), 10)
 	paused := true
-	if _, err := r.Agent.Exec(ctx, oldIP, "CLIENT", "PAUSE", pauseMs, "WRITE"); err != nil {
-		var reply *agentapi.ExecResponse
-		if reply, _ = r.Agent.Exec(ctx, oldIP, "PING"); reply == nil {
-			return "", fmt.Errorf("pausing writes on %s: %w", masterPod, err)
-		}
-		// The engine is up and refuses the command: one from before
-		// kividb 1.1, which has no CLIENT PAUSE ... WRITE. Hand over
-		// without it, as earlier operators did, and say what that costs.
-		paused = false
-		r.event(c, corev1.EventTypeWarning, "SwitchoverWithoutPause",
-			"%s refused CLIENT PAUSE ... WRITE (%v): its engine predates kividb 1.1. Moving the master role to %s without holding writes; a write acknowledged by %s during the next moments can be lost. Upgrade the engine to make switchovers lossless.",
-			masterPod, err, target.Name, masterPod)
-	}
 	unpause := func() {
 		if !paused {
 			return
@@ -201,11 +248,49 @@ func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alp
 	}
 	abort := func(why string) (string, error) {
 		unpause()
-		r.switchovers.Store(switchoverKey(c), r.now())
+		a := &switchoverAborts{n: 1, master: masterPod, at: r.now()}
+		if v, ok := r.switchovers.Load(switchoverKey(c)); ok && v.(*switchoverAborts).master == masterPod {
+			a.n = v.(*switchoverAborts).n + 1
+		}
+		r.switchovers.Store(switchoverKey(c), a)
+		setCondition(&c.Status.Conditions, metav1.Condition{
+			Type:   SwitchoverCondition,
+			Status: metav1.ConditionFalse,
+			Reason: "Aborted",
+			Message: fmt.Sprintf("moving the master role from %s to %s (%s) was aborted %d time(s) in a row, the last time because %s; the next try in %s",
+				masterPod, target.Name, req.reason, a.n, why, switchoverWait(a.n, req.urgent).Round(time.Second)),
+			ObservedGeneration: c.Generation,
+		})
 		r.event(c, corev1.EventTypeWarning, "SwitchoverAborted",
 			"did not move the master role from %s to %s (%s): %s; writes go on on %s, which stays the master",
 			masterPod, target.Name, req.reason, why, masterPod)
 		return "", fmt.Errorf("switchover from %s to %s aborted: %s", masterPod, target.Name, why)
+	}
+
+	reply, err := r.Agent.ExecWithin(ctx, pauseCallTimeout, oldIP, "CLIENT", "PAUSE", pauseMs, "WRITE")
+	switch {
+	case err == nil:
+	case reply != nil && pauseUnsupported(err):
+		// An engine without CLIENT PAUSE ... WRITE. Hand over without it,
+		// as earlier operators did, and say what that costs.
+		paused = false
+		r.event(c, corev1.EventTypeWarning, "SwitchoverWithoutPause",
+			"%s does not know CLIENT PAUSE ... WRITE (%v). Moving the master role to %s without holding writes; a write acknowledged by %s during the next moments can be lost. Upgrade the engine to make switchovers lossless.",
+			masterPod, err, target.Name, masterPod)
+	default:
+		// No answer -- an agent error or a timeout, which is also what an
+		// agent before 0.7.1 gives for a pause that waits out a write; the
+		// pause may have taken hold all the same, and is lifted -- or a
+		// refusal from an engine that pauses, but could not just then:
+		// since kividb 1.2.1, while a write in progress does not finish
+		// (kividbio/kividb#629); LOADING, BUSY. That engine took its pause
+		// back, and an UNPAUSE would lift someone else's. Handing over
+		// without the pause would promote the target before it caught up,
+		// and lose that write: try again later (#81).
+		if reply != nil {
+			paused = false
+		}
+		return abort(fmt.Sprintf("could not pause its writes: %v", err))
 	}
 
 	started := time.Now()
@@ -230,6 +315,7 @@ func (r *KividbClusterReconciler) switchover(ctx context.Context, c *kividbv1alp
 		return abort(fmt.Sprintf("pointing %s at %s: %v", masterPod, target.Name, err))
 	}
 	r.switchovers.Delete(switchoverKey(c))
+	removeCondition(&c.Status.Conditions, SwitchoverCondition)
 
 	// The target carries the label first: the master Service then always
 	// has an endpoint, and the one it gains already takes writes.

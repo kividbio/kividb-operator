@@ -66,9 +66,13 @@ type KividbClusterReconciler struct {
 	// pods ("<ns>/<cluster>/-1/<node ID>" -> time.Time), see orphanNodes.
 	orphans sync.Map
 
-	// switchovers: when the last replicated-mode switchover of a cluster
-	// ("<ns>/<cluster>" -> time.Time) was aborted, so the next one waits.
+	// switchovers: the aborted replicated-mode switchovers of a cluster
+	// ("<ns>/<cluster>" -> *switchoverAborts), so the next one waits.
 	switchovers sync.Map
+
+	// switchoverAsked: the clusters a switchover was asked for on the pass
+	// under way ("<ns>/<cluster>" -> struct{}), see reconcileRoleChanges.
+	switchoverAsked sync.Map
 
 	// rolloutWaits: what a cluster's rollout has been waiting for, and
 	// since when ("<ns>/<cluster>" -> *rolloutWait), see rollout_wait.go.
@@ -260,12 +264,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	r.reconcileAclReload(ctx, &c, podList.Items, aclContent, generations)
-	// One change of roles per pass: a pod is replaced only on a pass that
-	// did not just move the master role (statuses are from before it).
-	if r.reconcileHandover(ctx, &c, podList.Items, statuses, masterPod) == "" &&
-		r.reconcileAuthOverlap(ctx, &c, podList.Items, generations) {
-		r.reconcileRollout(ctx, &c, podList.Items, statuses, masterPod)
-	}
+	r.reconcileRoleChanges(ctx, &c, podList.Items, statuses, masterPod, generations)
 
 	r.notePersistence(&c, kdbConfig)
 	if statusErr := r.updateStatus(ctx, &c, statuses, masterPod, previousMasterPod, failoverHappened, err); statusErr != nil {

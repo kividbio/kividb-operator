@@ -203,6 +203,8 @@ func TestFailover_StopsWaitingForTheCatchUpWhenTheOldMasterIsGone(t *testing.T) 
 // reply does not come back -- it may have landed -- is sent again rather
 // than failing over unfenced.
 func TestFailover_SendsAnUnansweredPauseAgain(t *testing.T) {
+	defer func(d time.Duration) { pauseCallTimeout = d }(pauseCallTimeout)
+	pauseCallTimeout = fenceTimeout
 	h := newFenceHarness(t)
 	rec := h.recordEvents()
 	h.agents.pauseUnanswered = map[string]int{"10.0.0.1": 1}
@@ -216,11 +218,101 @@ func TestFailover_SendsAnUnansweredPauseAgain(t *testing.T) {
 	}
 }
 
+// Since kividb 1.2.1, CLIENT PAUSE refuses, and pauses nothing, when a write
+// in progress does not finish within 5 s (kividbio/kividb#629). That engine
+// pauses: it is asked again, not taken for one without the command (#81).
+func TestFailover_SendsAPauseThatCouldNotTakeHoldAgain(t *testing.T) {
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.pauseRefused = map[string]int{"10.0.0.1": 1}
+	h.assertFailoverTo("c1-1")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2")
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+	if h.storedFence() == nil {
+		t.Error("no status.fencedMaster: the failover went on unfenced")
+	}
+}
+
+// The engine waits out a write in progress before it answers the pause, up
+// to 5 s: once it has answered with its run, the pause is given longer than
+// that, not fenceTimeout -- a write a second long would have made the
+// failover go on unfenced against a live master (#81).
+func TestFailover_WaitsOutASlowPause(t *testing.T) {
+	defer func(d time.Duration) { pauseCallTimeout = d }(pauseCallTimeout)
+	pauseCallTimeout = 700 * time.Millisecond
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.r.Agent.http.Timeout = 300 * time.Millisecond // the usual per-call timeout, shorter
+	h.agents.pauseDelay = map[string]time.Duration{"10.0.0.1": 500 * time.Millisecond}
+	h.assertFailoverTo("c1-1")
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+	// The agent cuts an engine command at 5 s unless told otherwise. (The
+	// demotion's pause comes after it, with writes held: nothing to wait for.)
+	if got, want := h.agents.pauseTimeoutMs, agentWait(pauseCallTimeout).Milliseconds(); len(got) == 0 || got[0] != want {
+		t.Errorf("the fence's pause was sent with timeoutMs %v, want %d first", got, want)
+	}
+	if h.storedFence() == nil {
+		t.Error("no status.fencedMaster: the failover went on unfenced")
+	}
+}
+
+// A real refusal comes back only after the engine's wait for the writes in
+// progress, past fenceRetryTimeout: the window for trying again starts
+// after the first try, so that there is a second (#82).
+func TestFailover_SendsAPauseAgainAfterASlowRefusal(t *testing.T) {
+	defer func(r, p time.Duration) { fenceRetryTimeout, pauseCallTimeout = r, p }(fenceRetryTimeout, pauseCallTimeout)
+	fenceRetryTimeout, pauseCallTimeout = 300*time.Millisecond, time.Second
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.pauseRefused = map[string]int{"10.0.0.1": 1}
+	h.agents.pauseRefusedAfter = 500 * time.Millisecond
+	h.assertFailoverTo("c1-1")
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+	if h.storedFence() == nil {
+		t.Error("no status.fencedMaster: the failover went on unfenced")
+	}
+}
+
+// A try after the first is given the whole pause call too, not what is left
+// of the window: the engine may take its 5 s before it answers, and a pause
+// that lands after we gave up on it is left running with nothing to demote
+// the master (#82).
+func TestFailover_ARetryIsGivenTheWholePauseCall(t *testing.T) {
+	defer func(r, p time.Duration) { fenceRetryTimeout, pauseCallTimeout = r, p }(fenceRetryTimeout, pauseCallTimeout)
+	fenceRetryTimeout, pauseCallTimeout = 300*time.Millisecond, time.Second
+	h := newFenceHarness(t)
+	rec := h.recordEvents()
+	h.agents.pauseUnanswered = map[string]int{"10.0.0.1": 1}
+	h.agents.pauseDelay = map[string]time.Duration{"10.0.0.1": 500 * time.Millisecond}
+	h.assertFailoverTo("c1-1")
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("unexpected %v", e)
+	}
+}
+
+// An agent error on the pause (an agent before 0.7.1 cut it at 5 s) is sent
+// again, as no answer is.
+func TestFailover_SendsThePauseAgainAfterAnAgentError(t *testing.T) {
+	h := newFenceHarness(t)
+	h.agents.pauseHTTP500 = map[string]int{"10.0.0.1": 1}
+	h.assertFailoverTo("c1-1")
+	if h.storedFence() == nil {
+		t.Error("no status.fencedMaster: the failover went on unfenced")
+	}
+}
+
 // A pause never answered within fenceRetryTimeout: the failover goes on
 // unfenced, and says so.
 func TestFailover_UnfencedWhenThePauseIsNeverAnswered(t *testing.T) {
-	defer func(d time.Duration) { fenceRetryTimeout = d }(fenceRetryTimeout)
-	fenceRetryTimeout = 3 * fenceTimeout
+	defer func(d, p time.Duration) { fenceRetryTimeout, pauseCallTimeout = d, p }(fenceRetryTimeout, pauseCallTimeout)
+	// A try longer than the window, as shipped (7 s and 3 s).
+	fenceRetryTimeout, pauseCallTimeout = 300*time.Millisecond, 600*time.Millisecond
 	h := newFenceHarness(t)
 	rec := h.recordEvents()
 	h.agents.pauseUnanswered = map[string]int{"10.0.0.1": 1000}
@@ -228,6 +320,18 @@ func TestFailover_UnfencedWhenThePauseIsNeverAnswered(t *testing.T) {
 	h.assertFailoverTo("c1-1")
 	if took := time.Since(start); took < fenceRetryTimeout {
 		t.Errorf("the failover went on after %s, before fenceRetryTimeout (%s)", took, fenceRetryTimeout)
+	}
+	// Tries start for fenceRetryTimeout after the first, each given the
+	// whole pause call: at most two calls and the window -- and here the
+	// demotion's pause, unanswered too, one more call.
+	if took, most := time.Since(start), 3*pauseCallTimeout+fenceRetryTimeout+150*time.Millisecond; took > most {
+		t.Errorf("the failover took %s, more than three calls and the retry window (%s)", took, most)
+	}
+	// None was answered, so any of them may have landed once its write
+	// finished: the old master is recorded, and demoted as a fenced one,
+	// rather than wake up a master when the pause runs out (#82).
+	if h.storedFence() == nil {
+		t.Error("no status.fencedMaster: a pause that may have landed is left to run out")
 	}
 	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 {
 		t.Errorf("events %v, want one FailoverUnfenced", e)
