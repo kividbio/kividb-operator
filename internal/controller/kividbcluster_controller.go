@@ -97,6 +97,10 @@ type KividbClusterReconciler struct {
 	// reconcileServiceMonitor.
 	serviceMonitorWarned sync.Map
 
+	// serviceMonitorGone: the clusters, with serviceMonitor off, found to
+	// have no ServiceMonitor of their own ("<ns>/<cluster>" -> struct{}).
+	serviceMonitorGone sync.Map
+
 	// clock is time.Now, unless a test sets it.
 	clock func() time.Time
 }
@@ -132,6 +136,9 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	var c kividbv1alpha1.KividbCluster
 	if err := r.Get(ctx, req.NamespacedName, &c); err != nil {
 		if apierrors.IsNotFound(err) {
+			// A cluster made again under this name is told again.
+			r.serviceMonitorWarned.Delete(req.String())
+			r.serviceMonitorGone.Delete(req.String())
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err

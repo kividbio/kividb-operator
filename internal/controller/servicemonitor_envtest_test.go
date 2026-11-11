@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -59,10 +60,14 @@ func TestServiceMonitorEnvtest(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	skipNameValidation := true
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
+		// Every envtest test registers the kividbcluster controller in this
+		// one process; controller-runtime refuses a name twice otherwise.
+		Controller: config.Controller{SkipNameValidation: &skipNameValidation},
 	})
 	if err != nil {
 		t.Fatal(err)

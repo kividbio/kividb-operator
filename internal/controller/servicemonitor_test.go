@@ -360,3 +360,84 @@ func TestServiceMonitorRestored(t *testing.T) {
 		t.Fatalf("spec = %v, want it restored to %v", got, want)
 	}
 }
+
+// countingClient counts the reads of ServiceMonitors.
+type countingClient struct {
+	client.Client
+	gets *int
+}
+
+func (c *countingClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if u, ok := obj.(*unstructured.Unstructured); ok && u.GroupVersionKind() == serviceMonitorGVK {
+		*c.gets++
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// With the CRD installed, a cluster that does not ask for a ServiceMonitor
+// looks for one of its own once, not on every pass; asking for one and then
+// not again looks once more, and deletes it.
+func TestServiceMonitorOffLooksOnce(t *testing.T) {
+	t.Parallel()
+	c := smCluster(false, false)
+	r := smReconciler(t, true, c)
+	gets := 0
+	r.Client = &countingClient{Client: r.Client, gets: &gets}
+	ctx := context.Background()
+	for range 3 {
+		if err := r.reconcileServiceMonitor(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gets != 1 {
+		t.Fatalf("3 passes with serviceMonitor off: %d reads, want 1", gets)
+	}
+
+	c.Spec.Monitoring.ServiceMonitor = true
+	if err := r.reconcileServiceMonitor(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	c.Spec.Monitoring.ServiceMonitor = false
+	gets = 0
+	for range 3 {
+		if err := r.reconcileServiceMonitor(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gets != 1 {
+		t.Fatalf("3 passes after turning it off: %d reads, want 1", gets)
+	}
+	if getServiceMonitor(t, r, c) != nil {
+		t.Fatal("turned off: the ServiceMonitor is still there")
+	}
+}
+
+// A CRD removed while the operator runs: the create fails with NotFound,
+// and the kind is looked up again only after serviceMonitorRecheck.
+func TestServiceMonitorCRDRemoved(t *testing.T) {
+	t.Parallel()
+	c := smCluster(true, false)
+	now := time.Unix(1000, 0)
+	r := smReconciler(t, true, c)
+	r.clock = func() time.Time { return now }
+	r.Client = &notFoundClient{Client: r.Client}
+	err := r.reconcileServiceMonitor(context.Background(), c)
+	if err == nil || !strings.Contains(err.Error(), "CRD removed") {
+		t.Fatalf("error = %v, want one asking whether the CRD was removed", err)
+	}
+	if until, _ := r.serviceMonitorUnserved.Load().(time.Time); !until.Equal(now.Add(serviceMonitorRecheck)) {
+		t.Fatalf("not served until %v, want %v", until, now.Add(serviceMonitorRecheck))
+	}
+}
+
+// notFoundClient answers every ServiceMonitor request with NotFound, as an
+// API server does for a resource whose CRD was deleted.
+type notFoundClient struct{ client.Client }
+
+func (c *notFoundClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	return apierrors.NewNotFound(schema.GroupResource{Group: "monitoring.coreos.com", Resource: "servicemonitors"}, key.Name)
+}
+
+func (c *notFoundClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	return apierrors.NewNotFound(schema.GroupResource{Group: "monitoring.coreos.com", Resource: "servicemonitors"}, obj.GetName())
+}

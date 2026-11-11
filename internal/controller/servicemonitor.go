@@ -76,6 +76,9 @@ func (r *KividbClusterReconciler) serviceMonitorServed() (bool, error) {
 // ServiceMonitor of that name the cluster does not own is left alone: it
 // is refused when the cluster wants one, and kept when it does not.
 //
+// With serviceMonitor off it looks for the cluster's ServiceMonitor once,
+// not on every pass.
+//
 // Without the Prometheus Operator's CRD there is nothing to make: a
 // cluster that asks for one gets a Warning Event, once, and nothing else
 // of the cluster is held back for it.
@@ -98,22 +101,31 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 		return nil
 	}
 	r.serviceMonitorWarned.Delete(key)
+	if !want {
+		if _, gone := r.serviceMonitorGone.Load(key); gone {
+			return nil
+		}
+	} else {
+		r.serviceMonitorGone.Delete(key)
+	}
 
 	sm := &unstructured.Unstructured{}
 	sm.SetGroupVersionKind(serviceMonitorGVK)
 	sm.SetNamespace(c.Namespace)
 	sm.SetName(c.Name)
 	if !want {
+		// Looked for once per cluster: after that, a ServiceMonitor of
+		// the cluster exists only if it asks for one again.
 		err := r.Get(ctx, client.ObjectKeyFromObject(sm), sm)
-		if apierrors.IsNotFound(err) || (err == nil && !metav1.IsControlledBy(sm, c)) {
-			return nil
-		}
-		if err != nil {
+		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("reading ServiceMonitor %s: %w", c.Name, err)
 		}
-		if err := r.Delete(ctx, sm); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("deleting ServiceMonitor %s: %w", c.Name, err)
+		if err == nil && metav1.IsControlledBy(sm, c) {
+			if err := r.Delete(ctx, sm); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("deleting ServiceMonitor %s: %w", c.Name, err)
+			}
 		}
+		r.serviceMonitorGone.Store(key, struct{}{})
 		return nil
 	}
 
@@ -139,6 +151,8 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 	})
 	if apierrors.IsNotFound(err) {
 		// The kind was served when last looked up; its CRD has since gone.
+		// Look it up again after serviceMonitorRecheck.
+		r.serviceMonitorUnserved.Store(r.now().Add(serviceMonitorRecheck))
 		return fmt.Errorf("ServiceMonitor %s: %w (was the servicemonitors.monitoring.coreos.com CRD removed?)", c.Name, err)
 	}
 	if err != nil {

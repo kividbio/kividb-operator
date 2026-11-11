@@ -345,7 +345,8 @@ gates the heavier, richer exporter.
 
 `serviceMonitor: true` makes a `ServiceMonitor` named after the cluster,
 in its namespace and owned by it. It scrapes `/metrics` on the agent port
-of every pod and, with `enabled: true`, on `redis-exporter`'s port too,
+of every pod (the agent's metrics are always there) and, with
+`enabled: true`, on `redis-exporter`'s port too,
 through the cluster's headless Service (one per shard in a sharded
 cluster). Setting it back to `false` deletes it. The operator sets the
 selector, the endpoints and its own labels; labels and other fields you
