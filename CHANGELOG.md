@@ -21,6 +21,14 @@ master's writes (`FailoverUnfenced` Warning).
 
 ### Fixed
 
+- **`spec.monitoring.serviceMonitor` created nothing** (#62). The operator now
+  makes a ServiceMonitor named after the cluster, in its namespace, for its
+  headless Service(s): the agent's `/metrics`, and `redis-exporter`'s with
+  `spec.monitoring.enabled`. Turning it off deletes it. Without the
+  Prometheus Operator CRDs, the Ready condition says so and nothing else is
+  skipped. The manager's ClusterRole gains `servicemonitors`. See
+  `docs/CONFIGURATION.md` for Prometheus' selector and the chart's
+  `metrics.serviceMonitor`.
 - **A switchover no longer hands over without holding writes when the pause
   could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),
   `CLIENT PAUSE ... WRITE` waits up to 5 s for the writes already in progress

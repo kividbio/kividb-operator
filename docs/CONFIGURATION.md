@@ -343,11 +343,24 @@ agent sidecar's own lightweight `/metrics` on port 8081 (derived from
 `INFO`) is always available regardless of this setting — `enabled` only
 gates the heavier, richer exporter.
 
-`serviceMonitor: true` requires the `monitoring.coreos.com` CRDs
-(Prometheus Operator) to already be installed in the cluster. The
-generated `ServiceMonitor` (one per operator install, cluster-wide, not
-per-`KividbCluster`) scrapes both the agent's `/metrics` and, where
-present, `redis-exporter`'s `/metrics`.
+`serviceMonitor: true` makes a `ServiceMonitor` named after the cluster,
+in its namespace and owned by it. It scrapes `/metrics` on the agent port
+of every pod and, with `enabled: true`, on `redis-exporter`'s port too,
+through the cluster's headless Service (one per shard in a sharded
+cluster). Setting it back to `false` deletes it. It needs the
+`monitoring.coreos.com` CRDs (Prometheus Operator): without them the
+Ready condition says so and the rest of the cluster is reconciled as
+usual. A `ServiceMonitor` of the same name the cluster does not own is
+never changed or deleted; the cluster reports it instead.
+
+Prometheus picks up a `ServiceMonitor` only if its `serviceMonitorSelector`
+and `serviceMonitorNamespaceSelector` match it. The operator copies no
+labels for that; with kube-prometheus-stack's defaults, set
+`prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false`.
+
+The chart's `metrics.serviceMonitor.enabled` is the other way: one
+`ServiceMonitor` in the operator's namespace for every cluster. Use one
+or the other; with both, each pod is scraped twice.
 
 ### `failover`
 

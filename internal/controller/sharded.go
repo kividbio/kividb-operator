@@ -462,6 +462,8 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	if snapCfg != nil {
 		steps.run("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, c, snapCfg.Name) })
 	}
+	// Last: a missing Prometheus Operator CRD skips nothing else.
+	steps.run("", func() error { return r.reconcileServiceMonitor(ctx, c) })
 	applyErr := steps.err
 	if applyErr != nil && held == nil {
 		log.Error(applyErr, "applying the cluster's objects failed")

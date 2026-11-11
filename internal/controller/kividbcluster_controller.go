@@ -113,6 +113,7 @@ func (r *KividbClusterReconciler) agentToken() string {
 //+kubebuilder:rbac:groups="",resources=services;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;create;update;patch;delete
 
 // Reconcile implements the main control loop for a single KividbCluster.
 func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -221,6 +222,8 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if snapCfg != nil {
 		steps.run("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, &c, snapCfg.Name) })
 	}
+	// Last: a missing Prometheus Operator CRD skips nothing else.
+	steps.run("", func() error { return r.reconcileServiceMonitor(ctx, &c) })
 	applyErr := steps.err
 	if applyErr != nil {
 		r.warnOnChange(&c, "ReconcileError", applyErr)
