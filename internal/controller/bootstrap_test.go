@@ -66,6 +66,63 @@ func TestBootstrapFromAShardedBackupIsRefused(t *testing.T) {
 	}
 }
 
+// A refused bootstrap ends the pass before updateStatus, so the phase
+// stayed empty, and the Bootstrapped condition said RestoreFailed though no
+// restore ran (#51). Once the spec names a usable snapshot, the restore
+// runs and the refusal is no longer reported.
+func TestARefusedBootstrapShowsInThePhaseUntilFixed(t *testing.T) {
+	ctx := context.Background()
+	c, objs := bootstrapFixture("refused")
+	sharded := &kividbv1alpha1.KividbSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "shd-backup-now", Namespace: "default"},
+		Spec:       kividbv1alpha1.KividbSnapshotSpec{SnapshotConfigRef: corev1.LocalObjectReference{Name: "s3"}},
+		Status: kividbv1alpha1.KividbSnapshotStatus{
+			Phase:     kividbv1alpha1.SnapshotSucceeded,
+			ObjectKey: "e2e/shd/20261031T065615Z/manifest.json",
+			Shards:    []kividbv1alpha1.SnapshotShardStatus{{Index: 0}, {Index: 1}},
+		},
+	}
+	c.Spec.BootstrapFromSnapshot.SnapshotRef.Name = sharded.Name
+	r := shardedReconciler(t, append(objs, c, sharded)...)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)}
+	get := func() *kividbv1alpha1.KividbCluster {
+		t.Helper()
+		var got kividbv1alpha1.KividbCluster
+		if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+			t.Fatal(err)
+		}
+		return &got
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	got := get()
+	cond := findCondition(got.Status.Conditions, BootstrapCondition)
+	if got.Status.Phase != kividbv1alpha1.PhaseError || cond == nil || cond.Reason != "Refused" || !strings.Contains(cond.Message, "sharded cluster's backup") {
+		t.Fatalf("phase %q, Bootstrapped condition %+v; want Error, and Refused saying why", got.Status.Phase, cond)
+	}
+
+	// The spec now names a replicated cluster's backup.
+	got.Spec.BootstrapFromSnapshot.SnapshotRef.Name = "old-backup"
+	if err := r.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	got = get()
+	if b := got.Status.Bootstrap; b == nil || b.Phase != kividbv1alpha1.BootstrapInProgress || b.Error != "" {
+		t.Fatalf("bootstrap status %+v; want the restore in progress, with no error", b)
+	}
+	cond = findCondition(got.Status.Conditions, BootstrapCondition)
+	if got.Status.Phase != kividbv1alpha1.PhaseProvisioning || cond == nil || cond.Reason != "Restoring" {
+		t.Fatalf("phase %q, Bootstrapped condition %+v; want Provisioning, and Restoring", got.Status.Phase, cond)
+	}
+}
+
 // bootstrapFixture is a cluster asking to be bootstrapped from a
 // replicated cluster's Succeeded snapshot, and the objects it needs.
 func bootstrapFixture(name string) (*kividbv1alpha1.KividbCluster, []client.Object) {
