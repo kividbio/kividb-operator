@@ -284,6 +284,10 @@ spec:
                     unhealthyThresholdSeconds:
                       type: integer
                       format: int32
+                    restartWaitSeconds:
+                      type: integer
+                      format: int32
+                      minimum: 0
             status:
               type: object
               properties:

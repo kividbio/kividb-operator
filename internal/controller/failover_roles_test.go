@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +36,10 @@ import (
 // applies /promote and /replicaof to its own state the way kividb would,
 // so a test can run several reconcile passes and watch them converge.
 type fakeAgents struct {
+	// mu: requests may come in at once (the failover asks every replica
+	// for ROLE together); a request that waits releases it meanwhile.
+	mu sync.Mutex
+
 	status map[string]*agentapi.StatusResponse
 	calls  []string
 
@@ -89,6 +94,37 @@ type fakeAgents struct {
 	// replica after it had.
 	pausedUntil map[string]time.Time
 	pauseRanOut map[string]bool
+	// liveOffset: the offset a replica's ROLE reports, past the one its
+	// /status gave (it went on receiving since).
+	liveOffset map[string]int64
+	// roleUnanswered: ROLE on these addresses gets no reply before the
+	// request's context ends (a slow or stuck engine).
+	roleUnanswered map[string]bool
+	// roleFails: the next this many ROLEs on an address fail at once.
+	roleFails map[string]int
+	// roleDelay: ROLE on an address answers this late, unless the request
+	// ends first.
+	roleDelay map[string]time.Duration
+}
+
+// waitDone waits, with the lock released, for ctx to end.
+func (f *fakeAgents) waitDone(ctx context.Context) error {
+	f.mu.Unlock()
+	defer f.mu.Lock()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// sleep waits d, with the lock released, unless ctx ends first.
+func (f *fakeAgents) sleep(ctx context.Context, d time.Duration) error {
+	f.mu.Unlock()
+	defer f.mu.Lock()
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // pauseDidNotTakeHold is what CLIENT PAUSE answers, since kividb 1.2.1, when
@@ -111,6 +147,9 @@ func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []st
 			}}
 		}
 		offset := st.ReplicationOffset
+		if o, ok := f.liveOffset[ip]; ok {
+			offset = o
+		}
 		if m := f.byIP(st.MasterHost); m != nil {
 			switch n := f.catchUp[ip]; {
 			case n == 0:
@@ -183,9 +222,10 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.hang[ip] {
-		<-req.Context().Done()
-		return nil, req.Context().Err()
+		return nil, f.waitDone(req.Context())
 	}
 	st, ok := f.status[ip]
 	if !ok {
@@ -242,11 +282,24 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
 			}
 		}
+		if strings.EqualFold(strings.Join(r.Args, " "), "ROLE") {
+			if f.roleUnanswered[ip] {
+				return nil, f.waitDone(req.Context())
+			}
+			if f.roleFails[ip] > 0 {
+				f.roleFails[ip]--
+				return nil, fmt.Errorf("dial %s: connection refused", ip)
+			}
+			if d := f.roleDelay[ip]; d > 0 {
+				if err := f.sleep(req.Context(), d); err != nil {
+					return nil, err
+				}
+			}
+		}
 		body = f.execReply(ip, st, r.Args)
 		if strings.EqualFold(strings.Join(r.Args, " "), "INFO server") && f.infoUnanswered[ip] > 0 {
 			f.infoUnanswered[ip]--
-			<-req.Context().Done()
-			return nil, req.Context().Err()
+			return nil, f.waitDone(req.Context())
 		}
 		if strings.HasPrefix(strings.ToUpper(strings.Join(r.Args, " ")), "CLIENT PAUSE") {
 			if f.goneAfterPause[ip] {
@@ -254,21 +307,16 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			if f.pauseUnanswered[ip] > 0 {
 				f.pauseUnanswered[ip]--
-				<-req.Context().Done()
-				return nil, req.Context().Err()
+				return nil, f.waitDone(req.Context())
 			}
 			if reply, ok := body.(agentapi.ExecResponse); ok && reply.Str == pauseDidNotTakeHold && f.pauseRefusedAfter > 0 {
-				select {
-				case <-time.After(f.pauseRefusedAfter):
-				case <-req.Context().Done():
-					return nil, req.Context().Err()
+				if err := f.sleep(req.Context(), f.pauseRefusedAfter); err != nil {
+					return nil, err
 				}
 			}
 			if delay := f.pauseDelay[ip]; delay > 0 {
-				select {
-				case <-time.After(delay):
-				case <-req.Context().Done():
-					return nil, req.Context().Err()
+				if err := f.sleep(req.Context(), delay); err != nil {
+					return nil, err
 				}
 			}
 		}
@@ -284,6 +332,11 @@ type testPod struct {
 	agent           *agentapi.StatusResponse // nil: agent unreachable
 	uid             types.UID
 	restarts        int32 // of the kividb container
+	// pending: just created, with no Ready condition yet; unschedulable:
+	// no node will take it.
+	pending, unschedulable bool
+	// createdAgo: when the pod object was made, if not left out.
+	createdAgo time.Duration
 }
 
 // object is p's pod object, in cluster c.
@@ -297,9 +350,21 @@ func (p testPod) object(c *kividbv1alpha1.KividbCluster) *corev1.Pod {
 		cond.Status = corev1.ConditionFalse
 		cond.LastTransitionTime = metav1.NewTime(time.Now().Add(-p.unreadyFor))
 	}
+	conds := []corev1.PodCondition{cond}
+	switch {
+	case p.unschedulable:
+		conds = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+			Message: "0/3 nodes are available: 1 node(s) had volume node affinity conflict, 2 node(s) had untolerated taint {node.kubernetes.io/not-ready: }"}}
+	case p.pending:
+		conds = nil
+	}
+	var created metav1.Time
+	if p.createdAgo > 0 {
+		created = metav1.NewTime(time.Now().Add(-p.createdAgo))
+	}
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: p.name, Namespace: c.Namespace, Labels: labels, UID: p.uid},
-		Status: corev1.PodStatus{PodIP: p.ip, Conditions: []corev1.PodCondition{cond},
+		ObjectMeta: metav1.ObjectMeta{Name: p.name, Namespace: c.Namespace, Labels: labels, UID: p.uid, CreationTimestamp: created},
+		Status: corev1.PodStatus{PodIP: p.ip, Conditions: conds,
 			ContainerStatuses: []corev1.ContainerStatus{{Name: kividbContainerName, RestartCount: p.restarts}}},
 	}
 }

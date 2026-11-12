@@ -83,6 +83,14 @@ type KividbClusterReconciler struct {
 	// demoteFencedMaster.
 	fencedRetries sync.Map
 
+	// restartWaits: the failovers waiting for their master to come back on
+	// its volume ("<ns>/<cluster>" -> *restartWaiting), see restart_wait.go.
+	restartWaits sync.Map
+
+	// failoverHolds: the failovers held back for a replica that did not say
+	// what it holds ("<ns>/<cluster>" -> *failoverHold), see reconcileRoles.
+	failoverHolds sync.Map
+
 	// notSynced: why each replica of a replicated-mode cluster was not in
 	// sync on the last pass ("<ns>/<cluster>" -> map[pod]reason).
 	notSynced sync.Map
@@ -253,7 +261,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	statuses, masterPod, failoverHappened, err := r.reconcileRoles(ctx, &c, podList.Items)
 	if err != nil {
-		log.Error(err, "role reconciliation failed")
+		logRoles(ctx, err)
 		// Fall through to still persist a status update reflecting the
 		// error so it is visible via `kubectl get kividbcluster`, but keep
 		// requeuing quickly to retry.
@@ -384,7 +392,7 @@ func (r *KividbClusterReconciler) reconcileHeld(ctx context.Context, c *kividbv1
 	previousMasterPod := c.Status.MasterPod
 	statuses, masterPod, failoverHappened, err := r.reconcileRoles(ctx, c, podList.Items)
 	if err != nil {
-		log.Error(err, "role reconciliation failed")
+		logRoles(ctx, err)
 	}
 	r.reconcileHandover(ctx, c, podList.Items, statuses, masterPod)
 	if statusErr := r.updateStatus(ctx, c, statuses, masterPod, previousMasterPod, failoverHappened, errors.Join(held, err)); statusErr != nil {

@@ -103,18 +103,6 @@ func replicaSynced(master, replica *agentapi.StatusResponse, masterIP string, po
 	return diff <= slack
 }
 
-// reconcileHandover moves the master role when something asks for it:
-//
-//   - the master pod is being deleted -- by hand, by a node drain or an
-//     eviction. Its preStop hook holds the engine (see the agent's
-//     /prestop) while the role moves, so it is stopped as a replica rather
-//     than as the master;
-//   - a StepDownAnnotation on the master's pod (a KividbDbOps restart);
-//   - the SwitchoverToAnnotation on the cluster (the GUI's promote action).
-//
-// Each is a lossless switchover (see switchover.go). It returns the new
-// master's name when the role moved on this pass, and removes the requests
-// that are fulfilled, or that name a pod that does not exist.
 // reconcileRoleChanges moves the master role, or replaces a pod, one change
 // of roles per pass: a pod is replaced only on a pass that did not just
 // move the master role (statuses are from before it). When neither a
@@ -134,6 +122,18 @@ func (r *KividbClusterReconciler) reconcileRoleChanges(ctx context.Context, c *k
 	}
 }
 
+// reconcileHandover moves the master role when something asks for it:
+//
+//   - the master pod is being deleted -- by hand, by a node drain or an
+//     eviction. Its preStop hook holds the engine (see the agent's
+//     /prestop) while the role moves, so it is stopped as a replica rather
+//     than as the master;
+//   - a StepDownAnnotation on the master's pod (a KividbDbOps restart);
+//   - the SwitchoverToAnnotation on the cluster (the GUI's promote action).
+//
+// Each is a lossless switchover (see switchover.go). It returns the new
+// master's name when the role moved on this pass, and removes the requests
+// that are fulfilled, or that name a pod that does not exist.
 func (r *KividbClusterReconciler) reconcileHandover(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []corev1.Pod, statuses []kividbv1alpha1.KividbPodStatus, masterPod string) string {
 	log := logf.FromContext(ctx)
 	var master *corev1.Pod

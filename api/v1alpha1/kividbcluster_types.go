@@ -188,6 +188,17 @@ type FailoverSpec struct {
 	// before the operator promotes a replica. Defaults to 30.
 	// +optional
 	UnhealthyThresholdSeconds *int32 `json:"unhealthyThresholdSeconds,omitempty"`
+
+	// RestartWaitSeconds is how long, at most, a failover waits for a
+	// master whose pod is gone or replaced, and whose engine no longer
+	// answers, to come back on its volume -- it may hold writes its
+	// replicas do not -- before promoting one of them: counted from when it
+	// was found gone, whether its pod comes back or not. Not when its
+	// replacement pod cannot be scheduled. 0 turns the wait off. Defaults
+	// to 15.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	RestartWaitSeconds *int32 `json:"restartWaitSeconds,omitempty"`
 }
 
 // ClusterModeSpec tunes kividb's cluster mode, for a KividbCluster with
@@ -419,6 +430,15 @@ type BootstrapPhase string
 // was last seen holding data. Without it the operator waits for the
 // master to come back instead; see reconcileRoles.
 const AllowEmptyFailoverAnnotation = "kividb.io/allow-empty-failover"
+
+// AllowUnreadFailoverAnnotation, set to "true" on a KividbCluster, lets a
+// failover go ahead without the replicas that did not say how much they
+// hold: the replica promoted is the one that holds the most of those that
+// did, and writes only the others hold are lost. Without it the failover
+// waits for them (FailoverBlocked); see reconcileRoles. The operator removes
+// it once a failover has gone through, so it never skips the hold on a
+// later one.
+const AllowUnreadFailoverAnnotation = "kividb.io/allow-unread-failover"
 
 // ShardPromoteAnnotation records, on a sharded KividbCluster, the last
 // replica someone asked to take over its shard outside the operator (the
