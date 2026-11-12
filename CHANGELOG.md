@@ -21,6 +21,11 @@ master's writes (`FailoverUnfenced` Warning).
 
 ### Fixed
 
+- **The docs counted five CRDs and left `kividbdbops` out (#87),** so the
+  uninstall step in `docs/INSTALL.md` left that CRD, and every
+  `KividbDbOps`, behind. INSTALL, CONFIGURATION, ARCHITECTURE,
+  TROUBLESHOOTING and ROADMAP now name six, and `docs/CONFIGURATION.md`
+  has a `KividbDbOps` section.
 - **`docs/INSTALL.md`'s install without kustomize exited 1 (#67).**
   `kubectl apply -f config/rbac/` applied the RBAC and then failed on
   `config/rbac/kustomization.yaml`, and on a new cluster the namespace did

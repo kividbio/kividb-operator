@@ -1,6 +1,6 @@
 # Field reference
 
-Group/version: `kividb.io/v1alpha1`. Five kinds, all namespaced:
+Group/version: `kividb.io/v1alpha1`. Six kinds, all namespaced:
 
 | Kind | Short name | Purpose |
 |---|---|---|
@@ -9,6 +9,7 @@ Group/version: `kividb.io/v1alpha1`. Five kinds, all namespaced:
 | [`KividbAclConfig`](#kividbaclconfig) | `kdbacl` | Reusable ACL users / `requirepass`. |
 | [`KividbSnapshotConfig`](#kividbsnapshotconfig) | `kdbsc` | Reusable backup schedule, S3 destination, and retention policy. |
 | [`KividbSnapshot`](#kividbsnapshot-read-only) | `kdbs` | Operator-created record of one backup run. Read-only. |
+| [`KividbDbOps`](#kividbdbops) | `kdbops` | One operation on a cluster: a rolling restart. |
 
 This split mirrors StackGres's `SGCluster` / `SGPostgresConfig` /
 `SGObjectStorage` model: configuration, ACLs, and backup destinations are
@@ -1128,3 +1129,38 @@ it) — the operator populates it by reading the backup Job's termination
 message, not by scraping logs, so it's available even if you're not
 collecting pod logs anywhere. See [ARCHITECTURE.md](ARCHITECTURE.md) for
 how that plumbing works.
+
+## KividbDbOps
+
+```yaml
+apiVersion: kividb.io/v1alpha1
+kind: KividbDbOps
+metadata:
+  name: my-cluster-restart
+spec:
+  clusterRef:
+    name: my-cluster
+  op: restart            # the only op
+  restart:
+    method: InPlace      # the only method, and the default
+status:
+  phase: Running         # Pending | Running | Completed | Failed
+  restart:
+    completedPods: [my-cluster-2]
+    currentPod: my-cluster-1
+    pendingPods: [my-cluster-0]
+```
+
+A rolling restart of every pod of the cluster in the same namespace, one
+at a time; a master hands its role over before it is restarted. The
+restarts of one cluster run one at a time, oldest first, and the others
+stay `Pending` (condition `Queued`). An op that has finished, `Completed`
+or `Failed`, is not run again: to restart again, create a new one
+([sample](../config/samples/kividb.io_v1alpha1_kividbdbops_restart.yaml)).
+The waits and why a restart fails are in
+[Sharded clusters](#sharded-clusters-shards) and
+[Switchovers](#switchovers-and-stopping-a-master). `kubectl get kdbops`
+shows each op's cluster and phase.
+
+`spec.maxRetries` and `spec.restart.onlyPendingRestart` are in the CRD
+but the operator does not act on them yet.

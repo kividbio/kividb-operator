@@ -334,8 +334,9 @@ kubectl logs -n kividb-operator-system deploy/kividb-operator-manager
   (`config/rbac/leader_election_role.yaml`) is bound in the same
   namespace the operator runs in.
 - `no matches for kind "KividbCluster"` (or `KividbConfig`/
-  `KividbAclConfig`/`KividbSnapshotConfig`/`KividbSnapshot`) — that CRD
-  isn't installed; run `kubectl apply -k config/crd` (installs all five)
+  `KividbAclConfig`/`KividbSnapshotConfig`/`KividbSnapshot`/`KividbDbOps`)
+  — that CRD isn't installed; run `kubectl apply -k config/crd` (installs
+  all six)
   or reinstall/upgrade the Helm chart (CRDs in
   `charts/kividb-operator/crds/` are installed once by Helm and are
   **not** upgraded automatically on `helm upgrade` — see

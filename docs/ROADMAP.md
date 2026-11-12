@@ -147,8 +147,9 @@ Semver 1.0.0 is a deliberate milestone, not just "whatever's next after
 
 1. Real automated test coverage exists (see 0.2.0 above) -- 1.0.0 without
    this would just be a version number, not a signal.
-2. The CRD API (five kinds now: `KividbCluster`, `KividbConfig`,
-   `KividbAclConfig`, `KividbSnapshotConfig`, `KividbSnapshot`) has held
+2. The CRD API (six kinds now: `KividbCluster`, `KividbConfig`,
+   `KividbAclConfig`, `KividbSnapshotConfig`, `KividbSnapshot`,
+   `KividbDbOps`) has held
    stable across at least one full 0.x release without a breaking field
    change. It changed twice in one day during initial development
    (0.1.0's original design, then this multi-CRD split) -- that pace needs

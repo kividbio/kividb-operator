@@ -43,9 +43,10 @@ Verify:
 ```bash
 kubectl get pods -n kividb-operator-system
 kubectl get crds -l app.kubernetes.io/name=kividb-operator
-# or explicitly, all five kinds:
+# or explicitly, all six kinds:
 kubectl get crd kividbclusters.kividb.io kividbconfigs.kividb.io \
-  kividbaclconfigs.kividb.io kividbsnapshotconfigs.kividb.io kividbsnapshots.kividb.io
+  kividbaclconfigs.kividb.io kividbsnapshotconfigs.kividb.io kividbsnapshots.kividb.io \
+  kividbdbops.kividb.io
 ```
 
 ### Upgrading
@@ -77,16 +78,17 @@ restart the operator Deployment to enable it.
 helm uninstall kividb-operator -n kividb-operator-system
 ```
 
-This does **not** delete any of the five CRDs (Helm's `crds/` convention
+This does **not** delete any of the six CRDs (Helm's `crds/` convention
 again) or any `KividbCluster`/`KividbConfig`/`KividbAclConfig`/
-`KividbSnapshotConfig`/`KividbSnapshot` objects/their
+`KividbSnapshotConfig`/`KividbSnapshot`/`KividbDbOps` objects/their
 StatefulSets/PVCs — the operator simply stops reconciling them. To remove
 everything, including all data:
 
 ```bash
 kubectl delete kividbcluster --all -A     # deletes every managed StatefulSet/Service/etc. via ownerReferences
 kubectl delete crd kividbclusters.kividb.io kividbconfigs.kividb.io \
-  kividbaclconfigs.kividb.io kividbsnapshotconfigs.kividb.io kividbsnapshots.kividb.io
+  kividbaclconfigs.kividb.io kividbsnapshotconfigs.kividb.io kividbsnapshots.kividb.io \
+  kividbdbops.kividb.io
 ```
 
 **`kubectl delete crd` deletes every object of that kind across every
