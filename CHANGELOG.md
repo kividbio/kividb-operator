@@ -29,7 +29,7 @@ master's writes (`FailoverUnfenced` Warning).
   kustomize and OLM output is unchanged. A Deployment made from the
   plain-YAML install before this has the old selector: delete it once
   (`kubectl delete deploy -n kividb-operator-system kividb-operator-manager`)
-  before applying `config/manager/manager.yaml` again.
+  before applying the new manifests, plain or `-k`.
 - **`docs/INSTALL.md`'s install without kustomize exited 1 (#67).**
   `kubectl apply -f config/rbac/` applied the RBAC and then failed on
   `config/rbac/kustomization.yaml`, and on a new cluster the namespace did
