@@ -21,6 +21,11 @@ master's writes (`FailoverUnfenced` Warning).
 
 ### Fixed
 
+- **The README quickstart commands used `kividb-sample`, but the minimal
+  sample creates `kividb-minimal`.** The `kubectl get pods -l` and
+  `kubectl port-forward` commands now use `kividb-minimal`, so they work as
+  written.
+
 - **A switchover no longer hands over without holding writes when the pause
   could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),
   `CLIENT PAUSE ... WRITE` waits up to 5 s for the writes already in progress
