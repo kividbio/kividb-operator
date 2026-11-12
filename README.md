@@ -11,8 +11,9 @@
 A Kubernetes operator for [kividb](https://kividb.io), a
 Redis-RESP-compatible in-memory store written in Rust. It manages a
 `KividbCluster` custom resource describing a single-master, N-replica
-kividb cluster — plus four companion CRDs
-(`KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig`/`KividbSnapshot`,
+kividb cluster — plus five companion CRDs
+(`KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig`/`KividbSnapshot`/
+`KividbDbOps`,
 see [Custom resources](#custom-resources) below) — and handles:
 
 - **Automatic failover** — an unhealthy master is detected and replaced by
@@ -52,6 +53,7 @@ same shape as StackGres's `SGPostgresConfig`/`SGObjectStorage` split:
 | `KividbAclConfig` | `kdbacl` | Reusable ACL users / `requirepass`. |
 | `KividbSnapshotConfig` | `kdbsc` | Reusable backup schedule, S3 destination, retention. |
 | `KividbSnapshot` | `kdbs` | Operator-created record of one backup run (read-only). |
+| `KividbDbOps` | `kdbops` | One operation on a cluster: a rolling restart. |
 
 Full field reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 

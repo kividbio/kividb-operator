@@ -1,6 +1,6 @@
 # Field reference
 
-Group/version: `kividb.io/v1alpha1`. Five kinds, all namespaced:
+Group/version: `kividb.io/v1alpha1`. Six kinds, all namespaced:
 
 | Kind | Short name | Purpose |
 |---|---|---|
@@ -9,6 +9,7 @@ Group/version: `kividb.io/v1alpha1`. Five kinds, all namespaced:
 | [`KividbAclConfig`](#kividbaclconfig) | `kdbacl` | Reusable ACL users / `requirepass`. |
 | [`KividbSnapshotConfig`](#kividbsnapshotconfig) | `kdbsc` | Reusable backup schedule, S3 destination, and retention policy. |
 | [`KividbSnapshot`](#kividbsnapshot-read-only) | `kdbs` | Operator-created record of one backup run. Read-only. |
+| [`KividbDbOps`](#kividbdbops) | `kdbops` | One operation on a cluster: a rolling restart. |
 
 This split mirrors StackGres's `SGCluster` / `SGPostgresConfig` /
 `SGObjectStorage` model: configuration, ACLs, and backup destinations are
@@ -1128,3 +1129,51 @@ it) — the operator populates it by reading the backup Job's termination
 message, not by scraping logs, so it's available even if you're not
 collecting pod logs anywhere. See [ARCHITECTURE.md](ARCHITECTURE.md) for
 how that plumbing works.
+
+## KividbDbOps
+
+```yaml
+apiVersion: kividb.io/v1alpha1
+kind: KividbDbOps
+metadata:
+  name: my-cluster-restart
+spec:
+  clusterRef:
+    name: my-cluster
+  op: restart            # the only op
+  restart:
+    method: InPlace      # the only method, and the default
+status:
+  phase: Running         # Pending | Running | Completed | Failed
+  restart:               # my-cluster-0 is the master
+    completedPods: [my-cluster-1]
+    currentPod: my-cluster-2
+    pendingPods: [my-cluster-2, my-cluster-0]
+```
+
+A rolling restart of the pods of the cluster in the same namespace, one
+at a time: the replicas by name, then the master (in a sharded cluster,
+the shard masters), except that a replica still to be restarted that is
+the only unhealthy pod goes first. Before each pod, every other pod must
+be there, Ready and in sync. A master with a replica is asked to hand its
+role over first (a switchover, or `CLUSTER FAILOVER` in a shard) and is
+restarted as a replica; a master without one is restarted in place. The
+next pod goes once the restarted one is back, Ready and in sync and, in a
+sharded cluster, once every slot is served. A wait for the rest of the
+cluster or for a restarted pod shows on the `WaitingForCluster`
+condition; a wait for a handover, in `status.message`.
+
+The op fails, saying which pod, if the rest of the cluster is not healthy
+for 5 minutes, if a master has not handed over in 5 minutes (it withdraws
+the request), or if a restarted pod is not back in 60. That pod still
+comes back on its own; a new op restarts every pod again.
+
+The ops of one cluster run one at a time, oldest first (one that has
+started stays first); the others stay
+`Pending` with the condition `Queued`. An op that has finished,
+`Completed` or `Failed`, is not run again: to restart again, create a new
+one ([sample](../config/samples/kividb.io_v1alpha1_kividbdbops_restart.yaml)).
+`kubectl get kdbops` shows each op's cluster, op, phase and age.
+
+`spec.maxRetries` and `spec.restart.onlyPendingRestart` are in the CRD
+but the operator does not act on them yet.
