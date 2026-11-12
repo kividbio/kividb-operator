@@ -15,8 +15,8 @@ description: |
   failover via a per-pod agent sidecar, scheduled S3-compatible backups, and
   (optionally) a management web GUI.
 type: application
-version: 0.7.0
-appVersion: "0.7.0"
+version: 0.7.1
+appVersion: "0.7.1"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/kividbio/kividb-operator
 icon: https://raw.githubusercontent.com/kividbio/kividb-operator/master/cmd/gui/static/kividb-logo.png
@@ -56,18 +56,20 @@ annotations:
     - title: Light theme
       url: https://raw.githubusercontent.com/kividbio/kividb-operator/master/assets/gui-light.png
   artifacthub.io/changes: |
-    - kind: added
-      description: "Sharded clusters (spec.shards): formation, rolling restarts, backups, changing the shard count, access from outside Kubernetes, console views"
     - kind: changed
-      description: "Default engine image docker.io/kividb/kividb:v1.2.0"
-    - kind: changed
-      description: "The append-only file is on by default"
+      description: "Default engine image docker.io/kividb/kividb:v1.2.1"
+    - kind: fixed
+      description: "A switchover no longer hands over without holding writes when the engine refuses the pause (kividb 1.2.1)"
+    - kind: fixed
+      description: "A force-deleted master's last writes are no longer lost: the old master is fenced before a failover"
+    - kind: fixed
+      description: "A restore over a kept volume no longer mixes the snapshot with the earlier cluster's append-only file"
     - kind: security
-      description: "The agent's API needs a token, and its port is on the headless Service only"
+      description: "Images: golang.org/x/net v0.62.0 (CVE-2026-78661, CVE-2026-97045), Go 1.26.11, distroless Debian 13 base"
+    - kind: added
+      description: "An OLM bundle for OperatorHub.io"
     - kind: fixed
-      description: "Switchovers, a stopping master and password changes no longer lose acknowledged writes"
-    - kind: fixed
-      description: "Restarted masters, blocked failovers, DbOps restarts, bootstrap, backup retention and shard removal fixes"
+      description: "Installs: the KividbDbOps CRD in config/default, the plain-YAML install, one manager selector for every install path"
   artifacthub.io/crds: |
     - kind: KividbCluster
       version: v1alpha1
@@ -100,7 +102,7 @@ annotations:
       metadata:
         name: kividb-sample
       spec:
-        image: docker.io/kividb/kividb:v1.2.0
+        image: docker.io/kividb/kividb:v1.2.1
         replicas: 2
         storage:
           size: 10Gi

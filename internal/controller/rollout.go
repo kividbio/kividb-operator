@@ -115,6 +115,25 @@ func replicaSynced(master, replica *agentapi.StatusResponse, masterIP string, po
 // Each is a lossless switchover (see switchover.go). It returns the new
 // master's name when the role moved on this pass, and removes the requests
 // that are fulfilled, or that name a pod that does not exist.
+// reconcileRoleChanges moves the master role, or replaces a pod, one change
+// of roles per pass: a pod is replaced only on a pass that did not just
+// move the master role (statuses are from before it). When neither a
+// handover nor the rollout asked for a switchover in it, none is wanted any
+// more, and the aborts of the last ones are forgotten (#82). That is
+// decided once both have had their say: the rollout asks after the
+// handover, and a pass the rollout does not get to says nothing either way.
+func (r *KividbClusterReconciler) reconcileRoleChanges(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []corev1.Pod, statuses []kividbv1alpha1.KividbPodStatus, masterPod string, generations authGenerations) {
+	key := switchoverKey(c)
+	r.switchoverAsked.Delete(key)
+	if r.reconcileHandover(ctx, c, pods, statuses, masterPod) != "" || !r.reconcileAuthOverlap(ctx, c, pods, generations) {
+		return
+	}
+	r.reconcileRollout(ctx, c, pods, statuses, masterPod)
+	if _, asked := r.switchoverAsked.Load(key); !asked {
+		r.switchoverNotWanted(c)
+	}
+}
+
 func (r *KividbClusterReconciler) reconcileHandover(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []corev1.Pod, statuses []kividbv1alpha1.KividbPodStatus, masterPod string) string {
 	log := logf.FromContext(ctx)
 	var master *corev1.Pod

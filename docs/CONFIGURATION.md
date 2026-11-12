@@ -31,7 +31,7 @@ All fields below are under `spec:` unless stated otherwise.
 |---|---|---|---|
 | `shards` | int32 | unset | Makes the cluster **sharded**: that many shards in kividb's cluster mode. See [Sharded clusters](#sharded-clusters-shards). Set or left unset only when the cluster is created. |
 | `replicas` | int32 | `2` | Replica pods **in addition to** each master: beside the single master (total pods = `replicas + 1`), or in each shard (total = `shards × (replicas + 1)`). |
-| `image` | string | `docker.io/kividb/kividb:v1.2.0` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.2.0` or `docker.io/kividb/kividb:v1.2.0-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
+| `image` | string | `docker.io/kividb/kividb:v1.2.1` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.2.1` or `docker.io/kividb/kividb:v1.2.1-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
 | `variant` | string | `standard` | One of `standard`, `tls`, `lua`, `full`. See [Image and variant](#image-and-variant) — informational only, does not affect which image gets pulled. |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
 | `imagePullSecrets` | `[]LocalObjectReference` | — | Standard Kubernetes image pull secrets. |
@@ -45,12 +45,12 @@ All fields below are under `spec:` unless stated otherwise.
 `image` is the **only** field that determines which container actually
 runs — the operator uses it verbatim and never constructs, guesses, or
 modifies it. Leave it unset to use the release default
-(`docker.io/kividb/kividb:v1.2.0` for operator 0.7.0); set it explicitly
+(`docker.io/kividb/kividb:v1.2.1` for operator 0.7.1); set it explicitly
 to pin a different tag or variant:
 
 ```yaml
 spec:
-  image: docker.io/kividb/kividb:v1.2.0-tls
+  image: docker.io/kividb/kividb:v1.2.1-tls
 ```
 
 To move to a later version, just change this value — same as any other
@@ -97,7 +97,7 @@ a referenced [`KividbConfig`](#kividbconfig)'s `spec.tls`). It does
 **not** change which image tag gets pulled — there is no "tls variant
 tag" the operator appends or looks for. If you want a TLS-capable build,
 you set `image` to one yourself (e.g.
-`docker.io/kividb/kividb:v1.2.0-tls`) *and* set `variant: tls` to match;
+`docker.io/kividb/kividb:v1.2.1-tls`) *and* set `variant: tls` to match;
 the two aren't cross-validated by the API server, since only you know
 what a given `image` value actually contains.
 
@@ -374,13 +374,34 @@ or its pod is force-deleted, the writes it acknowledged in its last moments
 and had not yet streamed are lost with it, and a master that is cut off
 (not dead) goes on acknowledging writes on the connections it still has
 until it is demoted -- in the AKS test, 150 ms after the promotion, 120
-writes. The operator does not fence it. The same holds for a master pod
-deleted with `--grace-period=0 --force`: the operator promotes a replica
-in the same second, but the deleted pod's container keeps running, and
-taking writes, for a moment after its pod object is gone, with no address
-left for the operator to pause it at (in the AKS test, 188 writes; its
-other replica, which had read past the promotion point from it, resynced
-in full). `min-replicas-to-write` /
+writes. Before it promotes a replica, the operator holds the old master's
+writes (`CLIENT PAUSE WRITE` through its agent) at the address the status
+last recorded for it (`status.pods[].podIP`), if the engine answering
+there still has the run recorded for it (`runID`). That covers a master
+pod deleted with `--grace-period=0 --force`: its pod object is gone at
+once, but its container keeps running, and taking writes, until its
+replicas have left it (176 acknowledged writes lost in the AKS test on
+engine 1.2.1; on kind, 689 to 954 per force-delete without the fence,
+none with it). As in a switchover, the replica is promoted once it has
+everything the old master acknowledged before the pause -- the wait ends
+after 5 s, or as soon as the old master stops answering -- and the old
+master is then made its replica, its clients disconnected and the pause
+lifted, so the writes it held fail rather than land. The pause lasts
+`terminationGracePeriodSeconds` (60 s by default, 10 s at least), the
+longest the old pod can take to stop, and 5 s more. The operator records
+the fenced master in `status.fencedMaster` before the promotion: should
+the re-pointing fail, or the operator restart, every pass holds its
+writes again and retries until it is done or the engine there is gone --
+another engine answers at that address (the pod's replacement has
+another one), or none does twice in a row (`FencedMasterNotDemoted`
+Warning on the first failure). An address that does not answer holds the
+failover up for about 1 s, so a master cut off from the operator is not
+held: it acknowledges writes until it is demoted. A force-deleted pod's replacement is a new engine, never
+paused, whose data stops at the fence; it rejoins as a replica. A
+failover that goes on without the fence -- nothing answers, the engine
+refuses the pause, or no address is recorded (a `kividbclusters` CRD
+from before `podIP`, which Helm does not upgrade) -- or before the
+replica caught up raises a `FailoverUnfenced` Warning. `min-replicas-to-write` /
 `min-replicas-max-lag` narrow this window: a master refuses writes
 (`NOREPLICAS`) unless that many replicas acknowledged within the lag. The
 operator does not set them in a replicated cluster (it does in a sharded
@@ -463,14 +484,22 @@ It loses no acknowledged write:
 Writes wait for as long as the replica takes to catch up: milliseconds
 for a replica in sync. If it has not caught up in 5 s, nothing changes:
 the pause ends, the old master stays the master, a `SwitchoverAborted`
-Warning says why, and the next attempt waits 30 s. A replica is a
+Warning says why, and the next attempt waits 30 s, twice as long after
+each abort in a row, up to 10 min (2 s for a master pod being deleted).
+The `Switchover` condition (`False`, reason `Aborted`) says why and when
+the next try is, until one goes through. A replica is a
 candidate only when Ready and `synced`: following the master with
 `master_link_status:up`, having heard from it in the last 20 s, and at
 most 1 MiB behind. The most caught-up candidate is chosen, or the one
-`kividb.io/switchover-to` names. On an engine before kividb 1.1, which has
-no `CLIENT PAUSE ... WRITE`, the operator switches over without the pause
-and says so (`SwitchoverWithoutPause` Warning): writes acknowledged by the
-old master during the handover can be lost there.
+`kividb.io/switchover-to` names. Since kividb 1.2.1 the pause waits for the
+writes already in progress, up to 5 s, and is refused if one has not
+finished then (a big `FLUSHALL`, say); the operator gives it 7 s, and the
+pause lasts that, the catch-up and a margin: 17 s. A pause that is refused,
+or gets no answer, calls the switchover off (`SwitchoverAborted`) and it is
+tried again. Only on an engine that answers that it does not know `CLIENT
+PAUSE ... WRITE` does the operator switch over without the pause, and say
+so (`SwitchoverWithoutPause` Warning): writes acknowledged by the old
+master during the handover can be lost there.
 
 **Stopping a master.** Both containers of every pod have a `preStop`
 hook, the agent's `GET /prestop`. On a master with replicas attached it
@@ -693,7 +722,8 @@ spec:
     serving the slots until then.
   - **Write load:** on engine 1.2.0, change the shard count only while
     writes are light, or pause them: a move under heavy writes can lose
-    some (kividbio/kividb#331, fixed in engine 1.2.1).
+    some (kividbio/kividb#331, fixed in engine 1.2.1, the default from
+    operator 0.7.1).
   - **Failures:** a move that fails leaves the slots with the source,
     and is tried again after 30 s (`status.cluster.rebalance.lastError`,
     a `SlotMoveFailed` Event). If the destination restarts during a move,
@@ -920,7 +950,7 @@ usage-tracking to catch this earlier).
 > **On kividb before v1.0.5 the `default` user's password does not keep
 > unauthenticated clients out.** A client that never sends `AUTH` is
 > treated as `default` (see [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md),
-> issue 1). v1.0.5 and later enforce it, including v1.2.0, the default image of this release. If you
+> issue 1). v1.0.5 and later enforce it, including v1.2.1, the default image of this release. If you
 > pin an older engine with `spec.image`, limit who can reach the cluster's
 > Services with a NetworkPolicy.
 

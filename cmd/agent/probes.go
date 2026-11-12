@@ -48,8 +48,12 @@ func engineAnswers(addr string, timeout time.Duration) error {
 	return nil
 }
 
-// preStopPoll is how often GET /prestop looks at the engine's role.
-var preStopPoll = 250 * time.Millisecond
+// preStopPoll is how often GET /prestop looks at the engine's role. It
+// bounds how long a master goes on acknowledging writes after its last
+// replica has left it: after a force-delete the operator fails over without
+// waiting for the hook, and everything the engine acknowledges between the
+// promotion and its SIGTERM is lost (#53).
+var preStopPoll = 10 * time.Millisecond
 
 // handlePreStop is the preStop hook of both of the pod's containers. It
 // returns once the engine may be stopped: at once unless it is a master
@@ -66,8 +70,18 @@ var preStopPoll = 250 * time.Millisecond
 func (s *server) handlePreStop(w http.ResponseWriter, r *http.Request) {
 	deadline := time.Now().Add(s.cfg.PreStopTimeout)
 	logged := false
+	// One connection for the whole hold: it looks every few milliseconds.
+	var c *respclient.Client
+	defer func() {
+		if c != nil {
+			c.Close()
+		}
+	}()
 	for {
-		hold, why := s.holdForHandover()
+		if c == nil {
+			c, _ = s.dial() // a failed dial lets kividb stop: see below
+		}
+		hold, why := s.holdForHandover(c)
 		if !hold {
 			if logged {
 				log.Printf("prestop: %s; letting kividb stop", why)
@@ -94,13 +108,12 @@ func (s *server) handlePreStop(w http.ResponseWriter, r *http.Request) {
 
 // holdForHandover reports whether the engine is a master with replicas
 // attached, i.e. whether stopping it now would stop the master while some
-// pod could have taken over.
-func (s *server) holdForHandover() (bool, string) {
-	c, err := s.dial()
-	if err != nil {
+// pod could have taken over. c is the hook's connection to it, nil when it
+// could not be opened.
+func (s *server) holdForHandover(c *respclient.Client) (bool, string) {
+	if c == nil {
 		return false, "kividb does not answer"
 	}
-	defer c.Close()
 	info, err := c.Info("replication")
 	if err != nil {
 		return false, "kividb does not report its role"
