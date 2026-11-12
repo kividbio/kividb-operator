@@ -10,8 +10,22 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 upgrade it, and the spec gains `failover.restartWaitSeconds`. Until it is
 applied, the API server drops it and the restart wait keeps its default.
 
+**Read before upgrading:** the pods of every sharded cluster roll once,
+replicas first and each master after a handover, for the new
+`--cluster-announce-hostname` flag (#57). A shard with no replicas
+restarts its master in place: its slots are unavailable while it does,
+and with persistence off its data is lost. Scale such a shard to one
+replica first, or upgrade in a maintenance window if persistence is off.
+
 ### Fixed
 
+- **A restarted node of a sharded cluster showed as `?` in `CLUSTER
+  SLOTS`** (#57), on itself and on its peers, for about six seconds: it
+  started with no hostname, and the agent set one only later. A client
+  that reloaded its slot map then could not reach those slots. A node now
+  starts with `--cluster-announce-hostname`, its pod's DNS name, which
+  every engine with `--cluster-announce-ip` (1.1.0 on) takes. The agent
+  still sets the address of a Service a pod is exposed through.
 - **A failover could promote a replica that held less than another, and
   did not wait for a force-deleted master coming back on its volume
   (#78).** In an AKS run, a force-deleted master lost 176 acknowledged
