@@ -71,6 +71,18 @@ If you skip this when upgrading to a release that adds a kind (0.4.0 adds
 kind is not installed and ignores objects of it; apply the CRDs and
 restart the operator Deployment to enable it.
 
+**An upgrade can restart every cluster.** A release that changes the
+default agent image (every release does) or the default engine image rolls
+each `KividbCluster` that leaves `spec.agentImage` or `spec.image` unset,
+one pod at a time. A master with replicas hands its role to an in-sync
+replica first. A master with none (`replicas: 0`, in a replicated cluster
+or in each shard) is restarted in place: the cluster, or that shard's
+slots, are unavailable until it is back, and without the append-only file
+it keeps only what its shutdown snapshot saved. Before upgrading, give it
+a replica, or keep the append-only file on, or pin both images to put the
+restart off. The CHANGELOG's "Read before upgrading" says what a given
+release changes.
+
 ### Uninstalling
 
 ```bash

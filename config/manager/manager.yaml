@@ -31,7 +31,7 @@ spec:
         runAsGroup: 65532
       containers:
         - name: manager
-          image: docker.io/kividb/kividb-operator:0.7.0
+          image: docker.io/kividb/kividb-operator:0.7.1
           imagePullPolicy: IfNotPresent
           args:
             - --leader-elect

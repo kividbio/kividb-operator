@@ -6,10 +6,88 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-**Apply the new `kividbclusters` CRD before `helm upgrade`:** Helm does not
-upgrade it, and the status gains `pods[].podIP` and `fencedMaster`. Until it
-is applied, the API server drops them and failovers do not hold the old
-master's writes (`FailoverUnfenced` Warning).
+## [0.7.1] - 2026-11-12
+
+A patch release of 0.7.0. The default engine is kividb **1.2.1**. Upgrade
+now if you run engine 1.2.1, or will: since 1.2.1 the engine refuses a
+write pause it cannot take at once, and operator 0.7.0 then switched over
+without the pause, so a write the old master acknowledged could be lost
+(#81). 0.7.1 also fences a force-deleted master's last writes before a
+failover (#53), keeps a restore from mixing the snapshot with the earlier
+cluster's append-only file (#58), fixes the images' CVEs (#76), adds an
+OLM bundle for OperatorHub.io, and fixes three install paths.
+
+**Read before upgrading: every cluster restarts, and a master with no
+replica restarts in place.** The default agent image moves to 0.7.1, and
+the default engine to 1.2.1, so every `KividbCluster` that leaves
+`spec.agentImage` or `spec.image` unset gets a rolling restart when the
+operator is upgraded. A master with replicas hands its role to an in-sync
+replica first, as in every rollout. A master with none is deleted and
+restarted on its volume, with no handover:
+
+- **`replicas: 0` (one pod):** the cluster serves nothing until the pod is
+  back.
+- **A sharded cluster with `replicas: 0`:** each shard's master restarts
+  in turn. Its slots are unavailable while it does, and if it is down for
+  longer than the node timeout (5 s by default) with `requireFullCoverage`
+  on (the default), the whole cluster refuses commands until it is back.
+- **Data:** with the append-only file on (the default since 0.7.0) the
+  master reloads everything it acknowledged. With `appendonly: "no"` it
+  comes back with its shutdown snapshot only, and with nothing saved since
+  its last snapshot if that save does not finish within
+  `terminationGracePeriodSeconds`.
+
+Before upgrading, give such clusters or shards at least one replica and
+let it sync, or accept the restart: with the append-only file on, or with
+the shutdown snapshot only. (Turning the append-only file on is a config
+change, so it restarts such a master in place too.) To put the restart off, pin
+both `spec.image: docker.io/kividb/kividb:v1.2.0` and
+`spec.agentImage: docker.io/kividb/kividb-operator-agent:0.7.0` first:
+nothing else in the pod template changes in 0.7.1. The 0.7.0 agent works
+with the 0.7.1 operator, without the agent's fixes: it cuts every pause at
+5 s, which aborts a switchover that needs longer (#81), and its restore
+lacks the #58 fix. Unpin once the cluster has a replica or its
+append-only file.
+
+**Engine 1.2.1 has upgrade notes of its own.** The rollout restarts
+replicas before their master, as 1.2.1 requires (a 1.2.0 replica cannot
+full-sync from a 1.2.1 master that holds a key 1.2.0 cannot read). Read
+the [engine's "Before you upgrade"](https://github.com/kividbio/kividb/releases/tag/v1.2.1)
+first: among others, ACL categories are Redis's from the moment a pod
+runs 1.2.1, `GEORADIUS` is refused on replicas, and there is no going
+back to 1.2.0 once 1.2.1 has saved such a key. Do not change
+`spec.shards` during the rollout: a slot move from a 1.2.0 node loses
+the moved time series' compaction rules.
+
+**The CRD change is additive, and upgrading from 0.7.0 is safe.** The
+`kividbclusters` status gains `pods[].podIP` and `fencedMaster` (`name`,
+`podIP`, `runID`), and new conditions (`Switchover`); nothing is removed
+or renamed, and the other CRDs do not change. **Apply the new
+`kividbclusters` CRD before `helm upgrade`:** Helm does not upgrade it.
+Until it is applied, the API server drops the new fields and failovers do
+not hold the old master's writes (`FailoverUnfenced` Warning). The CRDs
+are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
+"Read before upgrading" first.
+
+### Security
+
+- **The images had golang.org/x/net v0.60.0 (CVE-2026-78661, high;
+  CVE-2026-97045, medium) and an out-of-date Debian 12 base** (#76).
+  golang.org/x/net is now v0.62.0, the other golang.org/x modules are
+  current, the binaries are built with Go 1.26.11, and the images run on
+  `gcr.io/distroless/static-debian13:nonroot` (still no shell, still UID
+  65532). CI and the release workflow scan every image with Trivy and fail
+  on a fixable HIGH or CRITICAL.
+
+### Changed
+
+- **Default engine `docker.io/kividb/kividb:v1.2.1`** (it was `v1.2.0`):
+  in the controller, the CRD, the chart, the GUI, the samples and the docs.
+  See "Read before upgrading" above.
+- Default agent image **`docker.io/kividb/kividb-operator-agent:0.7.1`**.
+  A cluster that leaves `spec.agentImage` unset rolls to it in the same
+  rollout. The switchover and restore fixes below need it.
+- The e2e suite tests kividb 1.2.1 by default.
 
 ### Added
 
@@ -31,10 +109,12 @@ master's writes (`FailoverUnfenced` Warning).
   the old selector: delete it once (`kubectl delete deploy -n
   kividb-operator-system kividb-operator-manager`) before applying the new
   manifests.
+  (#88, by [SaiPisey2](https://github.com/SaiPisey2))
 - **`docs/INSTALL.md`'s install without kustomize exited 1 (#67).**
   `kubectl apply -f config/rbac/` applied the RBAC and then failed on
   `config/rbac/kustomization.yaml`, and on a new cluster the namespace did
   not exist. The steps now create the namespace and name the RBAC files.
+  (#85, by [SaiPisey2](https://github.com/SaiPisey2))
 - **A switchover no longer hands over without holding writes when the pause
   could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),
   `CLIENT PAUSE ... WRITE` waits up to 5 s for the writes already in progress
@@ -69,6 +149,7 @@ master's writes (`FailoverUnfenced` Warning).
   promotion like a fenced one. The `Switchover` condition and the count of
   aborts go away once no switchover is wanted any more, or the master is
   another pod.
+  (#82, by [lofoneh](https://github.com/lofoneh))
 
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install
@@ -121,6 +202,7 @@ master's writes (`FailoverUnfenced` Warning).
   instead of 250 ms.
   `hack/e2e/10-force-delete-fence.sh` force-deletes the master under load
   and counts the writes lost (skipped in CI: `SKIP_FENCE=1`).
+  (#77, by [lofoneh](https://github.com/lofoneh))
 
 ## [0.7.0] - 2026-11-04
 
@@ -1155,7 +1237,8 @@ was lost in any of them.
 - Helm chart (`charts/kividb-operator`) and kustomize bases
   (`config/`) for installation.
 
-[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.7.0...master
+[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.7.1...master
+[0.7.1]: https://github.com/kividbio/kividb-operator/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/kividbio/kividb-operator/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/kividbio/kividb-operator/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/kividbio/kividb-operator/compare/v0.5.2...v0.6.0
