@@ -6,8 +6,52 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+**Apply the new `kividbclusters` CRD before `helm upgrade`:** Helm does not
+upgrade it, and the spec gains `failover.restartWaitSeconds`. Until it is
+applied, the API server drops it and the restart wait keeps its default.
+
 ### Fixed
 
+- **A failover could promote a replica that held less than another, and
+  did not wait for a force-deleted master coming back on its volume
+  (#78).** In an AKS run, a force-deleted master lost 176 acknowledged
+  writes, and the replica promoted was 640 bytes behind the other.
+  - The replica is now picked after the old master's writes are held (or
+    it is found gone), by each replica's offset read then with `ROLE`, not
+    by the offsets read at the start of the pass, which may be from before
+    the master stopped streaming. Replicas that hold as much go by name.
+    The replicas are asked at once, for 1 s in all. One that does not
+    answer may hold more than the one picked: unless that one caught up
+    with the held master, no one is promoted on that pass
+    (`FailoverBlocked` Warning, `WaitingForReplica` on the Ready
+    condition) until it answers or is no longer Ready. A replica the
+    operator cannot reach stays Ready (its readiness probe runs on its own
+    node), so the Warning says how long the failover has been held and
+    what ends it, and `kividb.io/allow-unread-failover: "true"` on the
+    cluster lets it go ahead without that replica (`FailoverForced`
+    Warning); the operator removes the annotation once the failover has
+    gone through.
+  - A master whose pod is gone, or replaced by a new pod (a force delete),
+    and whose engine no longer answers, is now waited for until its new
+    pod is Ready and has reported: it may come back on its volume holding
+    writes its replicas do not. Then it is compared with them as a master
+    that restarted in place is (#42), and kept if it holds as much. The
+    wait lasts `failover.restartWaitSeconds` at most (new, 15 s by
+    default, 0 for not at all), counted from when the master was found
+    gone, whether its pod comes back or not, so a force-deleted master
+    costs that much at most (and up to 5 s more: the wait is checked on
+    each pass). A wait that ran out is not started again for that pod of
+    the master. A master that restarts in place keeps
+    `unhealthyThresholdSeconds`. A replacement pod that cannot be scheduled
+    is not waited for, nor a master with no address or engine run
+    recorded. The operator does not read Nodes, so that its RBAC stays as
+    it is: a replacement pinned by its volume to a node that is not Ready
+    shows as unschedulable, as the scheduler keeps new pods off such a
+    node. The cap covers a volume that cannot attach yet: on AKS or EBS a
+    replacement schedules on another node in the zone and sits in
+    `ContainerCreating` (Multi-Attach), never unschedulable.
+    `FailoverWait` events say when a wait starts and how it ended, and the
+    Ready condition's reason is `WaitingForMaster` meanwhile.
 - **`kubectl apply -k config/default` warned that `commonLabels` is
   deprecated** (#69). `config/default` sets the same two labels with
   `labels` instead, on each object's own labels only: the manager

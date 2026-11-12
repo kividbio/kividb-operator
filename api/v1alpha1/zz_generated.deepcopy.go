@@ -142,6 +142,10 @@ func (in *FailoverSpec) DeepCopyInto(out *FailoverSpec) {
 		out.UnhealthyThresholdSeconds = new(int32)
 		*out.UnhealthyThresholdSeconds = *in.UnhealthyThresholdSeconds
 	}
+	if in.RestartWaitSeconds != nil {
+		out.RestartWaitSeconds = new(int32)
+		*out.RestartWaitSeconds = *in.RestartWaitSeconds
+	}
 }
 
 func (in *FailoverSpec) DeepCopy() *FailoverSpec {
