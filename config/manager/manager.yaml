@@ -9,9 +9,9 @@ metadata:
     app.kubernetes.io/managed-by: kividb-operator
 spec:
   replicas: 1
-  # The same selector config/default renders, where its labels add
-  # managed-by to it: a selector cannot change, so the plain-YAML install
-  # (docs/INSTALL.md) and `kubectl apply -k config/default` must agree.
+  # config/default renders this selector unchanged: its labels do not
+  # modify selectors. A Deployment's selector is immutable, so changing
+  # it would break `kubectl apply` for installs using this selector.
   selector:
     matchLabels:
       app.kubernetes.io/name: kividb-operator
