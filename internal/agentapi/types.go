@@ -139,6 +139,11 @@ type BackupResult struct {
 // ExecRequest is the body of POST /exec: a RESP command as string args.
 type ExecRequest struct {
 	Args []string `json:"args"`
+	// TimeoutMs, when set, is how long the agent waits for kividb's reply
+	// instead of its usual deadline (5 s), up to its cap (15 s): since
+	// kividb 1.2.1, CLIENT PAUSE waits out the writes in progress, up to
+	// 5 s, before it answers. An agent before 0.7.1 ignores it.
+	TimeoutMs int64 `json:"timeoutMs,omitempty"`
 }
 
 // ExecResponse is returned by POST /exec.

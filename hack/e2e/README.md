@@ -28,18 +28,18 @@ minikube start --cpus=4 --memory=6144 --driver=docker
 | `docker.io/kividb/kividb-operator:${OPERATOR_TAG}` | Manager |
 | `docker.io/kividb/kividb-operator-agent:${OPERATOR_TAG}` | Sidecar + backup-trigger |
 | `docker.io/kividb/kividb-operator-gui:${OPERATOR_TAG}` | Optional GUI |
-| `docker.io/kividb/kividb:v1.2.0` (+ `-tls`, `-lua`, `-full`) | Engine variants |
+| `docker.io/kividb/kividb:v1.2.1` (+ `-tls`, `-lua`, `-full`) | Engine variants |
 | `bitnamilegacy/minio`, `bitnamilegacy/minio-client` | In-cluster S3 for snapshots (override with `MINIO_IMAGE` / `MINIO_MC_IMAGE`) |
 | `prometheus-community/kube-prometheus-stack` | Optional monitoring |
 
 Build operator images locally, then load them into minikube:
 
 ```bash
-make docker-build VERSION=0.7.0-local
-# or: docker build -t docker.io/kividb/kividb-operator:0.7.0-local -f Dockerfile .
-LOAD_IMAGES=1 OPERATOR_TAG=0.7.0-local make e2e
+make docker-build VERSION=0.7.1-local
+# or: docker build -t docker.io/kividb/kividb-operator:0.7.1-local -f Dockerfile .
+LOAD_IMAGES=1 OPERATOR_TAG=0.7.1-local make e2e
 # Pre-GA engine (release candidates are on GHCR only):
-#   KIVIDB_VERSION=v1.2.1-rc1 KIVIDB_IMAGE_BASE=ghcr.io/kividbio/kividb LOAD_IMAGES=1 OPERATOR_TAG=0.7.0-local make e2e
+#   KIVIDB_VERSION=v1.3.0-rc1 KIVIDB_IMAGE_BASE=ghcr.io/kividbio/kividb LOAD_IMAGES=1 OPERATOR_TAG=0.7.1-local make e2e
 ```
 
 ## Quick start
@@ -64,9 +64,9 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `OPERATOR_TAG` | `0.7.0-local` | Manager / agent / GUI image tag |
+| `OPERATOR_TAG` | `0.7.1-local` | Manager / agent / GUI image tag |
 | `OPERATOR_REGISTRY` | `docker.io/kividb` | Image registry prefix |
-| `KIVIDB_VERSION` | `v1.2.0` | Engine tag prefix (`v1.2.0`, or e.g. `v1.2.1-rc1` pre-GA) |
+| `KIVIDB_VERSION` | `v1.2.1` | Engine tag prefix (`v1.2.1`, or e.g. `v1.3.0-rc1` pre-GA) |
 | `KIVIDB_IMAGE_BASE` | `docker.io/kividb/kividb` | Engine image repository; `ghcr.io/kividbio/kividb` for release candidates |
 | `CLUSTER_DRIVER` | `minikube` | Cluster driver: `minikube` (default) or `kind` |
 | `LOAD_IMAGES` | `0` | `1` → load images into cluster (`minikube image load` or `kind load`) |
@@ -78,6 +78,8 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 | `E2E_KIVIDB_NS` | `e2e-kividb` | Test cluster namespace |
 | `MONITORING_NS` | `monitoring` | kube-prometheus-stack |
 | `STOP_ON_FAIL` | `0` | `1` → abort `run-all.sh` on first failure |
+| `FENCE_ATTEMPTS` | `8` | Force-deletes `10-force-delete-fence.sh` tries before giving up on reaching a fenced failover |
+| `E2E_WRITER_IMAGE` | `python:3.12-alpine` | Image that runs `fence-writer.py` |
 
 ### Skip flags (`run-all.sh`)
 
@@ -92,12 +94,13 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 | `SKIP_MONITOR=1` | `07-monitor-memory.sh` |
 | `SKIP_RESP_ACL=1` | `08-resp-acl-select.sh` |
 | `SKIP_RESTORE=1` | `09-restore-over-aof.sh` (also skipped with `SKIP_MINIO=1`: it needs MinIO) |
+| `SKIP_FENCE=1` | `10-force-delete-fence.sh` (skipped in CI: up to `FENCE_ATTEMPTS` force-deletes of about a minute each) |
 
 Example: re-run failover only against an already-deployed operator:
 
 ```bash
 SKIP_DEPLOY=1 SKIP_PROMETHEUS=1 SKIP_MINIO=1 SKIP_COMPAT=1 \
-  SKIP_SNAPSHOT=1 SKIP_MONITOR=1 SKIP_RESP_ACL=1 ./hack/e2e/run-all.sh
+  SKIP_SNAPSHOT=1 SKIP_MONITOR=1 SKIP_RESP_ACL=1 SKIP_FENCE=1 ./hack/e2e/run-all.sh
 ```
 
 ## Suite map
@@ -114,6 +117,7 @@ SKIP_DEPLOY=1 SKIP_PROMETHEUS=1 SKIP_MINIO=1 SKIP_COMPAT=1 \
 | `07-monitor-memory.sh` | Agent `/metrics` under load |
 | `08-resp-acl-select.sh` | RESP3 HELLO, ACL deny smoke, SELECT on replica, single-master failover |
 | `09-restore-over-aof.sh` | `bootstrapFromSnapshot` over a kept pod-0 volume whose `appendonly.aof` holds writes the snapshot lacks, with `superseded.*` and temp files: the dataset equals the snapshot's, and none of those files are left (#58) |
+| `10-force-delete-fence.sh` | Force-delete the master under write load (`fence-writer.py` in a pod, fresh keys each attempt): no acknowledged write lost, and at least one attempt went through a failover that held the old master's writes first (#53) |
 
 | `07-monitor-memory.sh` | Agent `/metrics`, memory/commands under load, optional Prom targets |
 

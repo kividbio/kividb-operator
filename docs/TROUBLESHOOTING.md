@@ -128,6 +128,39 @@ kubectl annotate kividbcluster my-cluster kividb.io/allow-empty-failover=true
 
 Remove the annotation again afterwards.
 
+## Failover without a fence (`FailoverUnfenced`)
+
+A failover went ahead without first holding the old master's writes, or
+promoted a replica before it had caught up with the old master. A master
+that was still running then -- a force-deleted pod's container, for a
+moment -- may have acknowledged writes the new master never got. The
+event says why:
+
+- **No address or engine run recorded** (`status.pods[].podIP`, `runID`).
+  The usual cause is a `kividbclusters` CRD older than the operator: Helm
+  installs CRDs once and never upgrades them, and the API server drops
+  the status fields its CRD does not list. Apply the current CRDs:
+
+  ```bash
+  kubectl apply -f charts/kividb-operator/crds/
+  ```
+
+  The address is recorded again from the next status write. Right after
+  an upgrade, pods whose agent has not been replaced yet report no engine
+  run either; the rollout replaces them.
+- **No answer** at the old master's address: nothing listens there, or
+  nothing answered for about 1 s -- its node is down, or cut off from the
+  operator.
+- **No pause within 3 s**, or **the engine refused `CLIENT PAUSE WRITE`**
+  (kividb before 1.1).
+- **Promoting a replica before it caught up**: it was still behind after
+  5 s, or the old master stopped answering first.
+
+A `FencedMasterNotDemoted` Warning means the old master was held but could
+not yet be made the new master's replica. Its writes stay held, and the
+operator tries again every 2 s (`status.fencedMaster` shows it) until it
+is done or the old engine is gone.
+
 ## `PersistenceDisabled`, `MasterRestartedEmpty`, `ShardDataLost`
 
 - **`PersistenceDisabled`** (and the `Persistence` condition `False`): the

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -19,6 +20,7 @@ type respRecorder struct {
 	mu    sync.Mutex
 	cmds  [][]string
 	reply func(cmd []string) string
+	conns atomic.Int32 // connections accepted
 }
 
 func newRespRecorder(t *testing.T, reply func(cmd []string) string) *respRecorder {
@@ -35,6 +37,7 @@ func newRespRecorder(t *testing.T, reply func(cmd []string) string) *respRecorde
 			if err != nil {
 				return
 			}
+			rr.conns.Add(1)
 			go rr.serve(conn)
 		}
 	}()

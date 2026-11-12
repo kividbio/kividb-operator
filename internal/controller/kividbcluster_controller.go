@@ -66,13 +66,22 @@ type KividbClusterReconciler struct {
 	// pods ("<ns>/<cluster>/-1/<node ID>" -> time.Time), see orphanNodes.
 	orphans sync.Map
 
-	// switchovers: when the last replicated-mode switchover of a cluster
-	// ("<ns>/<cluster>" -> time.Time) was aborted, so the next one waits.
+	// switchovers: the aborted replicated-mode switchovers of a cluster
+	// ("<ns>/<cluster>" -> *switchoverAborts), so the next one waits.
 	switchovers sync.Map
+
+	// switchoverAsked: the clusters a switchover was asked for on the pass
+	// under way ("<ns>/<cluster>" -> struct{}), see reconcileRoleChanges.
+	switchoverAsked sync.Map
 
 	// rolloutWaits: what a cluster's rollout has been waiting for, and
 	// since when ("<ns>/<cluster>" -> *rolloutWait), see rollout_wait.go.
 	rolloutWaits sync.Map
+
+	// fencedRetries: how the demotion of a replicated cluster's fenced
+	// master has gone ("<ns>/<cluster>" -> *fencedTry), see
+	// demoteFencedMaster.
+	fencedRetries sync.Map
 
 	// notSynced: why each replica of a replicated-mode cluster was not in
 	// sync on the last pass ("<ns>/<cluster>" -> map[pod]reason).
@@ -259,12 +268,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	r.reconcileAclReload(ctx, &c, podList.Items, aclContent, generations)
-	// One change of roles per pass: a pod is replaced only on a pass that
-	// did not just move the master role (statuses are from before it).
-	if r.reconcileHandover(ctx, &c, podList.Items, statuses, masterPod) == "" &&
-		r.reconcileAuthOverlap(ctx, &c, podList.Items, generations) {
-		r.reconcileRollout(ctx, &c, podList.Items, statuses, masterPod)
-	}
+	r.reconcileRoleChanges(ctx, &c, podList.Items, statuses, masterPod, generations)
 
 	r.notePersistence(&c, kdbConfig)
 	if statusErr := r.updateStatus(ctx, &c, read, statuses, masterPod, previousMasterPod, failoverHappened, err); errors.Is(statusErr, errStaleStatus) {
@@ -276,6 +280,11 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	if c.Status.FencedMaster != nil {
+		// A failover's fenced master is not a replica yet: try again
+		// before its pause runs out (demoteFencedMaster).
+		return ctrl.Result{RequeueAfter: fencedMasterRetry}, nil
 	}
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
 }
