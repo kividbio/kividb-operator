@@ -1152,19 +1152,24 @@ status:
 ```
 
 A rolling restart of the pods of the cluster in the same namespace, one
-at a time: the replicas by name, then the master. Before each pod, every
-other pod must be there, Ready and in sync. A master with a replica is
-asked to hand its role over first (a switchover, or `CLUSTER FAILOVER` in
-a shard) and is restarted as a replica; a master without one is restarted
-in place. The next pod goes once the restarted one is back, Ready and in
-sync. A wait shows on the `WaitingForCluster` condition.
+at a time: the replicas by name, then the master (in a sharded cluster,
+the shard masters), except that a replica still to be restarted that is
+the only unhealthy pod goes first. Before each pod, every other pod must
+be there, Ready and in sync. A master with a replica is asked to hand its
+role over first (a switchover, or `CLUSTER FAILOVER` in a shard) and is
+restarted as a replica; a master without one is restarted in place. The
+next pod goes once the restarted one is back, Ready and in sync and, in a
+sharded cluster, once every slot is served. A wait for the rest of the
+cluster or for a restarted pod shows on the `WaitingForCluster`
+condition; a wait for a handover, in `status.message`.
 
 The op fails, saying which pod, if the rest of the cluster is not healthy
 for 5 minutes, if a master has not handed over in 5 minutes (it withdraws
 the request), or if a restarted pod is not back in 60. That pod still
 comes back on its own; a new op restarts every pod again.
 
-The ops of one cluster run one at a time, oldest first; the others stay
+The ops of one cluster run one at a time, oldest first (one that has
+started stays first); the others stay
 `Pending` with the condition `Queued`. An op that has finished,
 `Completed` or `Failed`, is not run again: to restart again, create a new
 one ([sample](../config/samples/kividb.io_v1alpha1_kividbdbops_restart.yaml)).

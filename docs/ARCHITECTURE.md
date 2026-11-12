@@ -15,8 +15,7 @@ references by name (`spec.configRef`, `spec.aclConfigRef`,
 `spec.snapshotConfigRef`). A fourth kind, `KividbSnapshot`, is a
 read-only record the operator creates per backup run, and a fifth,
 `KividbDbOps`, asks for one operation on a cluster (a rolling restart).
-See [CONFIGURATION.md](CONFIGURATION.md) for the full field reference on
-all six.
+See [CONFIGURATION.md](CONFIGURATION.md) for all six.
 
 This split exists so that:
 
