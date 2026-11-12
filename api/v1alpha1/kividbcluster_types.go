@@ -40,7 +40,7 @@ const ClusterLabel = "kividb.io/cluster"
 
 // KividbVariant selects which build of the kividb image to run. Each
 // variant beyond "standard" corresponds to a real, separately-published
-// image tag suffix (e.g. docker.io/kividb/kividb:v1.2.0-tls) -- the
+// image tag suffix (e.g. docker.io/kividb/kividb:v1.2.1-tls) -- the
 // features aren't runtime-togglable, they're compiled in.
 type KividbVariant string
 
@@ -276,9 +276,9 @@ type KividbClusterSpec struct {
 	Replicas int32 `json:"replicas,omitempty"`
 
 	// Image is the kividb container image, e.g.
-	// "docker.io/kividb/kividb:v1.2.0" or, for a non-standard build,
-	// "docker.io/kividb/kividb:v1.2.0-tls". Defaults to
-	// docker.io/kividb/kividb:v1.2.0 if unset -- set this explicitly to pin a specific
+	// "docker.io/kividb/kividb:v1.2.1" or, for a non-standard build,
+	// "docker.io/kividb/kividb:v1.2.1-tls". Defaults to
+	// docker.io/kividb/kividb:v1.2.1 if unset -- set this explicitly to pin a specific
 	// version. The operator uses this value verbatim; it never derives or
 	// modifies an image reference from Variant below.
 	// +optional

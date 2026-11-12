@@ -77,8 +77,8 @@ func TestDefaultImageConstants(t *testing.T) {
 	if !strings.HasPrefix(DefaultKividbImage, "docker.io/kividb/") {
 		t.Fatalf("DefaultKividbImage unexpected: %q", DefaultKividbImage)
 	}
-	if !strings.HasSuffix(DefaultKividbImage, ":v1.2.0") {
-		t.Fatalf("DefaultKividbImage must pin v1.2.0, got %q", DefaultKividbImage)
+	if !strings.HasSuffix(DefaultKividbImage, ":v1.2.1") {
+		t.Fatalf("DefaultKividbImage must pin v1.2.1, got %q", DefaultKividbImage)
 	}
 }
 

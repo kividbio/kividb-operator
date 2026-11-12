@@ -31,7 +31,7 @@ All fields below are under `spec:` unless stated otherwise.
 |---|---|---|---|
 | `shards` | int32 | unset | Makes the cluster **sharded**: that many shards in kividb's cluster mode. See [Sharded clusters](#sharded-clusters-shards). Set or left unset only when the cluster is created. |
 | `replicas` | int32 | `2` | Replica pods **in addition to** each master: beside the single master (total pods = `replicas + 1`), or in each shard (total = `shards × (replicas + 1)`). |
-| `image` | string | `docker.io/kividb/kividb:v1.2.0` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.2.0` or `docker.io/kividb/kividb:v1.2.0-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
+| `image` | string | `docker.io/kividb/kividb:v1.2.1` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.2.1` or `docker.io/kividb/kividb:v1.2.1-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
 | `variant` | string | `standard` | One of `standard`, `tls`, `lua`, `full`. See [Image and variant](#image-and-variant) — informational only, does not affect which image gets pulled. |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
 | `imagePullSecrets` | `[]LocalObjectReference` | — | Standard Kubernetes image pull secrets. |
@@ -45,12 +45,12 @@ All fields below are under `spec:` unless stated otherwise.
 `image` is the **only** field that determines which container actually
 runs — the operator uses it verbatim and never constructs, guesses, or
 modifies it. Leave it unset to use the release default
-(`docker.io/kividb/kividb:v1.2.0` for operator 0.7.0); set it explicitly
+(`docker.io/kividb/kividb:v1.2.1` for operator 0.7.1); set it explicitly
 to pin a different tag or variant:
 
 ```yaml
 spec:
-  image: docker.io/kividb/kividb:v1.2.0-tls
+  image: docker.io/kividb/kividb:v1.2.1-tls
 ```
 
 To move to a later version, just change this value — same as any other
@@ -97,7 +97,7 @@ a referenced [`KividbConfig`](#kividbconfig)'s `spec.tls`). It does
 **not** change which image tag gets pulled — there is no "tls variant
 tag" the operator appends or looks for. If you want a TLS-capable build,
 you set `image` to one yourself (e.g.
-`docker.io/kividb/kividb:v1.2.0-tls`) *and* set `variant: tls` to match;
+`docker.io/kividb/kividb:v1.2.1-tls`) *and* set `variant: tls` to match;
 the two aren't cross-validated by the API server, since only you know
 what a given `image` value actually contains.
 
@@ -770,7 +770,8 @@ spec:
     serving the slots until then.
   - **Write load:** on engine 1.2.0, change the shard count only while
     writes are light, or pause them: a move under heavy writes can lose
-    some (kividbio/kividb#331, fixed in engine 1.2.1).
+    some (kividbio/kividb#331, fixed in engine 1.2.1, the default from
+    operator 0.7.1).
   - **Failures:** a move that fails leaves the slots with the source,
     and is tried again after 30 s (`status.cluster.rebalance.lastError`,
     a `SlotMoveFailed` Event). If the destination restarts during a move,
@@ -997,7 +998,7 @@ usage-tracking to catch this earlier).
 > **On kividb before v1.0.5 the `default` user's password does not keep
 > unauthenticated clients out.** A client that never sends `AUTH` is
 > treated as `default` (see [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md),
-> issue 1). v1.0.5 and later enforce it, including v1.2.0, the default image of this release. If you
+> issue 1). v1.0.5 and later enforce it, including v1.2.1, the default image of this release. If you
 > pin an older engine with `spec.image`, limit who can reach the cluster's
 > Services with a NetworkPolicy.
 
