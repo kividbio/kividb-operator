@@ -21,6 +21,16 @@ master's writes (`FailoverUnfenced` Warning).
 
 ### Fixed
 
+- **The plain-YAML install and `kubectl apply -k config/default` made the
+  manager Deployment with different selectors (#86).** Applying one over the
+  other failed with `spec.selector: ... field is immutable`.
+  `config/manager/manager.yaml` now selects on `app.kubernetes.io/managed-by`
+  too, as `config/default` does; what `config/default` and the OLM bundle
+  render is unchanged. A Deployment made before this from `config/manager`
+  alone, by the plain-YAML install or `kubectl apply -k config/manager`, has
+  the old selector: delete it once (`kubectl delete deploy -n
+  kividb-operator-system kividb-operator-manager`) before applying the new
+  manifests.
 - **`docs/INSTALL.md`'s install without kustomize exited 1 (#67).**
   `kubectl apply -f config/rbac/` applied the RBAC and then failed on
   `config/rbac/kustomization.yaml`, and on a new cluster the namespace did
