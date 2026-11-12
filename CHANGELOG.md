@@ -15,12 +15,6 @@ replica first, or upgrade in a maintenance window if persistence is off.
 
 ### Fixed
 
-- **`kubectl apply -k config/default` warned that `commonLabels` is
-  deprecated** (#69). `config/default` sets the same two labels with
-  `labels` instead, on each object's own labels only: the manager
-  Deployment's pod template carries them in `config/manager`, and since
-  #86 its selector does too. The rendered manifests are byte-for-byte
-  identical, so nothing changes for an existing `config/default` install.
 - **A restarted node of a sharded cluster showed as `?` in `CLUSTER
   SLOTS`** (#57), on itself and on its peers, for about six seconds: it
   started with no hostname, and the agent set one only later. A client
@@ -28,6 +22,20 @@ replica first, or upgrade in a maintenance window if persistence is off.
   starts with `--cluster-announce-hostname`, its pod's DNS name, which
   every engine with `--cluster-announce-ip` (1.1.0 on) takes. The agent
   still sets the address of a Service a pod is exposed through.
+- **`kubectl apply -k config/default` warned that `commonLabels` is
+  deprecated** (#69). `config/default` sets the same two labels with
+  `labels` instead, on each object's own labels only: the manager
+  Deployment's pod template carries them in `config/manager`, and since
+  #86 its selector does too. The rendered manifests are byte-for-byte
+  identical, so nothing changes for an existing `config/default` install.
+- **A refused bootstrap left the cluster's phase empty** (#51), and its
+  `Bootstrapped` condition said `RestoreFailed` though no restore ran. A
+  pass the bootstrap holds never reached the code that sets the phase, so
+  it was empty through every bootstrap, and the GUI showed `Unknown`. The
+  phase is now `Provisioning` while the bootstrap waits or restores, and
+  `Error` once it has failed or was refused, with the reason `Refused` on
+  the condition for a refusal. A restore started after the spec is fixed
+  no longer keeps the refusal in `status.bootstrap.error`.
 
 ## [0.7.1] - 2026-11-12
 
