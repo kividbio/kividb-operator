@@ -112,11 +112,16 @@ kubectl apply -k config/rbac      # ServiceAccount, ClusterRole(Binding), leader
 kubectl apply -k config/manager   # Deployment
 ```
 
-Or, without kustomize at all, apply the pieces directly:
+Or, without kustomize at all, apply the pieces directly. `config/rbac/`
+holds a `kustomization.yaml` too, which `kubectl apply -f` would try to
+apply and fail on, so its files are named one by one:
 
 ```bash
 kubectl apply -f config/crd/bases/
-kubectl apply -f config/rbac/
+kubectl apply -f config/rbac/service_account.yaml \
+  -f config/rbac/role.yaml -f config/rbac/role_binding.yaml \
+  -f config/rbac/leader_election_role.yaml \
+  -f config/rbac/leader_election_role_binding.yaml
 kubectl apply -f config/manager/manager.yaml
 ```
 
