@@ -6,6 +6,15 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`kubectl apply -k config/default` warned that `commonLabels` is
+  deprecated** (#69). `config/default` sets the same two labels with
+  `labels` instead, on each object's own labels only: the manager
+  Deployment's pod template carries them in `config/manager`, and since
+  #86 its selector does too. The rendered manifests are byte-for-byte
+  identical, so nothing changes for an existing `config/default` install.
+
 ## [0.7.1] - 2026-11-12
 
 A patch release of 0.7.0. The default engine is kividb **1.2.1**. Upgrade
