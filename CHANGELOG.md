@@ -25,6 +25,14 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   status a newer pass has since replaced leaves it alone and looks again
   in 5 s (2 s while a failover holds the old master's writes), logged at
   debug level only.
+- **A refused bootstrap left the cluster's phase empty** (#51), and its
+  `Bootstrapped` condition said `RestoreFailed` though no restore ran. A
+  pass the bootstrap holds never reached the code that sets the phase, so
+  it was empty through every bootstrap, and the GUI showed `Unknown`. The
+  phase is now `Provisioning` while the bootstrap waits or restores, and
+  `Error` once it has failed or was refused, with the reason `Refused` on
+  the condition for a refusal. A restore started after the spec is fixed
+  no longer keeps the refusal in `status.bootstrap.error`.
 
 ## [0.7.1] - 2026-11-12
 
