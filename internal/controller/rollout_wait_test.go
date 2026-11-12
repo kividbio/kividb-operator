@@ -67,7 +67,7 @@ func TestRolloutReportsAReplicaNotInSync(t *testing.T) {
 		if err := h.r.List(ctx, &list, client.InNamespace("default")); err != nil {
 			t.Fatal(err)
 		}
-		statuses, masterPod, _, err := h.r.reconcileRoles(ctx, h.cluster, list.Items)
+		statuses, masterPod, _, err := h.r.reconcileRoles(ctx, h.cluster, h.cluster.Status.DeepCopy(), list.Items)
 		if err != nil {
 			t.Fatal(err)
 		}

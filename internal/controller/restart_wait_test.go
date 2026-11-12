@@ -50,7 +50,7 @@ func (h *rolesHarness) noRestartWait() {
 
 func (h *rolesHarness) assertWaiting(when string) {
 	h.t.Helper()
-	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods()); err == nil {
 		h.t.Fatalf("%s: reconcileRoles succeeded, want it waiting for the master", when)
 	}
 	h.assertNoCall("promote")
@@ -241,7 +241,7 @@ func TestFailover_DoesNotWaitAgainOnceTheWaitRanOut(t *testing.T) {
 			h.assertWaiting("at once")
 			*now = now.Add(16 * time.Second)
 			h.agents.failPromote = map[string]bool{"10.0.0.2": true}
-			if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+			if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods()); err == nil {
 				t.Fatal("reconcileRoles succeeded, want the promotion's error")
 			}
 			if e := eventsWith(rec, "FailoverWait"); len(e) != 2 || !strings.Contains(e[1], "did not come back") {
@@ -249,7 +249,7 @@ func TestFailover_DoesNotWaitAgainOnceTheWaitRanOut(t *testing.T) {
 			}
 			*now = now.Add(5 * time.Second)
 			tried := h.promotes("10.0.0.2")
-			if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+			if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods()); err == nil {
 				t.Fatal("reconcileRoles succeeded, want the promotion's error")
 			}
 			if h.promotes("10.0.0.2") == tried {
@@ -287,7 +287,7 @@ func TestFailover_SaysWhyTheWaitEnded(t *testing.T) {
 			h.assertWaiting("at once")
 			eventsWith(rec, "")
 			tc.end(h)
-			_, _, _, _ = h.r.reconcileRoles(context.Background(), h.cluster, h.pods())
+			_, _, _, _ = h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods())
 			e := eventsWith(rec, "FailoverWait")
 			if len(e) != 1 || !strings.Contains(e[0], tc.want) || strings.Contains(e[0], "came back") {
 				t.Errorf("events %v, want one FailoverWait saying %q", e, tc.want)

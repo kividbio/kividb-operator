@@ -72,6 +72,17 @@ replica first, or upgrade in a maintenance window if persistence is off.
   Deployment's pod template carries them in `config/manager`, and since
   #86 its selector does too. The rendered manifests are byte-for-byte
   identical, so nothing changes for an existing `config/default` install.
+- **Status updates of a replicated cluster conflicted at steady state**
+  (#52), each a `Reconciler error` with a growing backoff: 134 in a few
+  hours on AKS. A pass that starts within milliseconds of the last one's
+  status write reads the cluster from the cache before that write reaches
+  it, and its own write then conflicts. The status is now written as a
+  sharded cluster's is: after a change outside the status, the same
+  status goes onto the latest version, also on the pass that fails over
+  after it has recorded `status.fencedMaster`, and a pass that read a
+  status a newer pass has since replaced leaves it alone and looks again
+  in 5 s (2 s while a failover holds the old master's writes), logged at
+  debug level only.
 - **A refused bootstrap left the cluster's phase empty** (#51), and its
   `Bootstrapped` condition said `RestoreFailed` though no restore ran. A
   pass the bootstrap holds never reached the code that sets the phase, so

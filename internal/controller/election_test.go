@@ -114,7 +114,7 @@ func TestFailover_HoldsWhenAReplicaThatMayBeAheadCannotBeRead(t *testing.T) {
 	h.agents.status["10.0.0.3"].ReplicationOffset = 1200
 	h.agents.liveOffset = map[string]int64{"10.0.0.2": 1500, "10.0.0.3": 1400}
 	h.agents.roleUnanswered = map[string]bool{"10.0.0.2": true}
-	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods()); err == nil {
 		t.Fatalf("reconcileRoles succeeded, want the failover held (calls %v)", h.agents.calls)
 	}
 	h.assertNoCall("promote")
@@ -141,7 +141,7 @@ func TestFailover_TheAnnotationLetsAHeldFailoverGoAhead(t *testing.T) {
 	h.agents.status["10.0.0.3"].ReplicationOffset = 1200
 	h.agents.liveOffset = map[string]int64{"10.0.0.2": 1500, "10.0.0.3": 1400}
 	h.agents.roleUnanswered = map[string]bool{"10.0.0.2": true}
-	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods()); err == nil {
 		t.Fatal("without the annotation the failover went ahead, want it held")
 	}
 	h.cluster.Annotations = map[string]string{kividbv1alpha1.AllowUnreadFailoverAnnotation: "true"}
@@ -181,11 +181,11 @@ func TestFailover_SaysHowLongItHasBeenHeldAndWhatEndsIt(t *testing.T) {
 	h.agents.status["10.0.0.2"].ReplicationOffset = 1000
 	h.agents.status["10.0.0.3"].ReplicationOffset = 1200
 	h.agents.roleUnanswered = map[string]bool{"10.0.0.2": true}
-	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods()); err == nil {
 		t.Fatal("pass 1: the failover went ahead, want it held")
 	}
 	now = now.Add(95 * time.Second)
-	_, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods())
+	_, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods())
 	if err == nil || !strings.Contains(err.Error(), "1m35s") {
 		t.Errorf("pass 2: error %v, want the failover held, for 1m35s", err)
 	}
@@ -297,7 +297,7 @@ func TestFailover_HoldsWhenThePickDidNotCatchUpAndAReplicaCannotBeRead(t *testin
 	h.agents.status["10.0.0.1"] = masterRun(130, "stream-a", "run-0")
 	h.agents.catchUp = map[string]int{"10.0.0.2": -1} // c1-1 stays at 100
 	h.agents.roleUnanswered = map[string]bool{"10.0.0.3": true}
-	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods()); err == nil {
 		t.Fatalf("reconcileRoles succeeded, want the failover held (calls %v)", h.agents.calls)
 	}
 	h.assertNoCall("promote")
