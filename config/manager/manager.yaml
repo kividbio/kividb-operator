@@ -9,7 +9,7 @@ metadata:
     app.kubernetes.io/managed-by: kividb-operator
 spec:
   replicas: 1
-  # The same selector config/default renders, where commonLabels adds
+  # The same selector config/default renders, where its labels add
   # managed-by to it: a selector cannot change, so the plain-YAML install
   # (docs/INSTALL.md) and `kubectl apply -k config/default` must agree.
   selector:
