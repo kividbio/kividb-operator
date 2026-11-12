@@ -6,6 +6,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+**Apply the new `kividbclusters` CRD before `helm upgrade`:** Helm does not
+upgrade it, and the status gains `pods[].podIP` and `fencedMaster`. Until it
+is applied, the API server drops them and failovers do not hold the old
+master's writes (`FailoverUnfenced` Warning).
+
 ### Added
 
 - **An OLM bundle for OperatorHub.io.** `make bundle VERSION=… IMG=…` builds
@@ -20,6 +25,42 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   sample creates `kividb-minimal`.** The `kubectl get pods -l` and
   `kubectl port-forward` commands now use `kividb-minimal`, so they work as
   written.
+
+- **A switchover no longer hands over without holding writes when the pause
+  could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),
+  `CLIENT PAUSE ... WRITE` waits up to 5 s for the writes already in progress
+  and refuses, pausing nothing, if one has not finished (a big `FLUSHALL`, a
+  `DEL` of a huge key, a long script). The switchover took that refusal, and
+  a pause that got no answer within the agent's 5 s, for an engine before
+  kividb 1.1: it promoted the target without waiting for it to catch up,
+  and raised `SwitchoverWithoutPause` telling the user to upgrade an engine
+  that was already new. A write the old master acknowledged then could be
+  lost. Now such a switchover is called off (`SwitchoverAborted`) and tried
+  again; a pause that got no answer is lifted, in case it landed. Only an
+  engine that answers that it does not know the command is switched over
+  without the pause: every kividb has it, so any other refusal (`LOADING`,
+  `BUSY`) aborts too. The pause call is given 7 s, past the engine's wait
+  (or `--agent-timeout`, if longer), and the agent is asked to wait 6 s:
+  its exec request takes a `timeoutMs` (capped at 15 s), which the
+  operator sends for the pause only. An agent before this release ignores
+  it and cuts the pause at 5 s, which now aborts the switchover rather than
+  dropping the pause. The engine counts the pause from the request, so it
+  now lasts the call, the catch-up and a margin (17 s), and the old master
+  is a replica before it runs out. Aborted switchovers back off: 30 s,
+  doubling with each abort in a row up to 10 min, and 2 s between the tries
+  for a master pod being deleted; a `Switchover` condition (`False`,
+  `Aborted`) says why and when the next try is, until one goes through.
+  The failover fence (#53) waits for a pause the same way once the old
+  master has answered, and tries again after a refusal: every try is given
+  the whole call, and new ones start for 3 s after the first, so the fence
+  takes at most two pause calls and that window against a live master that
+  cannot pause (17 s with the default `--agent-timeout`, more with a longer
+  one). A pause that got no answer may have landed, so that
+  master is recorded in `status.fencedMaster` and demoted after the
+  promotion like a fenced one. The `Switchover` condition and the count of
+  aborts go away once no switchover is wanted any more, or the master is
+  another pod.
+
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install
   could not run `KividbDbOps` operations. After applying it again, restart
@@ -46,6 +87,31 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   what is left of the earlier cluster's files, or part of the snapshot,
   never both, and its retry ends with the snapshot's files only. The
   manual restore in `docs/BACKUP_RESTORE.md` removes the same files.
+- **A force-deleted master's last writes were lost** (#53). Its pod object
+  is gone at once and the operator fails over within the second, but its
+  container runs on until its replicas have left it, acknowledging the
+  writes that come in on connections clients already had to it: 176 lost in
+  the AKS test on engine 1.2.1, 689 to 954 per force-delete on kind. Before
+  promoting a replica, the operator now holds the old master's writes
+  (`CLIENT PAUSE WRITE` through its agent, for the pod's termination grace
+  period -- 10 s at least -- and 5 s more) at the address and engine run
+  `status.pods[]` last recorded for it (`podIP`, new, and `runID`), waits
+  for the replica to catch up with it (5 s at most, less once the old
+  master stops answering), records it in `status.fencedMaster` (new), and
+  once the replica is promoted makes the old master its replica and
+  disconnects its clients, as a switchover does. Should that fail, or the
+  operator restart, every pass holds its writes again and retries, every
+  2 s, until it is done or the engine there is gone (another engine
+  answers, or none does twice in a row); the first failure raises a
+  `FencedMasterNotDemoted` Warning. An address that does not answer is
+  asked again for about 1 s (one that refuses the connection, once); a
+  pause that goes unanswered is sent again for up to 3 s. A failover that
+  goes on without the fence, or before the replica caught up, raises a
+  `FailoverUnfenced` Warning. A failed promotion no longer lifts the old
+  master's pause: it may have gone through. The agent's preStop hook looks at a stopping master every 10 ms
+  instead of 250 ms.
+  `hack/e2e/10-force-delete-fence.sh` force-deletes the master under load
+  and counts the writes lost (skipped in CI: `SKIP_FENCE=1`).
 
 ## [0.7.0] - 2026-11-04
 
