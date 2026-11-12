@@ -8,7 +8,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 **Read before upgrading:** the pods of every sharded cluster roll once,
 replicas first and each master after a handover, for the new
-`--cluster-announce-hostname` flag (#57).
+`--cluster-announce-hostname` flag (#57). A shard with no replicas
+restarts its master in place: its slots are unavailable while it does,
+and with persistence off its data is lost. Scale such a shard to one
+replica first, or upgrade in a maintenance window if persistence is off.
 
 ### Fixed
 
