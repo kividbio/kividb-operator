@@ -115,7 +115,7 @@ separately with `kubectl apply -k config/gui`, see [GUI.md](GUI.md)).
 (`make deploy` does both):
 
 ```bash
-kubectl create namespace kividb-operator-system
+kubectl create namespace kividb-operator-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -k config/default
 ```
 
