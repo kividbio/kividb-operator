@@ -165,13 +165,15 @@ kubectl port-forward -n kividb-operator-system svc/kividb-operator-gui 8090:8090
 
 ## Status
 
-This project is at `v0.7.0` — see [CHANGELOG.md](CHANGELOG.md). Validated
-against kividb **v1.2.0** (that tag is also the default when
+This project is at `v0.7.1` — see [CHANGELOG.md](CHANGELOG.md). Validated
+against kividb **v1.2.1** (that tag is also the default when
 `spec.image` is unset), which fixes the engine limitations the docs
 mention (see
 [KIVIDB_ENGINE_ISSUES.md](docs/KIVIDB_ENGINE_ISSUES.md#status-by-engine-version)).
-Coming from 0.6.x, read the CHANGELOG's "Read before upgrading" first. The
-CRD API version is `kividb.io/v1alpha1`: expect it to evolve.
+Read the CHANGELOG's "Read before upgrading" first: an upgrade restarts
+every cluster that leaves its images unset, and a master with no replica
+restarts in place (coming from 0.6.x, read 0.7.0's too). The CRD API
+version is `kividb.io/v1alpha1`: expect it to evolve.
 
 ## License
 

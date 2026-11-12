@@ -71,6 +71,18 @@ If you skip this when upgrading to a release that adds a kind (0.4.0 adds
 kind is not installed and ignores objects of it; apply the CRDs and
 restart the operator Deployment to enable it.
 
+**An upgrade can restart every cluster.** A release that changes the
+default agent image (every release does) or the default engine image rolls
+each `KividbCluster` that leaves `spec.agentImage` or `spec.image` unset,
+one pod at a time. A master with replicas hands its role to an in-sync
+replica first. A master with none (`replicas: 0`, in a replicated cluster
+or in each shard) is restarted in place: the cluster, or that shard's
+slots, are unavailable until it is back, and without the append-only file
+it keeps only what its shutdown snapshot saved. Before upgrading, give it
+a replica, or keep the append-only file on, or pin both images to put the
+restart off. The CHANGELOG's "Read before upgrading" says what a given
+release changes.
+
 ### Uninstalling
 
 ```bash
@@ -115,11 +127,18 @@ kubectl apply -k config/rbac      # ServiceAccount, ClusterRole(Binding), leader
 kubectl apply -k config/manager   # Deployment
 ```
 
-Or, without kustomize at all, apply the pieces directly:
+Or, without kustomize at all, apply the pieces directly. `config/rbac/`
+also holds a `kustomization.yaml`, which `kubectl apply -f` rejects, so its
+files are named one by one. None of these manifests creates the namespace,
+so the first line does:
 
 ```bash
+kubectl create namespace kividb-operator-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f config/crd/bases/
-kubectl apply -f config/rbac/
+kubectl apply -f config/rbac/service_account.yaml \
+  -f config/rbac/role.yaml -f config/rbac/role_binding.yaml \
+  -f config/rbac/leader_election_role.yaml \
+  -f config/rbac/leader_election_role_binding.yaml
 kubectl apply -f config/manager/manager.yaml
 ```
 

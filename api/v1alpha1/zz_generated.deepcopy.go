@@ -394,6 +394,9 @@ func (in *KividbClusterStatus) DeepCopyInto(out *KividbClusterStatus) {
 	if in.LastFailoverTime != nil {
 		out.LastFailoverTime = in.LastFailoverTime.DeepCopy()
 	}
+	if in.FencedMaster != nil {
+		out.FencedMaster = in.FencedMaster.DeepCopy()
+	}
 	if in.Bootstrap != nil {
 		out.Bootstrap = in.Bootstrap.DeepCopy()
 	}
@@ -403,6 +406,19 @@ func (in *KividbClusterStatus) DeepCopyInto(out *KividbClusterStatus) {
 			in.Conditions[i].DeepCopyInto(&out.Conditions[i])
 		}
 	}
+}
+
+func (in *FencedMaster) DeepCopyInto(out *FencedMaster) {
+	*out = *in
+}
+
+func (in *FencedMaster) DeepCopy() *FencedMaster {
+	if in == nil {
+		return nil
+	}
+	out := new(FencedMaster)
+	in.DeepCopyInto(out)
+	return out
 }
 
 func (in *KividbClusterStatus) DeepCopy() *KividbClusterStatus {

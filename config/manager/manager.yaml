@@ -9,10 +9,14 @@ metadata:
     app.kubernetes.io/managed-by: kividb-operator
 spec:
   replicas: 1
+  # config/default renders this selector unchanged: its labels do not
+  # modify selectors. A Deployment's selector is immutable, so changing
+  # it would break `kubectl apply` for installs using this selector.
   selector:
     matchLabels:
       app.kubernetes.io/name: kividb-operator
       app.kubernetes.io/component: manager
+      app.kubernetes.io/managed-by: kividb-operator
   template:
     metadata:
       labels:
@@ -27,7 +31,7 @@ spec:
         runAsGroup: 65532
       containers:
         - name: manager
-          image: docker.io/kividb/kividb-operator:0.7.0
+          image: docker.io/kividb/kividb-operator:0.7.1
           imagePullPolicy: IfNotPresent
           args:
             - --leader-elect
