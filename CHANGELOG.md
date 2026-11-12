@@ -21,9 +21,10 @@ master's writes (`FailoverUnfenced` Warning).
 
 ### Fixed
 
-- **`docs/INSTALL.md`'s install without kustomize exited 1** (#67).
+- **`docs/INSTALL.md`'s install without kustomize exited 1 (#67).**
   `kubectl apply -f config/rbac/` applied the RBAC and then failed on
-  `config/rbac/kustomization.yaml`. The steps now name the RBAC files.
+  `config/rbac/kustomization.yaml`, and on a new cluster the namespace did
+  not exist. The steps now create the namespace and name the RBAC files.
 - **A switchover no longer hands over without holding writes when the pause
   could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),
   `CLIENT PAUSE ... WRITE` waits up to 5 s for the writes already in progress

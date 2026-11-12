@@ -113,10 +113,12 @@ kubectl apply -k config/manager   # Deployment
 ```
 
 Or, without kustomize at all, apply the pieces directly. `config/rbac/`
-holds a `kustomization.yaml` too, which `kubectl apply -f` would try to
-apply and fail on, so its files are named one by one:
+also holds a `kustomization.yaml`, which `kubectl apply -f` rejects, so its
+files are named one by one. None of these manifests creates the namespace,
+so the first line does:
 
 ```bash
+kubectl create namespace kividb-operator-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f config/crd/bases/
 kubectl apply -f config/rbac/service_account.yaml \
   -f config/rbac/role.yaml -f config/rbac/role_binding.yaml \
