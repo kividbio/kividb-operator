@@ -138,7 +138,7 @@ func TestReconcileRoles_FailoverSkipsEmptiedReplicas(t *testing.T) {
 		if err := h.r.List(context.Background(), &list, client.InNamespace(h.cluster.Namespace)); err != nil {
 			t.Fatal(err)
 		}
-		_, m, _, err := h.r.reconcileRoles(context.Background(), h.cluster, list.Items)
+		_, m, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), list.Items)
 		return m, err
 	}
 
@@ -162,7 +162,7 @@ func TestReconcileRoles_FailoverSkipsEmptiedReplicas(t *testing.T) {
 		ctx := context.Background()
 		for pass := 1; pass <= 2; pass++ {
 			read := h.cluster.Status.DeepCopy()
-			statuses, m, failover, err := h.r.reconcileRoles(ctx, h.cluster, h.list())
+			statuses, m, failover, err := h.r.reconcileRoles(ctx, h.cluster, h.cluster.Status.DeepCopy(), h.list())
 			if err == nil {
 				t.Fatalf("pass %d: promoted %q, want the failover to be refused", pass, m)
 			}

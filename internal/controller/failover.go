@@ -57,7 +57,12 @@ func readyFalseSince(pod *corev1.Pod) (time.Time, bool) {
 // It returns the per-pod status list, the current master pod name, and
 // whether a failover was performed on this pass (used by the caller to
 // stamp status.LastFailoverTime).
-func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []corev1.Pod) ([]kividbv1alpha1.KividbPodStatus, string, bool, error) {
+//
+// read is the status as stored at c's resourceVersion, which updateStatus
+// tells a newer pass's write by (writeStatus). The fence is written before
+// the promotion (recordFence), and goes into read too: it is this pass's
+// own write, not a newer pass's.
+func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus, pods []corev1.Pod) ([]kividbv1alpha1.KividbPodStatus, string, bool, error) {
 	log := logf.FromContext(ctx)
 	port := getPort(c)
 
@@ -219,7 +224,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			last := previous[currentMasterName]
 			heldOld = r.fenceOldMaster(ctx, c, last, views[candidate])
 			if heldOld != "" {
-				if err := r.recordFence(ctx, c, kividbv1alpha1.FencedMaster{Name: last.Name, PodIP: heldOld, RunID: last.RunID}); err != nil {
+				if err := r.recordFence(ctx, c, read, kividbv1alpha1.FencedMaster{Name: last.Name, PodIP: heldOld, RunID: last.RunID}); err != nil {
 					r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
 					return nil, currentMasterName, false, fmt.Errorf("recording the fenced master %s before promoting %s: %w", currentMasterName, candidate, err)
 				}

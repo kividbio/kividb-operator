@@ -407,7 +407,7 @@ func TestFailover_DemotesTheFencedMasterWhenAStepAfterThePromotionFails(t *testi
 			return cl.Patch(ctx, obj, patch, opts...)
 		},
 	})
-	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods()); err == nil {
 		t.Fatal("reconcileRoles succeeded, want the label's error")
 	}
 	h.assertCallOrder("promote 10.0.0.2", "replicaof 10.0.0.1 -> 10.0.0.2", "exec 10.0.0.1 CLIENT KILL TYPE normal", "exec 10.0.0.1 CLIENT UNPAUSE")
@@ -483,7 +483,7 @@ func TestFailover_UnfencedWithoutARecordedAddress(t *testing.T) {
 func TestFailover_KeepsTheFenceWhenThePromotionFails(t *testing.T) {
 	h := newFenceHarness(t)
 	h.agents.failPromote = map[string]bool{"10.0.0.2": true}
-	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods()); err == nil {
 		t.Fatal("reconcileRoles succeeded, want the promotion's error")
 	}
 	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2")
@@ -502,7 +502,7 @@ func TestFailover_KeepsTheFenceWhenThePromotionFails(t *testing.T) {
 func TestFailover_PromoteThatErrorsAfterTakingEffect(t *testing.T) {
 	h := newFenceHarness(t)
 	h.agents.failPromoteAfter = map[string]bool{"10.0.0.2": true}
-	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.pods()); err == nil {
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods()); err == nil {
 		t.Fatal("pass 1: reconcileRoles succeeded, want the promotion's error")
 	}
 	h.agents.failPromoteAfter = nil

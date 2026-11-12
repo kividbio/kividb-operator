@@ -255,7 +255,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("listing pods: %w", err)
 	}
 
-	statuses, masterPod, failoverHappened, err := r.reconcileRoles(ctx, &c, podList.Items)
+	statuses, masterPod, failoverHappened, err := r.reconcileRoles(ctx, &c, read, podList.Items)
 	if err != nil {
 		log.Error(err, "role reconciliation failed")
 		// Fall through to still persist a status update reflecting the
@@ -273,7 +273,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	r.notePersistence(&c, kdbConfig)
 	if statusErr := r.updateStatus(ctx, &c, read, statuses, masterPod, previousMasterPod, failoverHappened, err); errors.Is(statusErr, errStaleStatus) {
 		log.V(1).Info("status changed since this pass read it; looking again")
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: staleRequeue(&c)}, nil
 	} else if statusErr != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", statusErr)
 	}
@@ -390,18 +390,28 @@ func (r *KividbClusterReconciler) reconcileHeld(ctx context.Context, c *kividbv1
 	}
 
 	previousMasterPod := c.Status.MasterPod
-	statuses, masterPod, failoverHappened, err := r.reconcileRoles(ctx, c, podList.Items)
+	statuses, masterPod, failoverHappened, err := r.reconcileRoles(ctx, c, read, podList.Items)
 	if err != nil {
 		log.Error(err, "role reconciliation failed")
 	}
 	r.reconcileHandover(ctx, c, podList.Items, statuses, masterPod)
 	if statusErr := r.updateStatus(ctx, c, read, statuses, masterPod, previousMasterPod, failoverHappened, errors.Join(held, err)); errors.Is(statusErr, errStaleStatus) {
 		log.V(1).Info("status changed since this pass read it; looking again")
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: staleRequeue(c)}, nil
 	} else if statusErr != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", statusErr)
 	}
 	return ctrl.Result{RequeueAfter: requeue}, nil
+}
+
+// staleRequeue is when a pass whose status write was stale looks again:
+// soon, and while a failover holds the old master's writes, before that
+// pause runs out (fencedMasterRetry), as a pass whose write landed does.
+func staleRequeue(c *kividbv1alpha1.KividbCluster) time.Duration {
+	if c.Status.FencedMaster != nil {
+		return fencedMasterRetry
+	}
+	return 5 * time.Second
 }
 
 // listensOn reports whether the kividb container of every pod declares

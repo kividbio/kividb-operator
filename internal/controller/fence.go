@@ -197,16 +197,19 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 // holds the writes of (status.fencedMaster), so that it is made the new
 // master's replica even if that cannot be done right after the promotion,
 // or the operator restarts in between. Only that field is written; c keeps
-// the rest of this pass's status for updateStatus to write.
-func (r *KividbClusterReconciler) recordFence(ctx context.Context, c *kividbv1alpha1.KividbCluster, fm kividbv1alpha1.FencedMaster) error {
+// the rest of this pass's status for updateStatus to write. When the write
+// lands on c's version, read, the status stored at that version, gets the
+// field too, so updateStatus does not take it for a newer pass's write.
+func (r *KividbClusterReconciler) recordFence(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus, fm kividbv1alpha1.FencedMaster) error {
 	patched := c.DeepCopy()
 	patched.Status.FencedMaster = &fm
 	err := r.Status().Patch(ctx, patched, client.MergeFromWithOptions(c, client.MergeFromWithOptimisticLock{}))
 	switch {
 	case err == nil:
 		// Nothing was written since c was read: updateStatus goes on from
-		// the version this made.
+		// the version this made, whose status is read and the fence.
 		c.ResourceVersion = patched.ResourceVersion
+		read.FencedMaster = fm.DeepCopy()
 	case apierrors.IsConflict(err):
 		// c was read before an overlapping pass's status write (the cache
 		// lags behind the API server during a failover). Write the field

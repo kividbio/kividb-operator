@@ -20,9 +20,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   status write reads the cluster from the cache before that write reaches
   it, and its own write then conflicts. The status is now written as a
   sharded cluster's is: after a change outside the status, the same
-  status goes onto the latest version, and a pass that read a status a
-  newer pass has since replaced leaves it alone and looks again in 5 s,
-  logged at debug level only.
+  status goes onto the latest version, also on the pass that fails over
+  after it has recorded `status.fencedMaster`, and a pass that read a
+  status a newer pass has since replaced leaves it alone and looks again
+  in 5 s (2 s while a failover holds the old master's writes), logged at
+  debug level only.
 
 ## [0.7.1] - 2026-11-12
 

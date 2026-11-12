@@ -367,7 +367,7 @@ func (h *rolesHarness) reconcile() (masterPod string, failover bool) {
 	if err := h.r.List(context.Background(), &list, client.InNamespace(h.cluster.Namespace)); err != nil {
 		h.t.Fatal(err)
 	}
-	_, masterPod, failover, err := h.r.reconcileRoles(context.Background(), h.cluster, list.Items)
+	_, masterPod, failover, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), list.Items)
 	if err != nil {
 		h.t.Fatalf("reconcileRoles: %v", err)
 	}
@@ -384,7 +384,7 @@ func (h *rolesHarness) reconcileAndPersist() (masterPod string, failover bool) {
 	if err := h.r.List(context.Background(), &list, client.InNamespace(h.cluster.Namespace)); err != nil {
 		h.t.Fatal(err)
 	}
-	statuses, masterPod, failover, err := h.r.reconcileRoles(context.Background(), h.cluster, list.Items)
+	statuses, masterPod, failover, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), list.Items)
 	if err != nil {
 		h.t.Fatalf("reconcileRoles: %v", err)
 	}
@@ -556,7 +556,7 @@ func TestReconcileRoles_BootstrapElectsSeededPod(t *testing.T) {
 	if err := h.r.List(context.Background(), &list, client.InNamespace(h.cluster.Namespace)); err != nil {
 		t.Fatal(err)
 	}
-	if _, m, _, err := h.r.reconcileRoles(context.Background(), h.cluster, list.Items); err == nil {
+	if _, m, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), list.Items); err == nil {
 		t.Fatalf("elected %q while the seeded pod was not ready, want an error", m)
 	}
 	if len(h.agents.calls) != 0 {
@@ -643,7 +643,7 @@ func TestReconcileRoles_RestartedBehindKeepsThePauseWhenThePromotionFails(t *tes
 		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true, ReplicationOffset: 1000},
 	}
 	h.agents.failPromoteAfter = map[string]bool{"10.0.0.2": true}
-	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.list()); err == nil {
+	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.list()); err == nil {
 		t.Fatal("reconcileRoles succeeded, want the promotion's error")
 	}
 	h.assertCallOrder("exec 10.0.0.9 CLIENT PAUSE 10000 WRITE", "promote 10.0.0.2")
@@ -929,7 +929,7 @@ func (h *rolesHarness) pass() (masterPod string, failover bool) {
 	if err := h.r.List(context.Background(), &list, client.InNamespace(h.cluster.Namespace)); err != nil {
 		h.t.Fatal(err)
 	}
-	statuses, masterPod, failover, err := h.r.reconcileRoles(context.Background(), h.cluster, list.Items)
+	statuses, masterPod, failover, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), list.Items)
 	if err != nil {
 		h.t.Fatalf("reconcileRoles: %v", err)
 	}
@@ -997,7 +997,7 @@ func TestReconcileRoles_UnreachablePodKeepsItsLastOffset(t *testing.T) {
 	h.cluster.Status.Pods = []kividbv1alpha1.KividbPodStatus{
 		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true, ReplicationOffset: 1000, Keys: 42},
 	}
-	statuses, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.list())
+	statuses, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.list())
 	if err != nil {
 		t.Fatal(err)
 	}

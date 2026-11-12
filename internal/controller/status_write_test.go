@@ -14,9 +14,9 @@ import (
 
 // steadyCase is a replicated cluster whose master and replica are both up:
 // a pass changes no roles, only refreshes the status.
-func steadyCase(t *testing.T) *failoverCase {
+func steadyCase(t *testing.T, edit func(*kividbv1alpha1.KividbCluster)) *failoverCase {
 	t.Helper()
-	f := newFailoverCase(t, nil, nil)
+	f := newFailoverCase(t, edit, nil)
 	var p corev1.Pod
 	if err := f.cl.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "c1-0"}, &p); err != nil {
 		t.Fatal(err)
@@ -34,8 +34,45 @@ func steadyCase(t *testing.T) *failoverCase {
 // (#52). It is not an error: the pass leaves the newer status alone, and
 // looks again soon.
 func TestReplicatedStalePassIsNotAnError(t *testing.T) {
+	f := steadyCase(t, nil)
+	f.wantStalePass(t, 5*time.Second)
+}
+
+// A stale pass while a failover holds the old master's writes looks again
+// before that pause runs out (fencedMasterRetry), as a pass that wrote its
+// status does: the next pass is the one that makes it a replica.
+func TestReplicatedStalePassComesBackSoonWhileTheFencedMasterIsHeld(t *testing.T) {
+	f := steadyCase(t, fencedC19)
+	f.agents.status["10.0.0.9"] = masterRun(50, "stream-a", "run-9")
+	f.agents.failReplicaOf = map[string]bool{"10.0.0.9": true}
+	f.wantStalePass(t, fencedMasterRetry)
+}
+
+// The same for a pass that holds back the cluster's objects (reconcileHeld):
+// it still runs the roles, so it is the one that demotes the fenced master.
+func TestHeldStalePassComesBackSoonWhileTheFencedMasterIsHeld(t *testing.T) {
+	f := steadyCase(t, func(c *kividbv1alpha1.KividbCluster) {
+		fencedC19(c)
+		c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "missing"}
+	})
+	f.agents.status["10.0.0.9"] = masterRun(50, "stream-a", "run-9")
+	f.agents.failReplicaOf = map[string]bool{"10.0.0.9": true}
+	f.wantStalePass(t, fencedMasterRetry)
+}
+
+// fencedC19 gives the cluster a fenced master, c1-9 at 10.0.0.9, whose
+// writes a failover holds and that is not a replica yet.
+func fencedC19(c *kividbv1alpha1.KividbCluster) {
+	c.Status.FencedMaster = &kividbv1alpha1.FencedMaster{Name: "c1-9", PodIP: "10.0.0.9", RunID: "run-9"}
+}
+
+// wantStalePass runs a pass that reads the cluster a version behind, before
+// the previous pass's status write reaches the cache, and checks that it
+// leaves the newer status alone, without an error, and looks again after
+// requeue.
+func (f *failoverCase) wantStalePass(t *testing.T, requeue time.Duration) {
+	t.Helper()
 	ctx := context.Background()
-	f := steadyCase(t)
 	key := client.ObjectKeyFromObject(f.c)
 	var stale kividbv1alpha1.KividbCluster
 	if err := f.cl.Get(ctx, key, &stale); err != nil {
@@ -61,8 +98,8 @@ func TestReplicatedStalePassIsNotAnError(t *testing.T) {
 		},
 	})
 	res, err := f.r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-	if err != nil || res.RequeueAfter != 5*time.Second {
-		t.Fatalf("Reconcile = %+v, %v; want no error, and a look again in 5s", res, err)
+	if err != nil || res.RequeueAfter != requeue {
+		t.Fatalf("Reconcile = %+v, %v; want no error, and a look again in %s", res, err, requeue)
 	}
 	var got kividbv1alpha1.KividbCluster
 	_ = f.cl.Get(ctx, key, &got)
@@ -71,10 +108,46 @@ func TestReplicatedStalePassIsNotAnError(t *testing.T) {
 	}
 }
 
+// The fence is this pass's own status write (recordFence). A conflict
+// after it, from a label or annotation edit, is settled by writing the
+// pass's status onto the latest version, not taken for a newer pass's
+// write: dropped, it would leave masterPod on the old master, and the next
+// failover decides from that status.
+func TestReplicatedStatusLandsAfterTheFenceAndALabelEdit(t *testing.T) {
+	ctx := context.Background()
+	h := newFenceHarness(t)
+	read := h.cluster.Status.DeepCopy()
+	previous := h.cluster.Status.MasterPod
+	statuses, master, failover, err := h.r.reconcileRoles(ctx, h.cluster, read, h.pods())
+	if err != nil || master != "c1-1" || !failover {
+		t.Fatalf("reconcileRoles = %q, failover %v, %v; want a failover to c1-1", master, failover, err)
+	}
+	var edited kividbv1alpha1.KividbCluster
+	if err := h.r.Get(ctx, client.ObjectKeyFromObject(h.cluster), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.Labels = map[string]string{"team": "a"}
+	if err := h.r.Update(ctx, &edited); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.r.updateStatus(ctx, h.cluster, read, statuses, master, previous, failover, nil); err != nil {
+		t.Fatalf("updateStatus: %v; want this pass's status written onto the latest version", err)
+	}
+	var stored kividbv1alpha1.KividbCluster
+	if err := h.r.Get(ctx, client.ObjectKeyFromObject(h.cluster), &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.MasterPod != "c1-1" || stored.Status.LastFailoverTime == nil || stored.Status.FencedMaster != nil || stored.Labels["team"] != "a" {
+		t.Errorf("stored masterPod %q, lastFailoverTime %v, fencedMaster %+v, labels %v; want c1-1, set, none (it was demoted), and the label kept",
+			stored.Status.MasterPod, stored.Status.LastFailoverTime, stored.Status.FencedMaster, stored.Labels)
+	}
+}
+
 // A conflict from a change outside the status (a label, an annotation) is
 // settled by writing the same status onto the latest version.
 func TestReplicatedStatusLandsAfterAConflictOutsideIt(t *testing.T) {
-	f := steadyCase(t)
+	f := steadyCase(t, nil)
 	key := client.ObjectKeyFromObject(f.c)
 	labeled := false
 	f.r.Client = interceptor.NewClient(f.cl.(client.WithWatch), interceptor.Funcs{
