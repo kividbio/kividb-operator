@@ -110,9 +110,12 @@ running it.
 ## Option B: kustomize / kubectl
 
 Installs the CRD, RBAC, and manager Deployment (no GUI — deploy it
-separately from `config/gui/`, see [GUI.md](GUI.md)):
+separately with `kubectl apply -k config/gui`, see [GUI.md](GUI.md)).
+`config/default` does not create its namespace, so create it first
+(`make deploy` does both):
 
 ```bash
+kubectl create namespace kividb-operator-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -k config/default
 ```
 
