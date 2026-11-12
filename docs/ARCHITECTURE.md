@@ -13,7 +13,7 @@ settings directly. Those live in three separate, reusable kinds —
 `KividbConfig`, `KividbAclConfig`, `KividbSnapshotConfig` — that a cluster
 references by name (`spec.configRef`, `spec.aclConfigRef`,
 `spec.snapshotConfigRef`). A fourth kind, `KividbSnapshot`, is a
-read-only record the operator creates per backup run, and a sixth,
+read-only record the operator creates per backup run, and a fifth,
 `KividbDbOps`, asks for one operation on a cluster (a rolling restart).
 See [CONFIGURATION.md](CONFIGURATION.md) for the full field reference on
 all six.

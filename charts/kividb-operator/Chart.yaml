@@ -94,6 +94,11 @@ annotations:
       name: kividbsnapshots.kividb.io
       displayName: KiviDB Snapshot
       description: Operator-created record of a single backup run (read-only)
+    - kind: KividbDbOps
+      version: v1alpha1
+      name: kividbdbops.kividb.io
+      displayName: KiviDB Database Operation
+      description: A declarative operation against a KividbCluster; in this release, a rolling restart
   artifacthub.io/crdsExamples: |
     - apiVersion: kividb.io/v1alpha1
       kind: KividbCluster

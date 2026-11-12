@@ -335,9 +335,8 @@ kubectl logs -n kividb-operator-system deploy/kividb-operator-manager
   namespace the operator runs in.
 - `no matches for kind "KividbCluster"` (or `KividbConfig`/
   `KividbAclConfig`/`KividbSnapshotConfig`/`KividbSnapshot`/`KividbDbOps`)
-  — that CRD isn't installed; run `kubectl apply -k config/crd` (installs
-  all six)
-  or reinstall/upgrade the Helm chart (CRDs in
+  — that CRD isn't installed; run `kubectl apply -k config/crd`
+  (installs all six) or reinstall/upgrade the Helm chart (CRDs in
   `charts/kividb-operator/crds/` are installed once by Helm and are
   **not** upgraded automatically on `helm upgrade` — see
   [RELEASING.md](RELEASING.md) and [INSTALL.md](INSTALL.md) for the
