@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -141,6 +142,48 @@ func TestReplicatedStatusLandsAfterTheFenceAndALabelEdit(t *testing.T) {
 	if stored.Status.MasterPod != "c1-1" || stored.Status.LastFailoverTime == nil || stored.Status.FencedMaster != nil || stored.Labels["team"] != "a" {
 		t.Errorf("stored masterPod %q, lastFailoverTime %v, fencedMaster %+v, labels %v; want c1-1, set, none (it was demoted), and the label kept",
 			stored.Status.MasterPod, stored.Status.LastFailoverTime, stored.Status.FencedMaster, stored.Labels)
+	}
+}
+
+// Removing allow-unread-failover after its failover is a patch without a
+// lock, so it goes onto a newer pass's status write too. The pass that
+// removes it must not take that version for its own status write, which
+// would then meet no conflict and go over the newer status.
+func TestReplicatedStalePassThatClearsTheOverrideLeavesTheNewerStatus(t *testing.T) {
+	ctx := context.Background()
+	h := newFenceHarness(t)
+	h.cluster.Annotations = map[string]string{kividbv1alpha1.AllowUnreadFailoverAnnotation: "true"}
+	if err := h.r.Update(ctx, h.cluster); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKeyFromObject(h.cluster)
+	var c kividbv1alpha1.KividbCluster
+	if err := h.r.Get(ctx, key, &c); err != nil {
+		t.Fatal(err)
+	}
+	read := c.Status.DeepCopy()
+	// A newer pass's write, after this one read the cluster.
+	var newer kividbv1alpha1.KividbCluster
+	_ = h.r.Get(ctx, key, &newer)
+	newer.Status.MasterPod = "c1-2"
+	if err := h.r.Status().Update(ctx, &newer); err != nil {
+		t.Fatal(err)
+	}
+
+	h.r.clearUnreadFailoverOverride(ctx, &c, read)
+	c.Status.MasterPod = "c1-1"
+	if err := h.r.writeStatus(ctx, &c, read); !errors.Is(err, errStaleStatus) {
+		t.Errorf("writeStatus = %v, want errStaleStatus", err)
+	}
+	var stored kividbv1alpha1.KividbCluster
+	if err := h.r.Get(ctx, key, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.MasterPod != "c1-2" {
+		t.Errorf("stored masterPod %q, want the newer pass's c1-2", stored.Status.MasterPod)
+	}
+	if v, ok := stored.Annotations[kividbv1alpha1.AllowUnreadFailoverAnnotation]; ok {
+		t.Errorf("%s is still %q after the failover it allowed", kividbv1alpha1.AllowUnreadFailoverAnnotation, v)
 	}
 }
 

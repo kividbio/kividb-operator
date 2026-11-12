@@ -12,6 +12,7 @@ import (
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -377,7 +378,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		if needsFailover && c.Annotations[kividbv1alpha1.AllowUnreadFailoverAnnotation] == "true" {
 			// One failover per annotation: left set, it would skip the
 			// hold for an unread replica on every later failover too.
-			r.clearUnreadFailoverOverride(ctx, c)
+			r.clearUnreadFailoverOverride(ctx, c, read)
 		}
 		// Refresh our view of the new master so downstream REPLICAOF checks
 		// below see it as master rather than stale replica state, keeping its
@@ -796,8 +797,11 @@ func (r *KividbClusterReconciler) event(c *kividbv1alpha1.KividbCluster, eventTy
 // clearUnreadFailoverOverride removes AllowUnreadFailoverAnnotation from c,
 // once the failover it was set for has gone through. The patch goes through
 // a copy, so the status this pass has not written yet is not replaced by the
-// stored one; c takes the new resourceVersion for that write.
-func (r *KividbClusterReconciler) clearUnreadFailoverOverride(ctx context.Context, c *kividbv1alpha1.KividbCluster) {
+// stored one. It has no lock, so it also lands after a newer pass's status
+// write: c takes the new resourceVersion only if the stored status is still
+// read. Otherwise c keeps its own, and its status write conflicts and comes
+// back stale (writeStatus) rather than go over the newer status.
+func (r *KividbClusterReconciler) clearUnreadFailoverOverride(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus) {
 	stored := c.DeepCopy()
 	patch := client.MergeFrom(stored.DeepCopy())
 	delete(stored.Annotations, kividbv1alpha1.AllowUnreadFailoverAnnotation)
@@ -808,7 +812,9 @@ func (r *KividbClusterReconciler) clearUnreadFailoverOverride(ctx context.Contex
 		return
 	}
 	delete(c.Annotations, kividbv1alpha1.AllowUnreadFailoverAnnotation)
-	c.ResourceVersion = stored.ResourceVersion
+	if equality.Semantic.DeepEqual(stored.Status, *read) {
+		c.ResourceVersion = stored.ResourceVersion
+	}
 }
 
 // failoverHold is when the failover away from master was first held back
