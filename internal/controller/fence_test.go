@@ -143,7 +143,8 @@ func TestFailover_MakesTheFencedMasterAReplicaAtOnce(t *testing.T) {
 func TestFailover_WaitsForTheCandidateToCatchUpWithTheFencedMaster(t *testing.T) {
 	h := newFenceHarness(t)
 	h.agents.status["10.0.0.1"] = masterRun(120, "stream-a", "run-0")
-	h.agents.catchUp = map[string]int{"10.0.0.2": 2}
+	// c1-2 never catches up: c1-1 stays the one that holds the most (#78).
+	h.agents.catchUp = map[string]int{"10.0.0.2": 2, "10.0.0.3": -1}
 	h.assertFailoverTo("c1-1")
 	if n := h.agents.catchUp["10.0.0.2"]; n != 0 {
 		t.Errorf("c1-1 was promoted %d ROLE answers before it had caught up with the old master", n)
@@ -156,7 +157,8 @@ func TestFailover_KeepsWaitingForTheCatchUpPastFenceTimeout(t *testing.T) {
 	h := newFenceHarness(t)
 	rec := h.recordEvents()
 	h.agents.status["10.0.0.1"] = masterRun(120, "stream-a", "run-0")
-	h.agents.catchUp = map[string]int{"10.0.0.2": int(2 * fenceTimeout / switchoverPoll)}
+	// c1-2 never catches up: c1-1 stays the one that holds the most (#78).
+	h.agents.catchUp = map[string]int{"10.0.0.2": int(2 * fenceTimeout / switchoverPoll), "10.0.0.3": -1}
 	h.assertFailoverTo("c1-1")
 	if n := h.agents.catchUp["10.0.0.2"]; n != 0 {
 		t.Errorf("c1-1 was promoted %d ROLE answers before it had caught up with the old master", n)
@@ -173,7 +175,8 @@ func TestFailover_WarnsWhenItPromotesAReplicaThatHasNotCaughtUp(t *testing.T) {
 	h := newFenceHarness(t)
 	rec := h.recordEvents()
 	h.agents.status["10.0.0.1"] = masterRun(120, "stream-a", "run-0")
-	h.agents.catchUp = map[string]int{"10.0.0.2": -1}
+	// Neither catches up: c1-1, the one that holds the most, is promoted (#78).
+	h.agents.catchUp = map[string]int{"10.0.0.2": -1, "10.0.0.3": -1}
 	h.assertFailoverTo("c1-1")
 	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 || !strings.Contains(e[0], "caught up") {
 		t.Errorf("events %v, want one FailoverUnfenced saying c1-1 had not caught up", e)
@@ -364,15 +367,18 @@ func TestFailover_FencesTheOldAddressNotTheReplacementPod(t *testing.T) {
 // pod): it is not the master being replaced, and is left alone.
 func TestFailover_DoesNotFenceAnotherEngineAtTheOldAddress(t *testing.T) {
 	h := newFenceHarness(t)
+	h.noRestartWait() // the old master is gone for good here
 	h.agents.status["10.0.0.1"] = masterRun(5, "stream-x", "run-other")
 	h.assertFailoverTo("c1-1")
 	h.assertNoPause()
 }
 
 // Nothing listens at the old address any more (connection refused):
-// nothing to hold, and no reason to ask again.
+// nothing to hold, and no reason to ask again. (Whether to wait for it to
+// come back on its volume is restart_wait_test.go's.)
 func TestFailover_GoesOnWhenTheOldMasterIsGone(t *testing.T) {
 	h := newFenceHarness(t)
+	h.noRestartWait() // the old master is gone for good here
 	delete(h.agents.status, "10.0.0.1")
 	start := time.Now()
 	h.assertFailoverTo("c1-1")
@@ -436,6 +442,7 @@ func TestFailover_DemotesTheFencedMasterOnlyTowardAReadyMaster(t *testing.T) {
 // goes on, and says it went on unfenced.
 func TestFailover_WaitsAboutASecondForAHungOldMaster(t *testing.T) {
 	h := newFenceHarness(t)
+	h.noRestartWait() // the old master is gone for good here
 	rec := h.recordEvents()
 	h.agents.hang = map[string]bool{"10.0.0.1": true}
 	start := time.Now()
@@ -458,6 +465,7 @@ func TestFailover_UnfencedWithoutARecordedAddress(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newFenceHarness(t)
+			h.noRestartWait() // the old master is gone for good here
 			h.cluster.Status.Pods[0] = entry
 			rec := record.NewFakeRecorder(8)
 			h.r.Recorder = rec

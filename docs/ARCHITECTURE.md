@@ -176,8 +176,9 @@ does, in order:
    or its `Ready` condition has been `False` for at least
    `spec.failover.unhealthyThresholdSeconds` (default 30s), or its agent
    reports a role other than master, a failover is triggered (unless
-   `spec.failover.enabled: false`). So is one for a master that **came
-   back behind its replicas**. This needs evidence that the master's
+   `spec.failover.enabled: false`; a missing master whose engine no
+   longer answers is first waited for, step 5). So is one for a master
+   that **came back behind its replicas**. This needs evidence that the master's
    engine restarted since the status last recorded it as the master: a
    new engine `run_id` (`status.pods[].runID`) or, from an agent that does
    not report one, a new pod UID or a container restart
@@ -199,17 +200,38 @@ does, in order:
    keeps a pod's last offset, key count, run and stream while it cannot be
    asked, which is what makes this, and the empty-replica check below,
    work across the pod's restart.
-5. **Election**: among the remaining ready pods, pick the one with the
-   highest `replicationOffset` (most caught-up); ties break on pod name
-   for determinism. Before promoting it, hold the old master's writes
+5. **Election**: among the remaining ready pods, the one with the highest
+   `replicationOffset`. A master whose pod is gone or replaced (a new
+   UID), and whose engine no longer answers, is first waited for until
+   its new pod is Ready and has reported, for `failover.restartWaitSeconds`
+   at most from when it was found gone (`FailoverWait`): back on its
+   volume in time, it goes through step 4's comparison instead. Not when
+   its replacement pod is unschedulable, or nothing (no address, no
+   engine run) was recorded for it. The cap is what covers a volume that
+   cannot attach yet (on AKS or EBS the replacement schedules on another
+   node in the zone, then sits in `ContainerCreating` with a Multi-Attach
+   error, never unschedulable); it is checked on each pass, so it can be
+   overshot by up to the 5 s between passes. A wait that ran out is
+   remembered, by master and pod, until the master changes: a failover
+   that does not go through after it is tried again at once, without
+   another wait. Before promoting anyone, hold the old master's writes
    (`CLIENT PAUSE <ms> WRITE` through its agent, for the pod's
    termination grace period -- 10 s at least -- and 5 s more) at the
    address and to the engine run its status entry recorded
    (`status.pods[].podIP`, `runID`)
    -- after a force-delete its pod object is gone while its container
-   still runs, and takes writes, until its replicas have left it -- and
-   wait for the candidate to catch up with it, as a switchover does (5 s
-   at most, less once the old master stops answering). An address that
+   still runs, and takes writes, until its replicas have left it. Then
+   pick the replica by each one's offset read now with `ROLE` -- the ones
+   read at the start of the pass may be from before the master stopped
+   streaming -- ties going to the name -- and wait for it to catch up
+   with the old master, as a switchover does (5 s at most, less once the
+   old master stops answering). The replicas are asked at once, for 1 s
+   in all (`liveOffsetBudget`), inside the old master's pause. One that
+   does not answer may hold more than the one picked: unless that one
+   caught up with the held master, which none can be ahead of, no one is
+   promoted on this pass (`FailoverBlocked`, and the old master's pause is
+   lifted) -- until it answers, or stops being Ready (its readiness probe
+   goes through the same agent). An address that
    does not answer is asked again for 1 s (`fenceRunCheckTimeout`; one
    that refuses the connection, once); a pause that gets no answer, or
    is refused because a write did not finish, is sent again, each try
