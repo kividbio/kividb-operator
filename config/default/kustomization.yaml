@@ -10,9 +10,10 @@
 # prefixing them.
 namespace: kividb-operator-system
 
-commonLabels:
-  app.kubernetes.io/name: kividb-operator
-  app.kubernetes.io/managed-by: kividb-operator
+labels:
+- pairs:
+    app.kubernetes.io/managed-by: kividb-operator
+    app.kubernetes.io/name: kividb-operator
 
 resources:
   - ../crd

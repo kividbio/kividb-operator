@@ -40,7 +40,7 @@ const ClusterLabel = "kividb.io/cluster"
 
 // KividbVariant selects which build of the kividb image to run. Each
 // variant beyond "standard" corresponds to a real, separately-published
-// image tag suffix (e.g. docker.io/kividb/kividb:v1.2.0-tls) -- the
+// image tag suffix (e.g. docker.io/kividb/kividb:v1.2.1-tls) -- the
 // features aren't runtime-togglable, they're compiled in.
 type KividbVariant string
 
@@ -265,9 +265,9 @@ type KividbClusterSpec struct {
 	Replicas int32 `json:"replicas,omitempty"`
 
 	// Image is the kividb container image, e.g.
-	// "docker.io/kividb/kividb:v1.2.0" or, for a non-standard build,
-	// "docker.io/kividb/kividb:v1.2.0-tls". Defaults to
-	// docker.io/kividb/kividb:v1.2.0 if unset -- set this explicitly to pin a specific
+	// "docker.io/kividb/kividb:v1.2.1" or, for a non-standard build,
+	// "docker.io/kividb/kividb:v1.2.1-tls". Defaults to
+	// docker.io/kividb/kividb:v1.2.1 if unset -- set this explicitly to pin a specific
 	// version. The operator uses this value verbatim; it never derives or
 	// modifies an image reference from Variant below.
 	// +optional
@@ -510,6 +510,13 @@ type KividbPodStatus struct {
 	// +optional
 	Incarnation string `json:"incarnation,omitempty"`
 
+	// PodIP is the address the pod's agent last answered on, in a
+	// replicated cluster. A failover holds the writes of the master it
+	// replaces there before promoting a replica, which still reaches a
+	// master whose pod was force-deleted while its container runs on.
+	// +optional
+	PodIP string `json:"podIP,omitempty"`
+
 	// Shard is the shard the pod belongs to, in a sharded cluster.
 	// +optional
 	Shard *int32 `json:"shard,omitempty"`
@@ -670,6 +677,15 @@ type KividbClusterStatus struct {
 	// +optional
 	LastFailoverTime *metav1.Time `json:"lastFailoverTime,omitempty"`
 
+	// FencedMaster is the master a failover held the writes of, in a
+	// replicated cluster, until it has been made the new master's replica.
+	// It is written before the promotion: the pod object of a force-deleted
+	// master is gone, and its name soon belongs to a replacement pod at
+	// another address, so this is how a later pass, or a restarted
+	// operator, still reaches it.
+	// +optional
+	FencedMaster *FencedMaster `json:"fencedMaster,omitempty"`
+
 	// ObservedGeneration is the .metadata.generation last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -686,6 +702,18 @@ type KividbClusterStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// FencedMaster is a master whose writes a failover holds (CLIENT PAUSE
+// WRITE): where it answered, and which engine run it was.
+type FencedMaster struct {
+	// Name is its pod's name.
+	Name string `json:"name"`
+	// PodIP is the address its agent answered on.
+	PodIP string `json:"podIP"`
+	// RunID is its engine's run ID: another engine answering at PodIP is
+	// not it.
+	RunID string `json:"runID"`
 }
 
 // +kubebuilder:object:root=true
