@@ -6,9 +6,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-**Apply the new `kividbclusters` CRD before `helm upgrade`:** Helm does not
-upgrade it, and the spec gains `failover.restartWaitSeconds`. Until it is
-applied, the API server drops it and the restart wait keeps its default.
+**Apply the new CRDs before `helm upgrade`:** Helm does not upgrade them.
+The `kividbclusters` CRD spec gains `failover.restartWaitSeconds`.
+The `kividbconfigs`, `kividbaclconfigs`, and `kividbsnapshotconfigs` CRDs gain
+a `status` subresource with `status.usedBy` tracking referencing clusters.
+Until they are applied, the API server drops these fields.
 
 **Read before upgrading:** the pods of every sharded cluster roll once,
 replicas first and each master after a handover, for the new
@@ -190,6 +192,9 @@ are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
 
 ### Added
 
+- **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
+  Tracks which `KividbCluster`s in the namespace reference each shared config object,
+  displayed in `kubectl get -o wide` via a printer column.
 - **An OLM bundle for OperatorHub.io.** `make bundle VERSION=… IMG=…` builds
   the bundle from `config/manifests` (operator-sdk v1.36.0, kustomize v5.4.3),
   and `make scorecard` runs the scorecard tests. The bundle validates for

@@ -20,7 +20,13 @@ spec:
     - name: v1alpha1
       served: true
       storage: true
+      subresources:
+        status: {}
       additionalPrinterColumns:
+        - name: Used By
+          type: string
+          jsonPath: .status.usedBy
+          priority: 1
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -72,3 +78,15 @@ spec:
                       commandRules:
                         type: array
                         items: {type: string}
+            status:
+              type: object
+              description: Observed state of this KividbAclConfig.
+              properties:
+                usedBy:
+                  type: array
+                  description: >-
+                    KividbCluster names in this namespace that reference this config.
+                    Written by the reconciler; stale entries disappear on the next
+                    reconcile of any referencing cluster.
+                  items:
+                    type: string

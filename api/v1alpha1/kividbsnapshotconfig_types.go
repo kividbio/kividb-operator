@@ -110,10 +110,19 @@ type KividbSnapshotConfigSpec struct {
 	JobResources corev1.ResourceRequirements `json:"jobResources,omitempty"`
 }
 
+// KividbSnapshotConfigStatus defines the observed state of a KividbSnapshotConfig.
+type KividbSnapshotConfigStatus struct {
+	// UsedBy lists the names of KividbClusters in the same namespace referencing this config.
+	// +optional
+	UsedBy []string `json:"usedBy,omitempty"`
+}
+
 // +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=kdbsc
 // +kubebuilder:printcolumn:name="Schedule",type=string,JSONPath=`.spec.schedule`
 // +kubebuilder:printcolumn:name="Source",type=string,JSONPath=`.spec.source`
+// +kubebuilder:printcolumn:name="Used By",type=string,JSONPath=`.status.usedBy`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // KividbSnapshotConfig is a reusable, standalone backup destination and
@@ -123,7 +132,8 @@ type KividbSnapshotConfig struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec KividbSnapshotConfigSpec `json:"spec"`
+	Spec   KividbSnapshotConfigSpec   `json:"spec"`
+	Status KividbSnapshotConfigStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true

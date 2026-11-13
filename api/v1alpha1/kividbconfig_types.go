@@ -71,8 +71,17 @@ type KividbConfigSpec struct {
 	TLS *KividbTLSSpec `json:"tls,omitempty"`
 }
 
+// KividbConfigStatus defines the observed state of a KividbConfig.
+type KividbConfigStatus struct {
+	// UsedBy lists the names of KividbClusters in the same namespace referencing this config.
+	// +optional
+	UsedBy []string `json:"usedBy,omitempty"`
+}
+
 // +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=kdbc
+// +kubebuilder:printcolumn:name="Used By",type=string,JSONPath=`.status.usedBy`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // KividbConfig is a reusable, standalone set of kividb.conf directives.
@@ -82,7 +91,8 @@ type KividbConfig struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec KividbConfigSpec `json:"spec"`
+	Spec   KividbConfigSpec   `json:"spec"`
+	Status KividbConfigStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true

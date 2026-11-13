@@ -112,6 +112,7 @@ func (r *KividbClusterReconciler) agentToken() string {
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbclusters/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbclusters/finalizers,verbs=update
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbconfigs;kividbaclconfigs;kividbsnapshotconfigs,verbs=get;list;watch
+//+kubebuilder:rbac:groups=kividb.io,resources=kividbconfigs/status;kividbaclconfigs/status;kividbsnapshotconfigs/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbsnapshots,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbsnapshots/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
@@ -170,6 +171,31 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	r.emitVariantGuidance(&c, kdbConfig)
+
+	if kdbConfig != nil {
+		if err := r.recordUsedBy(ctx, kdbConfig, c.Name,
+			func() []string { return kdbConfig.Status.UsedBy },
+			func(v []string) { kdbConfig.Status.UsedBy = v },
+		); err != nil {
+			log.Error(err, "recording usedBy on KividbConfig", "name", kdbConfig.Name)
+		}
+	}
+	if aclConfig != nil {
+		if err := r.recordUsedBy(ctx, aclConfig, c.Name,
+			func() []string { return aclConfig.Status.UsedBy },
+			func(v []string) { aclConfig.Status.UsedBy = v },
+		); err != nil {
+			log.Error(err, "recording usedBy on KividbAclConfig", "name", aclConfig.Name)
+		}
+	}
+	if snapCfg != nil {
+		if err := r.recordUsedBy(ctx, snapCfg, c.Name,
+			func() []string { return snapCfg.Status.UsedBy },
+			func(v []string) { snapCfg.Status.UsedBy = v },
+		); err != nil {
+			log.Error(err, "recording usedBy on KividbSnapshotConfig", "name", snapCfg.Name)
+		}
+	}
 
 	secretValues, err := r.resolveSecretValues(ctx, &c, aclConfig)
 	if err != nil {
@@ -506,6 +532,32 @@ func (r *KividbClusterReconciler) resolveSnapshotConfig(ctx context.Context, c *
 		return nil, fmt.Errorf("KividbSnapshotConfig %q: %w", c.Spec.SnapshotConfigRef.Name, err)
 	}
 	return &snap, nil
+}
+
+// recordUsedBy ensures clusterName is present in obj's status.usedBy.
+// A status patch is sent only if the list changes. A conflict is ignored
+// as the next reconcile pass will retry.
+func (r *KividbClusterReconciler) recordUsedBy(
+	ctx context.Context,
+	obj client.Object,
+	clusterName string,
+	getUsedBy func() []string,
+	setUsedBy func([]string),
+) error {
+	existing := getUsedBy()
+	for _, name := range existing {
+		if name == clusterName {
+			return nil
+		}
+	}
+	base := obj.DeepCopyObject().(client.Object)
+	setUsedBy(append(existing, clusterName))
+	err := r.Status().Patch(ctx, obj, client.MergeFrom(base))
+	if apierrors.IsConflict(err) {
+		logf.FromContext(ctx).V(1).Info("recordUsedBy: conflict ignored", "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
+		return nil
+	}
+	return err
 }
 
 func (r *KividbClusterReconciler) resolveSecretValues(ctx context.Context, c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbAclConfig) (map[string]string, error) {

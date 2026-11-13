@@ -988,10 +988,11 @@ spec:
 
 A `KividbConfig` is standalone: create it once, reference it from as many
 `KividbCluster`s as share the same tuning/TLS needs via `spec.configRef`.
+Its `status.usedBy` list tracks the names of `KividbCluster`s currently referencing it
+(also visible via `kubectl get kdbc -o wide`).
 Deleting one while a cluster still references it surfaces as a reconcile
 error on that cluster, which keeps failing over but is not applied until
-the KividbConfig is back (see [ROADMAP.md](ROADMAP.md) for planned
-usage-tracking to catch this earlier).
+the KividbConfig is back.
 
 ## KividbAclConfig
 
@@ -1040,6 +1041,8 @@ spec:
   still run `PING`/`INFO`/`REPLICAOF`/backups after you turn on auth.
 - Referenced the same way as `KividbConfig`: create once, point any
   number of `KividbCluster`s at it via `spec.aclConfigRef`.
+  Its `status.usedBy` list tracks the names of `KividbCluster`s currently referencing it
+  (visible via `kubectl get kdbacl -o wide`).
 
 ### Changing the default user's password
 
@@ -1131,7 +1134,9 @@ the fact even if `source` or the cluster's replica count changes over
 time.
 
 A `KividbSnapshotConfig` is standalone: create once, reference from any
-number of `KividbCluster`s via `spec.snapshotConfigRef`. See
+number of `KividbCluster`s via `spec.snapshotConfigRef`.
+Its `status.usedBy` list tracks the names of `KividbCluster`s currently referencing it
+(visible via `kubectl get kdbsc -o wide`). See
 [BACKUP_RESTORE.md](BACKUP_RESTORE.md) for the manual restore procedure
 and how to trigger an out-of-schedule backup.
 
