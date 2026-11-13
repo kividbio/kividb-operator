@@ -447,7 +447,8 @@ const AllowUnreadFailoverAnnotation = "kividb.io/allow-unread-failover"
 // since the replica promoted was last in sync are lost. Without it the
 // failover waits for that master to come back, however long that takes
 // (FailoverBlocked); see reconcileRoles. The operator removes it once a
-// failover has gone through.
+// failover has gone through (allow-unread-failover too), or the master
+// comes back first.
 const AllowUnsyncedFailoverAnnotation = "kividb.io/allow-unsynced-failover"
 
 // ShardPromoteAnnotation records, on a sharded KividbCluster, the last

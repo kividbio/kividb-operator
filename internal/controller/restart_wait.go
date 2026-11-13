@@ -79,11 +79,14 @@ type restartWaiting struct {
 // failover go on. A master whose engine still answers is not waited for:
 // the fence holds its writes, and the replica promoted catches up with it
 // first. Nor one with no entry in the status: nothing tells which replicas
-// were in sync with it. It returns the error that holds the failover, or
+// were in sync with it. Nor when the replicas say the append-only file is
+// off: the master then comes back with only its last save, and nothing on
+// its volume is worth the wait. views are the replicas a failover may
+// promote (failoverPool). It returns the error that holds the failover, or
 // nil.
 func (r *KividbClusterReconciler) waitForUnsynced(ctx context.Context, c *kividbv1alpha1.KividbCluster, name string, mv *podView, last kividbv1alpha1.KividbPodStatus, views map[string]*podView, synced map[string]bool) error {
 	if c.Annotations[kividbv1alpha1.AllowUnsyncedFailoverAnnotation] == "true" || last.Name == "" ||
-		electReplica(views, name) == "" || electReplica(onlySynced(views, synced), name) != "" {
+		electReplica(views, name) == "" || electReplica(onlySynced(views, synced), name) != "" || aofOff(views, name) {
 		return nil
 	}
 	if last.PodIP != "" && last.RunID != "" {
@@ -118,7 +121,24 @@ func (r *KividbClusterReconciler) waitForUnsynced(ctx context.Context, c *kividb
 			"%s does not answer, and no replica was in sync with it (%s): its volume may hold acknowledged writes that none of them has. Waiting for it to come back, however long that takes, rather than promote a replica without them. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
 			name, strings.Join(replicas, ", "), kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
 	}
-	return heldBack("WaitingForMaster", fmt.Errorf("waiting for master %s to come back: no replica was in sync with it (%s so far)", name, now.Sub(w.since).Round(time.Second)))
+	return heldBack("WaitingForMaster", fmt.Errorf("waiting for master %s to come back: no replica was in sync with it (%s so far). To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
+		name, now.Sub(w.since).Round(time.Second), kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
+}
+
+// aofOff reports whether the ready replicas of views but master, asked
+// this pass, all say the append-only file is off. No answer counts as on.
+func aofOff(views map[string]*podView, master string) bool {
+	seen := false
+	for name, v := range views {
+		if name == master || !v.ready || v.status == nil {
+			continue
+		}
+		if v.status.AofEnabled {
+			return false
+		}
+		seen = true
+	}
+	return seen
 }
 
 // waitForRestart returns an error -- the failover is to wait -- while the
@@ -189,6 +209,11 @@ func (r *KividbClusterReconciler) waitForRestart(ctx context.Context, c *kividbv
 		return heldBack("WaitingForMaster", fmt.Errorf("waiting up to %s for master %s to come back on its volume (%s so far)", limit, name, waited.Round(time.Second)))
 	}
 	w.over = true
+	if w.unsynced {
+		r.event(c, corev1.EventTypeWarning, "FailoverWait", "%s did not come back on its volume within %s; failing over without a replica in sync with it, as %s is set",
+			name, limit, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
+		return nil
+	}
 	r.event(c, corev1.EventTypeWarning, "FailoverWait", "%s did not come back on its volume within %s; failing over", name, limit)
 	return nil
 }
@@ -219,19 +244,26 @@ const (
 )
 
 // restartWaitOver ends the wait for a master of c to come back, if one is
-// under way, and says how it ended; master is the master now. A wait that
-// was over already said so then, and is only forgotten.
-func (r *KividbClusterReconciler) restartWaitOver(c *kividbv1alpha1.KividbCluster, end waitEnd, master string) {
+// under way, says how it ended, and returns it; master is the master now. A
+// wait that was over already said so then, and is only forgotten.
+func (r *KividbClusterReconciler) restartWaitOver(c *kividbv1alpha1.KividbCluster, end waitEnd, master string) *restartWaiting {
 	v, ok := r.restartWaits.LoadAndDelete(c.Namespace + "/" + c.Name)
 	if !ok || v.(*restartWaiting).over {
-		return
+		return nil
 	}
 	w := v.(*restartWaiting)
 	switch {
+	case end == waitCameBack && master == w.master && w.unsynced && c.Annotations[kividbv1alpha1.AllowUnsyncedFailoverAnnotation] == "true":
+		r.event(c, corev1.EventTypeNormal, "FailoverWait",
+			"%s came back after %s; it is compared with its replicas before anything is promoted, and %s is removed: it was set for a failover that did not happen",
+			w.master, r.now().Sub(w.since).Round(time.Second), kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
 	case end == waitCameBack && master == w.master:
 		r.event(c, corev1.EventTypeNormal, "FailoverWait",
 			"%s came back after %s; it is compared with its replicas, as a master that restarted in place, before anything is promoted",
 			w.master, r.now().Sub(w.since).Round(time.Second))
+	case w.unsynced && master != "" && master != w.master:
+		r.event(c, corev1.EventTypeNormal, "FailoverWait", "%s: no longer waited for: the failover went ahead without a replica in sync with it, as %s was set; the master is now %s",
+			w.master, kividbv1alpha1.AllowUnsyncedFailoverAnnotation, master)
 	case end == waitFailoverOff:
 		r.event(c, corev1.EventTypeNormal, "FailoverWait", "%s: no longer waited for: failover is disabled", w.master)
 	case master == "":
@@ -241,6 +273,7 @@ func (r *KividbClusterReconciler) restartWaitOver(c *kividbv1alpha1.KividbCluste
 	default:
 		r.event(c, corev1.EventTypeNormal, "FailoverWait", "%s: no longer waited for", w.master)
 	}
+	return w
 }
 
 // cannotRun says why pod is not going to run soon, or "": no node will
