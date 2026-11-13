@@ -199,11 +199,14 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 // farBehind reports whether every ready replica of views but exclude is
 // too far behind the old master, last, to catch up with it within the
 // fence's wait: asked with ROLE now, without holding its writes, none has
-// its link up within maxSyncLagBytes of the master's offset. Then the
-// fence would only stall the master's writes, every pass, for a catch-up
-// that cannot end in time. False when nothing answers at its address as
-// the engine run recorded for it: there is nothing to hold then. It also
-// says how far the nearest one is.
+// its link up within maxSyncLagBytes of the master's offset (read first:
+// under writes a replica read after it can be ahead of it, and is near).
+// Then the fence would only stall the master's writes, every pass, for a
+// catch-up that cannot end in time. False when nothing answers at its
+// address as the engine run recorded for it: there is nothing to hold
+// then. It also says which is nearest, in words that do not change from
+// one pass to the next: the status is written on each, and a write starts
+// the next pass.
 func (r *KividbClusterReconciler) farBehind(ctx context.Context, last kividbv1alpha1.KividbPodStatus, views map[string]*podView, exclude string) (string, bool) {
 	if last.PodIP == "" || last.RunID == "" {
 		return "", false
@@ -215,7 +218,7 @@ func (r *KividbClusterReconciler) farBehind(ctx context.Context, last kividbv1al
 	if err != nil || !m.master {
 		return "", false
 	}
-	nearest, lag := "", int64(-1)
+	nearest, lag := "", int64(0)
 	for name, v := range views {
 		if name == exclude || !v.ready {
 			continue
@@ -224,17 +227,18 @@ func (r *KividbClusterReconciler) farBehind(ctx context.Context, last kividbv1al
 		if err != nil || rr.master || !rr.linkUp {
 			continue
 		}
-		if d := m.offset - rr.offset; lag < 0 || d < lag {
+		if d := m.offset - rr.offset; nearest == "" || d < lag {
 			nearest, lag = name, d
 		}
 	}
 	switch {
-	case lag >= 0 && lag <= maxSyncLagBytes:
-		return "", false
 	case nearest == "":
 		return "no replica has its link to it up", true
+	case lag <= maxSyncLagBytes:
+		return "", false
 	}
-	return fmt.Sprintf("%s, the nearest, is %d bytes behind it", nearest, lag), true
+	logf.FromContext(ctx).Info("no replica is near enough to the old master to catch up with it", "replica", nearest, "behindBytes", lag)
+	return fmt.Sprintf("%s, the nearest, is more than %d bytes behind it", nearest, maxSyncLagBytes), true
 }
 
 // recordFence persists, before the promotion, which master the failover

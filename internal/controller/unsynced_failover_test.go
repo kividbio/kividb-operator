@@ -73,11 +73,17 @@ func TestFailover_WaitsForAMasterNoReplicaWasInSyncWith(t *testing.T) {
 	h.assertWaiting("at once")
 	*now = now.Add(16 * time.Second)
 	h.assertWaiting("once restartWaitSeconds have passed")
+	first := h.heldErr()
 	*now = now.Add(time.Hour)
 	// Events expire after about an hour: the Ready condition's message,
-	// this error, says what ends the wait too.
-	if err := h.heldErr(); !strings.Contains(err.Error(), kividbv1alpha1.AllowUnsyncedFailoverAnnotation) {
+	// this error, says what ends the wait too. It is the same on every
+	// pass: the status is written each time, and a write starts the next.
+	err := h.heldErr()
+	if !strings.Contains(err.Error(), kividbv1alpha1.AllowUnsyncedFailoverAnnotation) {
 		t.Errorf("an hour later: %v, want it naming %s", err, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
+	}
+	if err.Error() != first.Error() {
+		t.Errorf("an hour later %q, want the same message as before, %q", err, first)
 	}
 	events := eventsWith(rec, "")
 	var blocked []string
@@ -279,11 +285,31 @@ func TestFailover_DoesNotPauseAMasterNoReplicaIsNearlyCaughtUpWith(t *testing.T)
 	if e := eventsWith(rec, "FailoverBlocked"); len(e) != 1 || !strings.Contains(e[0], "in sync") {
 		t.Errorf("events %v, want one FailoverBlocked saying no replica was in sync", e)
 	}
+	// The status is written on every pass, and a write starts the next
+	// one: a message that changed with the offsets would have the operator
+	// run passes back to back. It names no offset.
+	h.agents.status["10.0.0.1"].ReplicationOffset = 6 << 20
+	if again := h.heldErr(); again.Error() != err.Error() {
+		t.Errorf("held again with %q, want the same message as %q", again, err)
+	}
 
 	// Once one is near (here: it has the master's offset), its writes are
 	// held and it is promoted.
 	h.agents.catchUp = nil
 	h.assertFailoverTo("c1-1")
+}
+
+// The master's offset is read first, the replica's after it: under writes
+// the replica can read ahead of it. That is near, not far.
+func TestFailover_AReplicaReadAheadOfTheMasterIsNearEnough(t *testing.T) {
+	shortSwitchoverWaits(t)
+	h, _ := newGoneMasterHarness(t)
+	h.unsynced()
+	h.agents.status["10.0.0.1"] = masterRun(120, "stream-a", "run-0")
+	h.agents.liveOffset = map[string]int64{"10.0.0.2": 130, "10.0.0.3": 125} // both read ahead of it
+	h.agents.catchUp = map[string]int{"10.0.0.3": -1}
+	h.assertFailoverTo("c1-1")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2")
 }
 
 // A replica marked in sync that holds nothing is no candidate (the

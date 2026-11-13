@@ -121,8 +121,10 @@ func (r *KividbClusterReconciler) waitForUnsynced(ctx context.Context, c *kividb
 			"%s does not answer, and no replica was in sync with it (%s): its volume may hold acknowledged writes that none of them has. Waiting for it to come back, however long that takes, rather than promote a replica without them. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
 			name, strings.Join(replicas, ", "), kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
 	}
-	return heldBack("WaitingForMaster", fmt.Errorf("waiting for master %s to come back: no replica was in sync with it (%s so far). To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
-		name, now.Sub(w.since).Round(time.Second), kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
+	// The same words on every pass: the status is written on each, and a
+	// write starts the next pass.
+	return heldBack("WaitingForMaster", fmt.Errorf("waiting for master %s to come back: no replica was in sync with it. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
+		name, kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
 }
 
 // aofOff reports whether the ready replicas of views but master, asked
