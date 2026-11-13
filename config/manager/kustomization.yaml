@@ -1,2 +1,7 @@
 resources:
   - manager.yaml
+patches:
+  - path: agent_patch.yaml
+    target:
+      kind: Deployment
+      name: kividb-operator-manager

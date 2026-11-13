@@ -198,6 +198,10 @@ are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
 
 ### Fixed
 
+- **`make deploy` didn't pass `AGENT_IMG`** (#68). It updated the manager
+  image but left the agent sidecar defaulted to the released 0.7.0 image.
+  It now patches `--default-agent-image=$(AGENT_IMG)` into the manager
+  Deployment.
 - **The plain-YAML install and `kubectl apply -k config/default` made the
   manager Deployment with different selectors (#86).** Applying one over the
   other failed with `spec.selector: ... field is immutable`.
@@ -249,7 +253,6 @@ are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
   aborts go away once no switchover is wanted any more, or the master is
   another pod.
   (#82, by [lofoneh](https://github.com/lofoneh))
-
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install
   could not run `KividbDbOps` operations. After applying it again, restart
