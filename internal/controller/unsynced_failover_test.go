@@ -7,6 +7,7 @@ import (
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -121,6 +122,52 @@ func TestFailover_WaitsForAMasterNoReplicaWasInSyncWithWhateverElseEndsTheWait(t
 			h.assertWaiting("with no replica in sync")
 		})
 	}
+}
+
+// A master that restarts in place -- the same pod, its engine killed for
+// its memory, say -- is failed away from once unhealthyThresholdSeconds
+// have passed. Not when no replica was in sync with it: it reloads the
+// writes they lack from its volume. It is waited for until it is back, and
+// kept.
+func TestFailover_WaitsForAMasterRestartingInPlaceNoReplicaWasInSyncWith(t *testing.T) {
+	h, now := newGoneMasterHarness(t)
+	h.unsynced()
+	rec := h.recordEvents()
+	h.cluster.Status.Pods[0].Incarnation = "same/0"
+	h.addPod(testPod{name: "c1-0", ip: "10.0.0.1", label: "master", uid: "same", unreadyFor: time.Minute})
+	h.assertWaiting("past unhealthyThresholdSeconds")
+	*now = now.Add(time.Hour)
+	h.assertWaiting("an hour later")
+	if e := eventsWith(rec, "FailoverBlocked"); len(e) != 1 || !strings.Contains(e[0], "in sync") {
+		t.Errorf("events %v, want one FailoverBlocked saying no replica was in sync", e)
+	}
+
+	var p corev1.Pod
+	if err := h.r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "c1-0"}, &p); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.r.Delete(context.Background(), &p); err != nil {
+		t.Fatal(err)
+	}
+	h.addPod(testPod{name: "c1-0", ip: "10.0.0.1", label: "master", ready: true, uid: "same", agent: backOnItsVolume(5)})
+	if m, failover := h.reconcile(); m != "c1-0" || failover {
+		t.Fatalf("master=%q failover=%v, want c1-0 kept once it is back", m, failover)
+	}
+	h.assertNoCall("promote")
+	if e := eventsWith(rec, "FailoverWait"); len(e) != 1 || !strings.Contains(e[0], "came back") {
+		t.Errorf("events %v, want one FailoverWait saying it came back", e)
+	}
+}
+
+// The annotation lets that failover go ahead too.
+func TestFailover_TheAnnotationLetsAFailoverFromAMasterRestartingInPlaceGoAhead(t *testing.T) {
+	h, _ := newGoneMasterHarness(t)
+	h.unsynced()
+	h.cluster.Status.Pods[0].Incarnation = "same/0"
+	h.addPod(testPod{name: "c1-0", ip: "10.0.0.1", label: "master", uid: "same", unreadyFor: time.Minute})
+	h.assertWaiting("without the annotation")
+	h.annotate(kividbv1alpha1.AllowUnsyncedFailoverAnnotation, "true")
+	h.assertFailoverTo("c1-1")
 }
 
 // A replica that was in sync is promoted once restartWaitSeconds have

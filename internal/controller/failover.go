@@ -183,8 +183,20 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 	} else if !failoverEnabled {
 		r.restartWaitOver(c, waitFailoverOff, currentMasterName)
+	} else if mv, exists := views[currentMasterName]; needsFailover && exists {
+		// The same pod, unready past unhealthyThresholdSeconds: an engine
+		// restarting in place (killed for its memory, say) reloads what it
+		// acknowledged from its volume. With no replica in sync, it is
+		// waited for as a master whose pod is gone is (#75).
+		if err := r.waitForUnsynced(ctx, c, currentMasterName, nil, previous[currentMasterName], views, previouslySynced); err != nil {
+			return nil, currentMasterName, false, err
+		}
 	} else {
-		r.restartWaitOver(c, waitMasterChanged, currentMasterName)
+		end := waitMasterChanged
+		if exists && mv.ready && mv.status != nil {
+			end = waitCameBack // from a wait for it in place, if there was one
+		}
+		r.restartWaitOver(c, end, currentMasterName)
 	}
 
 	// A master that restarted and came back with less than its replicas
@@ -321,7 +333,7 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		if needsFailover && behindOf == "" && heldOld == "" && unsyncedPick && c.Annotations[kividbv1alpha1.AllowUnsyncedFailoverAnnotation] == "true" {
 			log.Info("failing over to a replica that was not in sync", "replica", candidate)
 			r.event(c, corev1.EventTypeWarning, "FailoverForced",
-				"master %s is gone, and no replica was in sync with it; promoting %s anyway (%s is set): the writes %s acknowledged since %s was last in sync are lost. The annotation is removed once this failover has gone through",
+				"master %s does not answer, and no replica was in sync with it; promoting %s anyway (%s is set): the writes %s acknowledged since %s was last in sync are lost. The annotation is removed once this failover has gone through",
 				currentMasterName, candidate, kividbv1alpha1.AllowUnsyncedFailoverAnnotation, currentMasterName, candidate)
 		}
 		log.Info("promoting pod to master", "pod", candidate, "reason", map[bool]string{true: "failover", false: "bootstrap"}[needsFailover])

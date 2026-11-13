@@ -211,7 +211,8 @@ does, in order:
    with it, neither of those ends the wait, nor does the cap
    (`FailoverBlocked`): only its return, or
    `kividb.io/allow-unsynced-failover`, which lets the capped wait run
-   its course (#75). The cap is what covers a volume that
+   its course (#75). A master restarting in place is held the same way
+   past `unhealthyThresholdSeconds`. The cap is what covers a volume that
    cannot attach yet (on AKS or EBS the replacement schedules on another
    node in the zone, then sits in `ContainerCreating` with a Multi-Attach
    error, never unschedulable); it is checked on each pass, so it can be

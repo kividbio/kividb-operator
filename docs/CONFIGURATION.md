@@ -402,10 +402,14 @@ after the snapshot it was sent), and they are on the master's volume. So
 neither `restartWaitSeconds`, 0 included, nor a replacement that cannot be
 scheduled ends the wait: the failover waits until the master comes back (a
 `FailoverBlocked` Warning, and `WaitingForMaster` on the Ready condition).
+The same goes for a master that restarts in place, as the same pod (its
+engine killed for its memory, say): with no replica in sync,
+`unhealthyThresholdSeconds` does not end the wait either, as it reloads
+those writes from its volume.
 That is the trade-off: no acknowledged write is lost, but if the master's
 node or volume is gone for good, the cluster has no master until you act.
-To fail over anyway once `restartWaitSeconds` have passed, losing those
-writes (a `FailoverForced` Warning):
+To fail over anyway, losing those writes (a `FailoverForced` Warning;
+for a master whose pod is gone, once `restartWaitSeconds` have passed):
 
 ```bash
 kubectl annotate kividbcluster my-cluster kividb.io/allow-unsynced-failover=true
