@@ -352,13 +352,14 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				unreadList := strings.Join(unread, ", ")
 				if c.Annotations[kividbv1alpha1.AllowUnreadFailoverAnnotation] != "true" {
 					held = true
-					heldFor := r.failoverHeld(c, currentMasterName).Round(time.Second)
+					held, since := r.failoverHeld(c, currentMasterName)
+					heldFor := held.Round(time.Second)
 					r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
 					r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
 						"master %s is unavailable, but %s did not answer ROLE within %s and may hold more than %s; no one promoted, held for %s. If the operator cannot reach %s (a NetworkPolicy, a network partition), fix the network, delete its pod, or annotate the cluster %s=true to fail over without it",
 						currentMasterName, unreadList, liveOffsetBudget, candidate, heldFor, unreadList, kividbv1alpha1.AllowUnreadFailoverAnnotation)
 					return nil, currentMasterName, false, heldBack("WaitingForReplica",
-						fmt.Errorf("failover held for %s: %s did not answer ROLE within %s and may hold more than %s", heldFor, unreadList, liveOffsetBudget, candidate))
+						fmt.Errorf("failover held since %s: %s did not answer ROLE within %s and may hold more than %s", since.UTC().Format(time.RFC3339), unreadList, liveOffsetBudget, candidate))
 				}
 				log.Info("failing over without the replicas that did not answer", "unread", unread, "replica", candidate)
 				r.event(c, corev1.EventTypeWarning, "FailoverForced",
@@ -943,14 +944,15 @@ type failoverHold struct {
 }
 
 // failoverHeld returns how long the failover of c away from master has been
-// held back, counted from the first pass that held it.
-func (r *KividbClusterReconciler) failoverHeld(c *kividbv1alpha1.KividbCluster, master string) time.Duration {
+// held back, and since when: the first pass that held it.
+func (r *KividbClusterReconciler) failoverHeld(c *kividbv1alpha1.KividbCluster, master string) (time.Duration, time.Time) {
 	key, now := c.Namespace+"/"+c.Name, r.now()
 	if v, ok := r.failoverHolds.Load(key); ok && v.(*failoverHold).master == master {
-		return now.Sub(v.(*failoverHold).since)
+		since := v.(*failoverHold).since
+		return now.Sub(since), since
 	}
 	r.failoverHolds.Store(key, &failoverHold{master: master, since: now})
-	return 0
+	return 0, now
 }
 
 // liveOffsetBudget is how long a failover gives the replicas, together,

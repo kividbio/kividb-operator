@@ -123,8 +123,8 @@ func (r *KividbClusterReconciler) waitForUnsynced(ctx context.Context, c *kividb
 	}
 	// The same words on every pass: the status is written on each, and a
 	// write starts the next pass.
-	return heldBack("WaitingForMaster", fmt.Errorf("waiting for master %s to come back: no replica was in sync with it. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
-		name, kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
+	return heldBack("WaitingForMaster", fmt.Errorf("waiting for master %s to come back, since %s: no replica was in sync with it. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
+		name, w.since.UTC().Format(time.RFC3339), kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
 }
 
 // aofOff reports whether the ready replicas of views but master, asked
@@ -208,7 +208,9 @@ func (r *KividbClusterReconciler) waitForRestart(ctx context.Context, c *kividbv
 		w.since = mv.pod.CreationTimestamp.Time // made before this operator saw it gone
 	}
 	if waited := now.Sub(w.since); waited < limit {
-		return heldBack("WaitingForMaster", fmt.Errorf("waiting up to %s for master %s to come back on its volume (%s so far)", limit, name, waited.Round(time.Second)))
+		// Since when, not how long so far: the same words on every pass,
+		// as the status is written on each and a write starts the next.
+		return heldBack("WaitingForMaster", fmt.Errorf("waiting up to %s for master %s to come back on its volume, since %s", limit, name, w.since.UTC().Format(time.RFC3339)))
 	}
 	w.over = true
 	if w.unsynced {
