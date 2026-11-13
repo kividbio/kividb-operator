@@ -145,6 +145,25 @@ kubectl annotate kividbcluster my-cluster kividb.io/allow-unread-failover=true
 
 The operator removes the annotation once the failover has gone through.
 
+## Failover waiting for a master no replica was in sync with (`FailoverBlocked`, `WaitingForMaster`)
+
+The master is gone and its engine does not answer, and no Ready replica
+was in sync with it when it went: one in the middle of a full resync, say,
+or cut off from it. The master's volume may hold acknowledged writes that
+no replica has, so the failover waits for its pod to come back, however
+long that takes, and then compares it with its replicas, keeping it if it
+holds as much. Check why the pod is not back: `kubectl describe pod` shows
+a node that is not Ready, or a volume that cannot attach (a Multi-Attach
+error). If the master's node or volume is gone for good, or losing the
+writes it acknowledged since the replica was last in sync is acceptable:
+
+```bash
+kubectl annotate kividbcluster my-cluster kividb.io/allow-unsynced-failover=true
+```
+
+The failover then goes ahead once `failover.restartWaitSeconds` have passed
+(a `FailoverForced` Warning), and the operator removes the annotation.
+
 ## Failover without a fence (`FailoverUnfenced`)
 
 A failover went ahead without first holding the old master's writes, or

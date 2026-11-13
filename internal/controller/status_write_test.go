@@ -170,7 +170,7 @@ func TestReplicatedStalePassThatClearsTheOverrideLeavesTheNewerStatus(t *testing
 		t.Fatal(err)
 	}
 
-	h.r.clearUnreadFailoverOverride(ctx, &c, read)
+	h.r.clearFailoverOverrides(ctx, &c, read)
 	c.Status.MasterPod = "c1-1"
 	if err := h.r.writeStatus(ctx, &c, read); !errors.Is(err, errStaleStatus) {
 		t.Errorf("writeStatus = %v, want errStaleStatus", err)

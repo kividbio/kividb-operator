@@ -393,6 +393,29 @@ replacement schedule on another node in the zone, where it sits in
 attached to the old node, and is never unschedulable. A master that
 restarts in place, as the same pod, keeps `unhealthyThresholdSeconds`.
 
+If no Ready replica was in sync with that master the last time the
+operator could tell (the one replica of a `replicas: 1` cluster in the
+middle of a full resync, say), the wait has no cap. Promoting a replica
+then would lose the writes the master acknowledged since that replica was
+last in sync (for a replica in the middle of a full resync, everything
+after the snapshot it was sent), and they are on the master's volume. So
+neither `restartWaitSeconds`, 0 included, nor a replacement that cannot be
+scheduled ends the wait: the failover waits until the master comes back (a
+`FailoverBlocked` Warning, and `WaitingForMaster` on the Ready condition).
+That is the trade-off: no acknowledged write is lost, but if the master's
+node or volume is gone for good, the cluster has no master until you act.
+To fail over anyway once `restartWaitSeconds` have passed, losing those
+writes (a `FailoverForced` Warning):
+
+```bash
+kubectl annotate kividbcluster my-cluster kividb.io/allow-unsynced-failover=true
+```
+
+The operator removes the annotation once the failover has gone through, so
+a later failover waits again. A master whose engine still answers is not
+waited for: its writes are held, and the replica promoted catches up with
+it first.
+
 The replica promoted is the one that holds the most when the old master's
 writes are held, by its offset read then; replicas that hold as much go by
 name. `replica-priority` plays no part: a `KividbConfig` directive, it is

@@ -207,7 +207,11 @@ does, in order:
    at most from when it was found gone (`FailoverWait`): back on its
    volume in time, it goes through step 4's comparison instead. Not when
    its replacement pod is unschedulable, or nothing (no address, no
-   engine run) was recorded for it. The cap is what covers a volume that
+   engine run) was recorded for it. When no Ready replica was in sync
+   with it, neither of those ends the wait, nor does the cap
+   (`FailoverBlocked`): only its return, or
+   `kividb.io/allow-unsynced-failover`, which lets the capped wait run
+   its course (#75). The cap is what covers a volume that
    cannot attach yet (on AKS or EBS the replacement schedules on another
    node in the zone, then sits in `ContainerCreating` with a Multi-Attach
    error, never unschedulable); it is checked on each pass, so it can be

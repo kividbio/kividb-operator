@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -51,13 +53,68 @@ func restartWait(c *kividbv1alpha1.KividbCluster) time.Duration {
 // restartWaiting is a wait for a master to come back: which master, which
 // pod of it (the incarnation last recorded for it), and since when. over:
 // the wait ran out, or was skipped (its replacement cannot be scheduled).
-// It is kept until the master changes, so that a failover that does not go
-// through after it is tried again on the next pass at once, without a new
-// wait or new events about one.
+// unsynced: no replica was in sync with it, so it is waited for until it
+// comes back (waitForUnsynced). It is kept until the master changes, so
+// that a failover that does not go through after it is tried again on the
+// next pass at once, without a new wait or new events about one.
 type restartWaiting struct {
 	master, incarnation string
 	since               time.Time
-	over                bool
+	over, unsynced      bool
+}
+
+// waitForUnsynced holds the failover away from master name -- its pod gone,
+// or replaced and not ready yet (mv nil, or its replacement); last its entry
+// in the last persisted status -- for as long as it takes it to come back,
+// when no ready replica was in sync with it the last time that could be
+// told (#75): the one replica of a replicas: 1 cluster in the middle of a
+// full resync, say, which holds the snapshot it was sent but not the writes
+// queued after it. Those writes are on the master's volume. Promoting the
+// replica, and resyncing the master from it when it comes back, would lose
+// them. So neither failover.restartWaitSeconds nor a replacement that
+// cannot be scheduled ends this wait: only the master coming back, or
+// AllowUnsyncedFailoverAnnotation, which lets the failover go on to
+// waitForRestart. A master whose engine still answers is not waited for:
+// the fence holds its writes, and the replica promoted catches up with it
+// first. It returns the error that holds the failover, or nil.
+func (r *KividbClusterReconciler) waitForUnsynced(ctx context.Context, c *kividbv1alpha1.KividbCluster, name string, mv *podView, last kividbv1alpha1.KividbPodStatus, views map[string]*podView, synced map[string]bool) error {
+	if c.Annotations[kividbv1alpha1.AllowUnsyncedFailoverAnnotation] == "true" ||
+		electReplica(views, name) == "" || electReplica(onlySynced(views, synced), name) != "" {
+		return nil
+	}
+	if last.PodIP != "" && last.RunID != "" {
+		if runID, err := r.runOf(ctx, last.PodIP); err == nil && runID == last.RunID {
+			return nil
+		}
+	}
+	key, now := c.Namespace+"/"+c.Name, r.now()
+	var w *restartWaiting
+	if v, ok := r.restartWaits.Load(key); ok {
+		if got := v.(*restartWaiting); got.master == name && got.incarnation == last.Incarnation {
+			w = got
+		}
+	}
+	if w == nil {
+		w = &restartWaiting{master: name, incarnation: last.Incarnation, since: now}
+		r.restartWaits.Store(key, w)
+	}
+	if mv != nil && !mv.pod.CreationTimestamp.IsZero() && mv.pod.CreationTimestamp.Time.Before(w.since) {
+		w.since = mv.pod.CreationTimestamp.Time // made before this operator saw it gone
+	}
+	if !w.unsynced {
+		w.unsynced, w.over = true, false
+		var replicas []string
+		for n, v := range views {
+			if n != name && v.ready {
+				replicas = append(replicas, n)
+			}
+		}
+		sort.Strings(replicas)
+		r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
+			"%s is gone, and no replica was in sync with it (%s): its volume may hold acknowledged writes that none of them has. Waiting for it to come back, however long that takes, rather than promote a replica without them. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
+			name, strings.Join(replicas, ", "), kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
+	}
+	return heldBack("WaitingForMaster", fmt.Errorf("waiting for master %s to come back on its volume: no replica was in sync with it (%s so far)", name, now.Sub(w.since).Round(time.Second)))
 }
 
 // waitForRestart returns an error -- the failover is to wait -- while the
