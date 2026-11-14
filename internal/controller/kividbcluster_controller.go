@@ -28,10 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -994,10 +996,11 @@ func (r *KividbClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(mapPodToCluster)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(mapAnnounceServiceToCluster)).
 		// What a cluster references: fixing or making one is picked up at
-		// once, not on the next retry.
-		Watches(&kividbv1alpha1.KividbConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
-		Watches(&kividbv1alpha1.KividbAclConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
-		Watches(&kividbv1alpha1.KividbSnapshotConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
+		// once, not on the next retry. GenerationChangedPredicate ensures
+		// status.usedBy updates on configs do not trigger cluster reconciles.
+		Watches(&kividbv1alpha1.KividbConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&kividbv1alpha1.KividbAclConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&kividbv1alpha1.KividbSnapshotConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
 		Complete(r)
 }

@@ -6,9 +6,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-**Apply the new `kividbclusters` CRD before `helm upgrade`:** Helm does not
-upgrade it, and the spec gains `failover.restartWaitSeconds`. Until it is
-applied, the API server drops it and the restart wait keeps its default.
+**Apply the new CRDs before `helm upgrade`:** Helm does not upgrade them.
+The `kividbclusters` CRD spec gains `failover.restartWaitSeconds`.
+The `kividbconfigs`, `kividbaclconfigs`, and `kividbsnapshotconfigs` CRDs gain
+a `status` subresource with `status.usedBy` tracking referencing clusters.
+Until they are applied, the API server drops these fields.
 
 **Read before upgrading:** the pods of every sharded cluster roll once,
 replicas first and each master after a handover, for the new
@@ -16,6 +18,12 @@ replicas first and each master after a handover, for the new
 restarts its master in place: its slots are unavailable while it does,
 and with persistence off its data is lost. Scale such a shard to one
 replica first, or upgrade in a maintenance window if persistence is off.
+
+### Added
+
+- **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
+  Tracks which `KividbCluster`s in the namespace reference each shared config object,
+  displayed in `kubectl get -o wide` via a printer column.
 
 ### Fixed
 

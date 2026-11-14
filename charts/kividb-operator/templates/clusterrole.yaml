@@ -48,6 +48,16 @@ rules:
   - apiGroups:
       - kividb.io
     resources:
+      - kividbconfigs/status
+      - kividbaclconfigs/status
+      - kividbsnapshotconfigs/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - kividb.io
+    resources:
       - kividbsnapshots
     verbs:
       - get
