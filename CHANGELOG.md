@@ -19,6 +19,12 @@ restarts its master in place: its slots are unavailable while it does,
 and with persistence off its data is lost. Scale such a shard to one
 replica first, or upgrade in a maintenance window if persistence is off.
 
+### Added
+
+- **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
+  Tracks which `KividbCluster`s in the namespace reference each shared config object,
+  displayed in `kubectl get -o wide` via a printer column.
+
 ### Fixed
 
 - **A restarted node of a sharded cluster showed as `?` in `CLUSTER
@@ -192,9 +198,6 @@ are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
 
 ### Added
 
-- **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
-  Tracks which `KividbCluster`s in the namespace reference each shared config object,
-  displayed in `kubectl get -o wide` via a printer column.
 - **An OLM bundle for OperatorHub.io.** `make bundle VERSION=… IMG=…` builds
   the bundle from `config/manifests` (operator-sdk v1.36.0, kustomize v5.4.3),
   and `make scorecard` runs the scorecard tests. The bundle validates for

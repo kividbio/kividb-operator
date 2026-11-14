@@ -86,7 +86,6 @@ spec:
                   type: array
                   description: >-
                     KividbCluster names in this namespace that reference this config.
-                    Written by the reconciler; stale entries disappear on the next
-                    reconcile of any referencing cluster.
+                    Maintained by the operator from the KividbClusters that reference this config.
                   items:
                     type: string

@@ -24,6 +24,7 @@ type KividbAclConfigSpec struct {
 // KividbAclConfigStatus defines the observed state of a KividbAclConfig.
 type KividbAclConfigStatus struct {
 	// UsedBy lists the names of KividbClusters in the same namespace referencing this config.
+	// Maintained by the operator from the KividbClusters that reference this config.
 	// +optional
 	UsedBy []string `json:"usedBy,omitempty"`
 }

@@ -113,6 +113,7 @@ type KividbSnapshotConfigSpec struct {
 // KividbSnapshotConfigStatus defines the observed state of a KividbSnapshotConfig.
 type KividbSnapshotConfigStatus struct {
 	// UsedBy lists the names of KividbClusters in the same namespace referencing this config.
+	// Maintained by the operator from the KividbClusters that reference this config.
 	// +optional
 	UsedBy []string `json:"usedBy,omitempty"`
 }

@@ -140,6 +140,21 @@ func TestConfigUsageReconciler_RecomputeUsedBy(t *testing.T) {
 	if len(updatedAlt.Status.UsedBy) != 1 || updatedAlt.Status.UsedBy[0] != "cluster-2" {
 		t.Fatalf("step 3: expected [cluster-2] for cfg-alt, got %v", updatedAlt.Status.UsedBy)
 	}
+
+	// Step 4: Remove configRef entirely (set to nil) -> cfg-alt usedBy becomes empty.
+	c2.Spec.ConfigRef = nil
+	if err := cl.Update(ctx, c2); err != nil {
+		t.Fatalf("Update cluster-2 to nil configRef: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, reqAlt); err != nil {
+		t.Fatalf("Reconcile step 4 (cfg-alt): %v", err)
+	}
+	if err := cl.Get(ctx, reqAlt.NamespacedName, &updatedAlt); err != nil {
+		t.Fatalf("Get cfg-alt step 4: %v", err)
+	}
+	if len(updatedAlt.Status.UsedBy) != 0 {
+		t.Fatalf("step 4: expected empty usedBy for cfg-alt after removing configRef, got %v", updatedAlt.Status.UsedBy)
+	}
 }
 
 func TestConfigUsageReconciler_AclAndSnapshot(t *testing.T) {
@@ -289,6 +304,29 @@ func TestConfigUsageReconciler_MapClusterEvents(t *testing.T) {
 		}
 	})
 
+	t.Run("Update enqueues old config when ref is removed (new ref nil)", func(t *testing.T) {
+		q := workqueue.NewTypedRateLimitingQueue[reconcile.Request](workqueue.DefaultTypedItemBasedRateLimiter[reconcile.Request]())
+		defer q.ShutDown()
+
+		oldC := &kividbv1alpha1.KividbCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "prod"},
+			Spec:       kividbv1alpha1.KividbClusterSpec{ConfigRef: &corev1.LocalObjectReference{Name: "cfg-old"}},
+		}
+		newC := &kividbv1alpha1.KividbCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "prod"},
+			Spec:       kividbv1alpha1.KividbClusterSpec{ConfigRef: nil},
+		}
+		funcs.Update(ctx, event.UpdateEvent{ObjectOld: oldC, ObjectNew: newC}, q)
+
+		if q.Len() != 1 {
+			t.Fatalf("expected queue length 1 (old config only), got %d", q.Len())
+		}
+		item, _ := q.Get()
+		if item.Namespace != "prod" || item.Name != "cfg-old" {
+			t.Fatalf("unexpected request: %v", item)
+		}
+	})
+
 	t.Run("Delete enqueues referenced config", func(t *testing.T) {
 		q := workqueue.NewTypedRateLimitingQueue[reconcile.Request](workqueue.DefaultTypedItemBasedRateLimiter[reconcile.Request]())
 		defer q.ShutDown()
@@ -307,4 +345,80 @@ func TestConfigUsageReconciler_MapClusterEvents(t *testing.T) {
 			t.Fatalf("unexpected request: %v", item)
 		}
 	})
+}
+
+func TestConfigUsageReconciler_NamespaceIsolation(t *testing.T) {
+	t.Parallel()
+
+	scheme := newUsageTestScheme(t)
+
+	cfgA := &kividbv1alpha1.KividbConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-config", Namespace: "ns-a"},
+	}
+	clusterA := &kividbv1alpha1.KividbCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-a", Namespace: "ns-a"},
+		Spec: kividbv1alpha1.KividbClusterSpec{
+			ConfigRef: &corev1.LocalObjectReference{Name: "my-config"},
+		},
+	}
+
+	cfgB := &kividbv1alpha1.KividbConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-config", Namespace: "ns-b"},
+	}
+	clusterB := &kividbv1alpha1.KividbCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-b", Namespace: "ns-b"},
+		Spec: kividbv1alpha1.KividbClusterSpec{
+			ConfigRef: &corev1.LocalObjectReference{Name: "my-config"},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&kividbv1alpha1.KividbConfig{}).
+		WithIndex(&kividbv1alpha1.KividbCluster{}, ClusterConfigRefIndex, func(obj client.Object) []string {
+			c, ok := obj.(*kividbv1alpha1.KividbCluster)
+			if !ok || c.Spec.ConfigRef == nil || c.Spec.ConfigRef.Name == "" {
+				return nil
+			}
+			return []string{c.Spec.ConfigRef.Name}
+		}).
+		WithObjects(cfgA, clusterA, cfgB, clusterB).
+		Build()
+
+	r := &ConfigUsageReconciler[*kividbv1alpha1.KividbConfig]{
+		Client:     cl,
+		Scheme:     scheme,
+		NewObject:  func() *kividbv1alpha1.KividbConfig { return &kividbv1alpha1.KividbConfig{} },
+		IndexField: ClusterConfigRefIndex,
+		GetUsedBy:  func(c *kividbv1alpha1.KividbConfig) []string { return c.Status.UsedBy },
+		SetUsedBy:  func(c *kividbv1alpha1.KividbConfig, u []string) { c.Status.UsedBy = u },
+	}
+
+	ctx := context.Background()
+
+	// Reconcile my-config in ns-a: must only count cluster-a
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns-a", Name: "my-config"}}); err != nil {
+		t.Fatalf("Reconcile ns-a: %v", err)
+	}
+
+	var updatedA kividbv1alpha1.KividbConfig
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "ns-a", Name: "my-config"}, &updatedA); err != nil {
+		t.Fatalf("Get ns-a config: %v", err)
+	}
+	if len(updatedA.Status.UsedBy) != 1 || updatedA.Status.UsedBy[0] != "cluster-a" {
+		t.Fatalf("expected ns-a usedBy to be [cluster-a], got %v", updatedA.Status.UsedBy)
+	}
+
+	// Reconcile my-config in ns-b: must only count cluster-b
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns-b", Name: "my-config"}}); err != nil {
+		t.Fatalf("Reconcile ns-b: %v", err)
+	}
+
+	var updatedB kividbv1alpha1.KividbConfig
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "ns-b", Name: "my-config"}, &updatedB); err != nil {
+		t.Fatalf("Get ns-b config: %v", err)
+	}
+	if len(updatedB.Status.UsedBy) != 1 || updatedB.Status.UsedBy[0] != "cluster-b" {
+		t.Fatalf("expected ns-b usedBy to be [cluster-b], got %v", updatedB.Status.UsedBy)
+	}
 }
