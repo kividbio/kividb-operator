@@ -95,12 +95,13 @@ Results land in `hack/e2e/results/latest.txt` (pass/fail/skip per suite).
 | `SKIP_RESP_ACL=1` | `08-resp-acl-select.sh` |
 | `SKIP_RESTORE=1` | `09-restore-over-aof.sh` (also skipped with `SKIP_MINIO=1`: it needs MinIO) |
 | `SKIP_FENCE=1` | `10-force-delete-fence.sh` (skipped in CI: up to `FENCE_ATTEMPTS` force-deletes of about a minute each) |
+| `SKIP_UNSYNCED=1` | `11-unsynced-failover.sh` (skipped in CI, and on any driver but kind: it runs `crictl` and `iptables` on the node) |
 
 Example: re-run failover only against an already-deployed operator:
 
 ```bash
 SKIP_DEPLOY=1 SKIP_PROMETHEUS=1 SKIP_MINIO=1 SKIP_COMPAT=1 \
-  SKIP_SNAPSHOT=1 SKIP_MONITOR=1 SKIP_RESP_ACL=1 SKIP_FENCE=1 ./hack/e2e/run-all.sh
+  SKIP_SNAPSHOT=1 SKIP_MONITOR=1 SKIP_RESP_ACL=1 SKIP_FENCE=1 SKIP_UNSYNCED=1 ./hack/e2e/run-all.sh
 ```
 
 ## Suite map
@@ -118,6 +119,7 @@ SKIP_DEPLOY=1 SKIP_PROMETHEUS=1 SKIP_MINIO=1 SKIP_COMPAT=1 \
 | `08-resp-acl-select.sh` | RESP3 HELLO, ACL deny smoke, SELECT on replica, single-master failover |
 | `09-restore-over-aof.sh` | `bootstrapFromSnapshot` over a kept pod-0 volume whose `appendonly.aof` holds writes the snapshot lacks, with `superseded.*` and temp files: the dataset equals the snapshot's, and none of those files are left (#58) |
 | `10-force-delete-fence.sh` | Force-delete the master under write load (`fence-writer.py` in a pod, fresh keys each attempt): no acknowledged write lost, and at least one attempt went through a failover that held the old master's writes first (#53) |
+| `11-unsynced-failover.sh` | A `replicas: 1` cluster whose replica is cut off from the master (out of sync), then the master's engine and agent killed with SIGKILL and its pod force-deleted, with `restartWaitSeconds: 0`: the failover waits for the master (`FailoverBlocked`) instead of promoting the replica, the master comes back as the master, and no acknowledged write is lost (#75) |
 
 | `07-monitor-memory.sh` | Agent `/metrics`, memory/commands under load, optional Prom targets |
 

@@ -74,6 +74,35 @@ replica first, or upgrade in a maintenance window if persistence is off.
     `ContainerCreating` (Multi-Attach), never unschedulable.
     `FailoverWait` events say when a wait starts and how it ended, and the
     Ready condition's reason is `WaitingForMaster` meanwhile.
+- **A failover from a master that is gone could promote a replica that
+  was not in sync with it** (#75), and resync the master from it when it
+  came back. On kind, the one replica of a `replicas: 1` cluster was
+  promoted in the middle of its full resync, with the snapshot it had been
+  sent but not the writes queued after it; the master came back on its
+  volume 8 s later with all of them, and 42,170 acknowledged writes were
+  lost. When no Ready replica was in sync with a master that does not
+  answer, its pod gone or restarting in place, the failover now waits for
+  it however long that takes (`FailoverBlocked` Warning, `WaitingForMaster`
+  on the Ready condition): neither `failover.restartWaitSeconds` (0
+  included), a replacement that cannot be scheduled, nor
+  `unhealthyThresholdSeconds` for a master restarting in place ends that
+  wait; the Ready condition's message names the annotation below, as the
+  event expires. A master whose engine still answers is fenced, and a
+  replica that was not in sync is promoted only once it has caught up
+  with it: if none is near enough (within 1 MiB, its link up), the
+  master's writes are not held at all, and if the one picked does not
+  catch up within 5 s the pause is lifted; either way no one is promoted
+  and the master keeps serving. With the append-only file off there is
+  nothing on the master's volume to wait for, and the failover goes ahead
+  as before. A master back from the wait without its append-only file
+  holding every write it acknowledged (an engine before 1.2.0) is failed
+  away from if a replica holds more keys. `kividb.io/allow-unsynced-failover:
+  "true"` on the cluster lets the failover go ahead (`FailoverForced`
+  Warning; for a master whose pod is gone, once `restartWaitSeconds` have
+  passed), losing the writes since the replica was last in sync. The
+  operator removes it, and `allow-unread-failover` with it, once a
+  failover has gone through, and also if the master comes back first.
+  Replicated clusters only.
 - **`kubectl apply -k config/default` warned that `commonLabels` is
   deprecated** (#69). `config/default` sets the same two labels with
   `labels` instead, on each object's own labels only: the manager

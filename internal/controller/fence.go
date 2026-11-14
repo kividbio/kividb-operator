@@ -106,21 +106,21 @@ const (
 // replica to promote -- with the old master held, the replicas' offsets
 // stop moving (#78) -- and waits for that replica to catch up with it. It
 // returns the address it holds the writes at, or may hold them at, or ""
-// when it does not (the failover goes on either way). pick is called only
-// once a pause was answered; the caller picks otherwise.
-func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv1alpha1.KividbCluster, last kividbv1alpha1.KividbPodStatus, pick func() *podView) (string, bool) {
+// when it does not; whether the replica caught up; and, when the failover
+// would lose writes, why, for the FailoverUnfenced Warning the caller gives
+// if it promotes after all (it may hold the failover instead, #75). pick is
+// called only once a pause was answered; the caller picks otherwise.
+func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv1alpha1.KividbCluster, last kividbv1alpha1.KividbPodStatus, pick func() *podView) (string, bool, string) {
 	log := logf.FromContext(ctx).WithValues("pod", last.Name, "ip", last.PodIP)
 	unfenced := func(why string, args ...any) string {
 		msg := fmt.Sprintf(why, args...)
-		log.Info("failing over without holding the old master's writes", "why", msg)
-		r.event(c, corev1.EventTypeWarning, "FailoverUnfenced",
-			"%s: %s; writes it acknowledged after this may be lost", last.Name, msg)
-		return ""
+		log.Info("not holding the old master's writes", "why", msg)
+		return fmt.Sprintf("%s: %s; writes it acknowledged after this may be lost", last.Name, msg)
 	}
 	if last.PodIP == "" || last.RunID == "" {
 		// A kividbclusters CRD from before status.pods[].podIP drops the
 		// field on every status write (Helm does not upgrade CRDs).
-		return unfenced("no address or engine run recorded for it, so its writes were not held before the failover; apply the current kividbclusters CRD (Helm does not upgrade it)"), false
+		return "", false, unfenced("no address or engine run recorded for it, so its writes were not held before the failover; apply the current kividbclusters CRD (Helm does not upgrade it)")
 	}
 
 	// One command each for the run and the pause: under a CPU limit every
@@ -128,11 +128,11 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 	// GET /status makes seven.
 	runID, err := r.runOf(ctx, last.PodIP)
 	if err != nil {
-		return unfenced("no answer at %s (%v)", last.PodIP, err), false
+		return "", false, unfenced("no answer at %s (%v)", last.PodIP, err)
 	}
 	if runID != last.RunID {
 		log.Info("not holding the writes at the old master's address: another engine answers there", "runID", runID, "recordedRunID", last.RunID)
-		return "", false
+		return "", false, ""
 	}
 
 	// It is there. A pause that is not answered may have landed all the
@@ -156,7 +156,7 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 			break
 		}
 		if reply != nil && pauseUnsupported(err) {
-			return unfenced("its engine does not have CLIENT PAUSE WRITE (%v)", err), false
+			return "", false, unfenced("its engine does not have CLIENT PAUSE WRITE (%v)", err)
 		}
 		unanswered = unanswered || reply == nil
 		if deadline.IsZero() {
@@ -167,15 +167,14 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 				// it waited for finished: the master is recorded and
 				// demoted as a fenced one, rather than left to wake up a
 				// master when that pause runs out (#82).
-				unfenced("its engine answered, but no pause of its writes was confirmed (%v); it is demoted after the promotion in case one landed", err)
-				return last.PodIP, false
+				return last.PodIP, false, unfenced("its engine answered, but no pause of its writes was confirmed (%v); it is demoted after the promotion in case one landed", err)
 			}
-			return unfenced("its engine answered, but its writes could not be paused (%v)", err), false
+			return "", false, unfenced("its engine answered, but its writes could not be paused (%v)", err)
 		}
 		log.Info("holding the old master's writes did not take; trying again", "error", err.Error())
 		select {
 		case <-ctx.Done():
-			return unfenced("%v", ctx.Err()), false
+			return "", false, unfenced("%v", ctx.Err())
 		case <-time.After(switchoverPoll):
 		}
 	}
@@ -186,16 +185,60 @@ func (r *KividbClusterReconciler) fenceOldMaster(ctx context.Context, c *kividbv
 		cand.status != nil && cand.status.Role == agentapi.RoleMaster {
 		// An earlier pass fenced it and promoted this replica, the reply of
 		// which was lost: it has waited for the replica already.
-		return last.PodIP, true
+		return last.PodIP, true, ""
 	}
 	ok, _, why := r.waitCaughtUp(ctx, last.PodIP, cand.pod.Status.PodIP, true)
 	if !ok {
-		log.Info("promoting a replica that has not caught up with the fenced master", "replica", cand.pod.Name, "why", why)
-		r.event(c, corev1.EventTypeWarning, "FailoverUnfenced",
-			"%s: promoting %s before it caught up with it (%s); writes %s acknowledged that %s does not have are lost",
+		log.Info("the replica has not caught up with the fenced master", "replica", cand.pod.Name, "why", why)
+		return last.PodIP, false, fmt.Sprintf("%s: promoting %s before it caught up with it (%s); writes %s acknowledged that %s does not have are lost",
 			last.Name, cand.pod.Name, why, last.Name, cand.pod.Name)
 	}
-	return last.PodIP, ok
+	return last.PodIP, true, ""
+}
+
+// farBehind reports whether every ready replica of views but exclude is
+// too far behind the old master, last, to catch up with it within the
+// fence's wait: asked with ROLE now, without holding its writes, none has
+// its link up within maxSyncLagBytes of the master's offset (read first:
+// under writes a replica read after it can be ahead of it, and is near).
+// Then the fence would only stall the master's writes, every pass, for a
+// catch-up that cannot end in time. False when nothing answers at its
+// address as the engine run recorded for it: there is nothing to hold
+// then. It also says which is nearest, in words that do not change from
+// one pass to the next: the status is written on each, and a write starts
+// the next pass.
+func (r *KividbClusterReconciler) farBehind(ctx context.Context, last kividbv1alpha1.KividbPodStatus, views map[string]*podView, exclude string) (string, bool) {
+	if last.PodIP == "" || last.RunID == "" {
+		return "", false
+	}
+	if runID, err := r.runOf(ctx, last.PodIP); err != nil || runID != last.RunID {
+		return "", false
+	}
+	m, err := r.roleOf(ctx, last.PodIP)
+	if err != nil || !m.master {
+		return "", false
+	}
+	nearest, lag := "", int64(0)
+	for name, v := range views {
+		if name == exclude || !v.ready {
+			continue
+		}
+		rr, err := r.roleOf(ctx, v.pod.Status.PodIP)
+		if err != nil || rr.master || !rr.linkUp {
+			continue
+		}
+		if d := m.offset - rr.offset; nearest == "" || d < lag {
+			nearest, lag = name, d
+		}
+	}
+	switch {
+	case nearest == "":
+		return "no replica has its link to it up", true
+	case lag <= maxSyncLagBytes:
+		return "", false
+	}
+	logf.FromContext(ctx).Info("no replica is near enough to the old master to catch up with it", "replica", nearest, "behindBytes", lag)
+	return fmt.Sprintf("%s, the nearest, is more than %d bytes behind it", nearest, maxSyncLagBytes), true
 }
 
 // recordFence persists, before the promotion, which master the failover

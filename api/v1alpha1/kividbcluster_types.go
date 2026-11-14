@@ -440,6 +440,17 @@ const AllowEmptyFailoverAnnotation = "kividb.io/allow-empty-failover"
 // later one.
 const AllowUnreadFailoverAnnotation = "kividb.io/allow-unread-failover"
 
+// AllowUnsyncedFailoverAnnotation, set to "true" on a KividbCluster, lets a
+// failover go ahead away from a master that does not answer -- its pod
+// gone, once failover.restartWaitSeconds have passed, or restarting in
+// place -- when no replica was in sync with it: the writes it acknowledged
+// since the replica promoted was last in sync are lost. Without it the
+// failover waits for that master to come back, however long that takes
+// (FailoverBlocked); see reconcileRoles. The operator removes it once a
+// failover has gone through (allow-unread-failover too), or the master
+// comes back first.
+const AllowUnsyncedFailoverAnnotation = "kividb.io/allow-unsynced-failover"
+
 // ShardPromoteAnnotation records, on a sharded KividbCluster, the last
 // replica someone asked to take over its shard outside the operator (the
 // console's Promote): "<pod> <RFC 3339 time>". The operator reports the

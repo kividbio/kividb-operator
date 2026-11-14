@@ -145,6 +145,38 @@ kubectl annotate kividbcluster my-cluster kividb.io/allow-unread-failover=true
 
 The operator removes the annotation once the failover has gone through.
 
+## Failover waiting for a master no replica was in sync with (`FailoverBlocked`, `WaitingForMaster`)
+
+The master does not answer, its pod gone or restarting in place, and no
+Ready replica was in sync with it when it went: one in the middle of a
+full resync, say, or cut off from it. The master's volume may hold
+acknowledged writes that no replica has, so the failover waits for it to
+come back, however long that takes, and then keeps it, unless it holds
+fewer keys than a replica and nothing says its append-only file holds
+every write it acknowledged. The Ready condition's message says the same,
+after the event has expired. Check why it is not back:
+`kubectl describe pod` shows a node that is not Ready, a volume that
+cannot attach (a Multi-Attach error), or the kividb container's restarts
+and last state (an OOM kill: raise `spec.resources.limits.memory`). If the
+master's node or volume is gone for good, or losing the writes it
+acknowledged since the replica was last in sync is acceptable:
+
+```bash
+kubectl annotate kividbcluster my-cluster kividb.io/allow-unsynced-failover=true
+```
+
+The failover then goes ahead (a `FailoverForced` Warning; for a master
+whose pod is gone, once `failover.restartWaitSeconds` have passed), and the
+operator removes the annotation.
+
+With `WaitingForReplica` instead, the master still answers, but the
+replica picked was not in sync with it and is too far behind it, or did
+not catch up within 5 s. The master keeps serving; its writes are held for
+a catch-up only once a replica is within 1 MiB of it. Watch the replica's
+sync (`INFO replication` on it: `master_link_status`,
+`master_sync_in_progress`), or find why its link is down. The same
+annotation lets the failover go ahead.
+
 ## Failover without a fence (`FailoverUnfenced`)
 
 A failover went ahead without first holding the old master's writes, or

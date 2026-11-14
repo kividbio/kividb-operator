@@ -168,11 +168,16 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 	// failed away from once failover.restartWaitSeconds have passed since
 	// it was found gone, whether its pod came back or not. A master that
 	// restarts in place keeps the unhealthy threshold above.
+	// cameBack: the master is back from a wait for it, on this pass.
+	var cameBack *restartWaiting
 	if mv, exists := views[currentMasterName]; currentMasterName != "" && failoverEnabled && (!exists || podReplaced(previous[currentMasterName], mv.pod)) {
 		switch {
 		case exists && mv.ready && mv.status != nil:
-			r.restartWaitOver(c, waitCameBack, currentMasterName)
+			cameBack = r.restartWaitOver(c, waitCameBack, currentMasterName)
 		default:
+			if err := r.waitForUnsynced(ctx, c, currentMasterName, mv, previous[currentMasterName], failoverPool(c, views, masterKeysLastSeen), previouslySynced); err != nil {
+				return nil, currentMasterName, false, err
+			}
 			if err := r.waitForRestart(ctx, c, currentMasterName, mv, previous[currentMasterName]); err != nil {
 				return nil, currentMasterName, false, err
 			}
@@ -180,8 +185,26 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 	} else if !failoverEnabled {
 		r.restartWaitOver(c, waitFailoverOff, currentMasterName)
+	} else if mv, exists := views[currentMasterName]; needsFailover && exists {
+		// The same pod, unready past unhealthyThresholdSeconds: an engine
+		// restarting in place (killed for its memory, say) reloads what it
+		// acknowledged from its volume. With no replica in sync, it is
+		// waited for as a master whose pod is gone is (#75).
+		if err := r.waitForUnsynced(ctx, c, currentMasterName, nil, previous[currentMasterName], failoverPool(c, views, masterKeysLastSeen), previouslySynced); err != nil {
+			return nil, currentMasterName, false, err
+		}
 	} else {
-		r.restartWaitOver(c, waitMasterChanged, currentMasterName)
+		end := waitMasterChanged
+		if exists && mv.ready && mv.status != nil {
+			end = waitCameBack // from a wait for it in place, if there was one
+		}
+		cameBack = r.restartWaitOver(c, end, currentMasterName)
+	}
+	cameBackUnsynced := cameBack != nil && cameBack.unsynced && cameBack.master == currentMasterName
+	if cameBackUnsynced && c.Annotations[kividbv1alpha1.AllowUnsyncedFailoverAnnotation] == "true" {
+		// Set for a failover that did not happen: left set, it would end
+		// some later wait unasked.
+		r.clearFailoverOverrides(ctx, c, read, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
 	}
 
 	// A master that restarted and came back with less than its replicas
@@ -200,6 +223,22 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 					currentMasterName, mv.status.ReplicationOffset, previous[currentMasterName].ReplicationOffset, ahead, aheadOffset)
 				needsFailover = true
 				behindOf = ahead
+			} else if cameBackUnsynced && !aofHoldsAckedWrites(mv.status) && mv.status.KeyCountKnown {
+				// Back from a wait when no replica was in sync with it,
+				// without the append-only file holding every write it
+				// acknowledged: what it holds is no longer known to cover
+				// what the replicas do. One holding more keys takes over,
+				// rather than be resynced from it. (With that guarantee,
+				// what a replica holds is a part of its history.)
+				if ahead, keys := mostKeys(views, currentMasterName); ahead != "" && keys > mv.status.KeyCount {
+					log.Info("the master came back holding fewer keys than a replica; failing over to it", "pod", currentMasterName,
+						"masterKeys", mv.status.KeyCount, "replica", ahead, "replicaKeys", keys)
+					r.event(c, corev1.EventTypeWarning, "MasterRestartedBehind",
+						"%s came back holding %d keys, fewer than %s (%d), with no replica in sync with it and nothing saying its append-only file holds every write it acknowledged; failing over to %s rather than resync it from %s",
+						currentMasterName, mv.status.KeyCount, ahead, keys, ahead, currentMasterName)
+					needsFailover = true
+					behindOf = ahead
+				}
 			}
 		}
 	}
@@ -230,9 +269,11 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		// only just started resyncing when the master went away.
 		tier := onlySynced(eligible, previouslySynced)
 		candidate := electReplica(tier, currentMasterName)
+		unsyncedPick := false // a replica that was not in sync (waitForUnsynced)
 		if candidate == "" {
 			tier = eligible
 			candidate = electReplica(eligible, currentMasterName)
+			unsyncedPick = candidate != ""
 		}
 		if _, ok := eligible[behindOf]; ok {
 			candidate = behindOf // the replica that holds what the restarted master lost
@@ -262,6 +303,24 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		heldOld := ""
 		if needsFailover && behindOf == "" {
 			last := previous[currentMasterName]
+			// No replica was in sync with the old master, and nothing lets
+			// one that has not caught up with it be promoted (#75). If it
+			// still answers and every replica is far behind it (in the
+			// middle of a full resync, say), none can catch up within the
+			// fence's wait: holding its writes would only stall them, every
+			// pass, to end in the hold below. So look first, without
+			// holding them.
+			holdUnsynced := unsyncedPick && c.Annotations[kividbv1alpha1.AllowUnsyncedFailoverAnnotation] != "true"
+			if holdUnsynced {
+				if behind, far := r.farBehind(ctx, last, tier, currentMasterName); far {
+					r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
+						"master %s is unavailable, but no replica was in sync with it, and none is near enough to catch up with it: no one is promoted, and its writes are not held, so it keeps serving if it can. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
+						currentMasterName, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
+					return nil, currentMasterName, false, heldBack("WaitingForReplica",
+						fmt.Errorf("failover held: no replica was in sync with master %s, and %s. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
+							currentMasterName, behind, kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
+				}
+			}
 			picked := false
 			var unread []string
 			pick := func() *podView {
@@ -270,7 +329,8 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				return views[candidate]
 			}
 			var caughtUp bool
-			heldOld, caughtUp = r.fenceOldMaster(ctx, c, last, pick)
+			var unfenced string
+			heldOld, caughtUp, unfenced = r.fenceOldMaster(ctx, c, last, pick)
 			if !picked {
 				// Not held, or a pause with no answer (it may have
 				// landed): picked all the same, by what each holds now.
@@ -292,18 +352,35 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				unreadList := strings.Join(unread, ", ")
 				if c.Annotations[kividbv1alpha1.AllowUnreadFailoverAnnotation] != "true" {
 					held = true
-					heldFor := r.failoverHeld(c, currentMasterName).Round(time.Second)
+					held, since := r.failoverHeld(c, currentMasterName)
+					heldFor := held.Round(time.Second)
 					r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
 					r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
 						"master %s is unavailable, but %s did not answer ROLE within %s and may hold more than %s; no one promoted, held for %s. If the operator cannot reach %s (a NetworkPolicy, a network partition), fix the network, delete its pod, or annotate the cluster %s=true to fail over without it",
 						currentMasterName, unreadList, liveOffsetBudget, candidate, heldFor, unreadList, kividbv1alpha1.AllowUnreadFailoverAnnotation)
 					return nil, currentMasterName, false, heldBack("WaitingForReplica",
-						fmt.Errorf("failover held for %s: %s did not answer ROLE within %s and may hold more than %s", heldFor, unreadList, liveOffsetBudget, candidate))
+						fmt.Errorf("failover held since %s: %s did not answer ROLE within %s and may hold more than %s", since.UTC().Format(time.RFC3339), unreadList, liveOffsetBudget, candidate))
 				}
 				log.Info("failing over without the replicas that did not answer", "unread", unread, "replica", candidate)
 				r.event(c, corev1.EventTypeWarning, "FailoverForced",
 					"master %s is unavailable; promoting %s without %s, which did not answer ROLE (%s is set): writes only %s held are lost. The annotation is removed once this failover has gone through",
 					currentMasterName, candidate, unreadList, kividbv1alpha1.AllowUnreadFailoverAnnotation, unreadList)
+			}
+			if holdUnsynced && !caughtUp && (heldOld != "" || !aofOff(tier, currentMasterName)) {
+				// The replica picked was not in sync with the old master and
+				// has not caught up with it: promoting it loses what the
+				// master acknowledged and it lacks. The master keeps serving
+				// if it can, and the replica its sync from it.
+				r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
+				r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
+					"master %s is unavailable, but no replica was in sync with it, and %s has not caught up with it: no one is promoted, and its writes are no longer held, so it keeps serving if it can. To fail over anyway, losing the writes it acknowledged since %s was last in sync, annotate the cluster %s=true",
+					currentMasterName, candidate, candidate, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
+				return nil, currentMasterName, false, heldBack("WaitingForReplica",
+					fmt.Errorf("failover held: no replica was in sync with master %s, and %s has not caught up with it. To fail over anyway, losing the writes it acknowledged since %s was last in sync, annotate the cluster %s=true",
+						currentMasterName, candidate, candidate, kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
+			}
+			if unfenced != "" {
+				r.event(c, corev1.EventTypeWarning, "FailoverUnfenced", "%s", unfenced)
 			}
 			if heldOld != "" {
 				if err := r.recordFence(ctx, c, read, kividbv1alpha1.FencedMaster{Name: last.Name, PodIP: heldOld, RunID: last.RunID}); err != nil {
@@ -313,6 +390,12 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 			}
 		}
 
+		if needsFailover && behindOf == "" && heldOld == "" && unsyncedPick && c.Annotations[kividbv1alpha1.AllowUnsyncedFailoverAnnotation] == "true" {
+			log.Info("failing over to a replica that was not in sync", "replica", candidate)
+			r.event(c, corev1.EventTypeWarning, "FailoverForced",
+				"master %s does not answer, and no replica was in sync with it; promoting %s anyway (%s is set): the writes %s acknowledged since %s was last in sync are lost. The annotation is removed once this failover has gone through",
+				currentMasterName, candidate, kividbv1alpha1.AllowUnsyncedFailoverAnnotation, currentMasterName, candidate)
+		}
 		log.Info("promoting pod to master", "pod", candidate, "reason", map[bool]string{true: "failover", false: "bootstrap"}[needsFailover])
 
 		// Take the master label off the pod being failed away from *before*
@@ -375,10 +458,12 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		}
 		newMasterName = candidate
 		failoverHappened = needsFailover
-		if needsFailover && c.Annotations[kividbv1alpha1.AllowUnreadFailoverAnnotation] == "true" {
+		if needsFailover && (c.Annotations[kividbv1alpha1.AllowUnreadFailoverAnnotation] == "true" ||
+			c.Annotations[kividbv1alpha1.AllowUnsyncedFailoverAnnotation] == "true") {
 			// One failover per annotation: left set, it would skip the
-			// hold for an unread replica on every later failover too.
-			r.clearUnreadFailoverOverride(ctx, c, read)
+			// hold for an unread replica, or for a master no replica was in
+			// sync with, on every later failover too.
+			r.clearFailoverOverrides(ctx, c, read, failoverOverrides...)
 		}
 		// Refresh our view of the new master so downstream REPLICAOF checks
 		// below see it as master rather than stale replica state, keeping its
@@ -756,6 +841,31 @@ func withoutEmptied(views map[string]*podView) map[string]*podView {
 	return out
 }
 
+// failoverPool returns the replicas of views a failover may promote: when
+// the master was last seen holding data, only those that still hold some,
+// unless AllowEmptyFailoverAnnotation says otherwise.
+func failoverPool(c *kividbv1alpha1.KividbCluster, views map[string]*podView, masterKeysLastSeen int64) map[string]*podView {
+	if masterKeysLastSeen > 0 && c.Annotations[kividbv1alpha1.AllowEmptyFailoverAnnotation] != "true" {
+		return withoutEmptied(views)
+	}
+	return views
+}
+
+// mostKeys returns the ready replica of views but exclude that reports
+// the most keys, and how many; ties go by name.
+func mostKeys(views map[string]*podView, exclude string) (string, int64) {
+	best, most := "", int64(-1)
+	for name, v := range views {
+		if name == exclude || !v.ready || v.status == nil || v.status.Role != agentapi.RoleReplica || !v.status.KeyCountKnown {
+			continue
+		}
+		if k := v.status.KeyCount; k > most || (k == most && name < best) {
+			best, most = name, k
+		}
+	}
+	return best, most
+}
+
 // onlySynced returns the views of the pods marked in synced.
 func onlySynced(views map[string]*podView, synced map[string]bool) map[string]*podView {
 	out := make(map[string]*podView, len(views))
@@ -794,24 +904,33 @@ func (r *KividbClusterReconciler) event(c *kividbv1alpha1.KividbCluster, eventTy
 	}
 }
 
-// clearUnreadFailoverOverride removes AllowUnreadFailoverAnnotation from c,
-// once the failover it was set for has gone through. The patch goes through
-// a copy, so the status this pass has not written yet is not replaced by the
-// stored one. It has no lock, so it also lands after a newer pass's status
-// write: c takes the new resourceVersion only if the stored status is still
-// read. Otherwise c keeps its own, and its status write conflicts and comes
-// back stale (writeStatus) rather than go over the newer status.
-func (r *KividbClusterReconciler) clearUnreadFailoverOverride(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus) {
+// failoverOverrides are the annotations that let one failover go ahead
+// without what it would wait for otherwise.
+var failoverOverrides = []string{kividbv1alpha1.AllowUnreadFailoverAnnotation, kividbv1alpha1.AllowUnsyncedFailoverAnnotation}
+
+// clearFailoverOverrides removes the annotations names from c, once the
+// failover they were set for has gone through, or the master they were set
+// to fail away from is back. The patch goes through a copy, so the
+// status this pass has not written yet is not replaced by the stored one.
+// It has no lock, so it also lands after a newer pass's status write: c
+// takes the new resourceVersion only if the stored status is still read.
+// Otherwise c keeps its own, and its status write conflicts and comes back
+// stale (writeStatus) rather than go over the newer status.
+func (r *KividbClusterReconciler) clearFailoverOverrides(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus, names ...string) {
 	stored := c.DeepCopy()
 	patch := client.MergeFrom(stored.DeepCopy())
-	delete(stored.Annotations, kividbv1alpha1.AllowUnreadFailoverAnnotation)
+	for _, a := range names {
+		delete(stored.Annotations, a)
+	}
 	if err := r.Client.Patch(ctx, stored, patch); err != nil {
 		if !apierrors.IsNotFound(err) {
-			logf.FromContext(ctx).Error(err, "removing the annotation", "annotation", kividbv1alpha1.AllowUnreadFailoverAnnotation)
+			logf.FromContext(ctx).Error(err, "removing the annotations", "annotations", names)
 		}
 		return
 	}
-	delete(c.Annotations, kividbv1alpha1.AllowUnreadFailoverAnnotation)
+	for _, a := range names {
+		delete(c.Annotations, a)
+	}
 	if equality.Semantic.DeepEqual(stored.Status, *read) {
 		c.ResourceVersion = stored.ResourceVersion
 	}
@@ -825,14 +944,15 @@ type failoverHold struct {
 }
 
 // failoverHeld returns how long the failover of c away from master has been
-// held back, counted from the first pass that held it.
-func (r *KividbClusterReconciler) failoverHeld(c *kividbv1alpha1.KividbCluster, master string) time.Duration {
+// held back, and since when: the first pass that held it.
+func (r *KividbClusterReconciler) failoverHeld(c *kividbv1alpha1.KividbCluster, master string) (time.Duration, time.Time) {
 	key, now := c.Namespace+"/"+c.Name, r.now()
 	if v, ok := r.failoverHolds.Load(key); ok && v.(*failoverHold).master == master {
-		return now.Sub(v.(*failoverHold).since)
+		since := v.(*failoverHold).since
+		return now.Sub(since), since
 	}
 	r.failoverHolds.Store(key, &failoverHold{master: master, since: now})
-	return 0
+	return 0, now
 }
 
 // liveOffsetBudget is how long a failover gives the replicas, together,

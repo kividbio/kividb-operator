@@ -383,7 +383,8 @@ not: a force-deleted master costs that much at most, and up to 5 s more,
 for the wait is checked on each pass. A replacement pod that cannot be
 scheduled is not waited for, nor a master with no address or engine run
 recorded (the CRD not applied again, or an agent before 0.7.0): nothing
-then tells whether its engine is still there. The operator does not read
+then tells whether its engine is still there. Both are waited for when no
+replica was in sync with the master, though (below). The operator does not read
 Nodes, so that its RBAC stays as small as it is: the scheduler keeps new
 pods off a node that is not Ready, so a replacement pinned there by its
 volume shows as unschedulable. The cap covers the rest, a volume that
@@ -392,6 +393,61 @@ replacement schedule on another node in the zone, where it sits in
 `ContainerCreating` (a Multi-Attach error) while the disk is still
 attached to the old node, and is never unschedulable. A master that
 restarts in place, as the same pod, keeps `unhealthyThresholdSeconds`.
+
+If no Ready replica was in sync with that master the last time the
+operator could tell (the one replica of a `replicas: 1` cluster in the
+middle of a full resync, say), the wait has no cap. A replica counts as in
+sync when, at that check, its link to the master was up, it had heard from
+it within 20 s, and it was at most 1 MiB behind its offset. Promoting one
+that was not would lose the writes the master acknowledged since that
+replica was last in sync (for a replica in the middle of a full resync,
+everything after the snapshot it was sent), and they are on the master's
+volume. So neither `restartWaitSeconds`, 0 included, nor a replacement that
+cannot be scheduled ends the wait: the failover waits until the master
+comes back (a `FailoverBlocked` Warning, and `WaitingForMaster` on the
+Ready condition, whose message names the annotation below, as events
+expire after an hour). A master that restarts in place, as the same pod
+(its engine killed for its memory, say), is waited for the same way:
+`unhealthyThresholdSeconds` does not end the wait, as it reloads those
+writes from its volume. When the master is back it is kept, unless it
+comes back with fewer keys than a replica holds and nothing says its
+append-only file holds every write it acknowledged (an engine before
+1.2.0): that replica takes over then (`MasterRestartedBehind`).
+
+A master whose engine still answers is not waited for: its writes are
+held, and a replica that was not in sync is promoted only once it has
+caught up with it. If no replica is near enough to (none has its link up
+within 1 MiB of the master's offset), its writes are not held at all; if
+the one picked does not catch up within the 5 s the failover waits, the
+pause is lifted. Either way no one is promoted (a `FailoverBlocked`
+Warning, and `WaitingForReplica` on the Ready condition): the master keeps
+serving if it can, and the replica finishes its sync from it. A replica
+within 1 MiB that still does not catch up in 5 s has the master's writes
+held for up to 5 s on each pass until it does.
+
+With the append-only file off, as the replicas report it, a master that is
+gone or restarting comes back with only its last save: it is not waited
+for this way, and the failover goes ahead as before. All of this is about
+the lag the operator can see, not a promise that no acknowledged write is
+ever lost: replication is asynchronous (see below). And it is for
+replicated clusters only; a sharded cluster's (`spec.shards`) engine
+fails its shards over itself.
+
+That is the trade-off: no acknowledged write that the replicas lack is
+lost to a failover, but a master that never comes back (a node or volume
+gone for good, an engine killed for its memory every time it reloads)
+leaves the cluster without a master until you act. To fail over anyway,
+losing those writes (a `FailoverForced` Warning; for a master whose pod is
+gone, once `restartWaitSeconds` have passed):
+
+```bash
+kubectl annotate kividbcluster my-cluster kividb.io/allow-unsynced-failover=true
+```
+
+The operator removes the annotation once the failover has gone through,
+and `kividb.io/allow-unread-failover` with it (setting either clears both
+then), so a later failover waits again. It also removes it if the master
+comes back first: it was set for a failover that did not happen.
 
 The replica promoted is the one that holds the most when the old master's
 writes are held, by its offset read then; replicas that hold as much go by
