@@ -2,9 +2,9 @@
 # 07-monitor-memory.sh — scrape agent /metrics; optional Prometheus targets.
 #
 # Agent /metrics is always on (port 8081). redis_exporter is added when
-# monitoring.enabled=true. Chart-level ServiceMonitor (metrics.serviceMonitor)
-# scrapes app.kubernetes.io/name=kividb cluster-wide when Prometheus Operator
-# CRDs are present.
+# monitoring.enabled=true. With the Prometheus Operator CRDs present, the
+# cluster's spec.monitoring.serviceMonitor makes a ServiceMonitor named after
+# it; the chart-level one (metrics.serviceMonitor) scrapes every cluster.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -123,12 +123,24 @@ fi
 
 # Optional: ServiceMonitor + Prometheus targets.
 if kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1; then
-  if kubectl get servicemonitor -n "${OPERATOR_NS}" -o name 2>/dev/null | grep -qi kividb; then
-    log "ServiceMonitor for kividb found in ${OPERATOR_NS}"
-  elif kubectl get servicemonitor -A 2>/dev/null | grep -qi kividb; then
-    log "ServiceMonitor for kividb found (cluster-wide)"
-  else
-    warn "no ServiceMonitor matching kividb (chart metrics.serviceMonitor.enabled?)"
+  # spec.monitoring.serviceMonitor: the cluster's own, with both endpoints.
+  # The label kube-prometheus-stack selects by is added here; the operator
+  # must keep it.
+  sm_ok=0
+  for _ in $(seq 1 30); do
+    if kubectl get servicemonitor -n "${E2E_KIVIDB_NS}" "${NAME}" >/dev/null 2>&1; then sm_ok=1; break; fi
+    sleep 2
+  done
+  [[ "${sm_ok}" == "1" ]] || die "no ServiceMonitor ${E2E_KIVIDB_NS}/${NAME} for spec.monitoring.serviceMonitor"
+  ports="$(kubectl get servicemonitor -n "${E2E_KIVIDB_NS}" "${NAME}" -o jsonpath='{.spec.endpoints[*].port}')"
+  [[ "${ports}" == "agent metrics" ]] || die "ServiceMonitor ${NAME} endpoints: '${ports}', want 'agent metrics'"
+  kubectl label servicemonitor -n "${E2E_KIVIDB_NS}" "${NAME}" release=kube-prometheus-stack --overwrite >/dev/null
+  sleep 15
+  [[ "$(kubectl get servicemonitor -n "${E2E_KIVIDB_NS}" "${NAME}" -o jsonpath='{.metadata.labels.release}')" == "kube-prometheus-stack" ]] \
+    || die "the operator removed the release label from ServiceMonitor ${NAME}"
+  log "ServiceMonitor ${E2E_KIVIDB_NS}/${NAME}: endpoints '${ports}', release label kept"
+  if kubectl get servicemonitor -A 2>/dev/null | grep -q -- "-kividb-clusters"; then
+    log "the chart's ServiceMonitor is on too: this cluster's pods are scraped twice (fine for e2e)"
   fi
 
   if [[ "${SKIP_PROMETHEUS:-0}" != "1" ]] && kubectl get pods -n "${MONITORING_NS}" -l app.kubernetes.io/name=prometheus >/dev/null 2>&1; then

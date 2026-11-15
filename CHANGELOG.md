@@ -226,6 +226,19 @@ are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
   `config/rbac/kustomization.yaml`, and on a new cluster the namespace did
   not exist. The steps now create the namespace and name the RBAC files.
   (#85, by [SaiPisey2](https://github.com/SaiPisey2))
+- **`spec.monitoring.serviceMonitor` created nothing** (#62). The operator now
+  makes a ServiceMonitor named after the cluster, in its namespace, for its
+  headless Service(s): the agent's `/metrics`, and `redis-exporter`'s with
+  `spec.monitoring.enabled`. Turning it off deletes it. Labels and fields
+  added to it are kept. Without the Prometheus Operator CRDs the cluster gets
+  a `ServiceMonitorUnavailable` Warning Event and nothing else changes. A manager
+  that is not allowed to read ServiceMonitors (RBAC from before this change)
+  is treated the same way: with the field off nothing is done and nothing is
+  logged above debug level, with it on a Warning Event names the missing
+  rule and quotes the refusal, and the cluster is not held at `ReconcileError`. The
+  manager's ClusterRole gains `servicemonitors`. See `docs/CONFIGURATION.md`
+  for Prometheus' selector and the chart's `metrics.serviceMonitor`.
+  (#84, by [SaiPisey2](https://github.com/SaiPisey2))
 - **A switchover no longer hands over without holding writes when the pause
   could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),
   `CLIENT PAUSE ... WRITE` waits up to 5 s for the writes already in progress
