@@ -43,7 +43,7 @@ Issues 1 to 11 have been fixed since 1.0.5. Issue 12 has not been
 re-tested since 1.0.5 final.
 
 Engine issues filed on GitHub since, that the operator works around or
-documents (0.7.0 targets engine 1.2.0):
+documents (0.7.1 targets engine 1.2.1):
 
 | Issue | What | Fixed in | What the operator does |
 |---|---|---|---|
@@ -56,7 +56,7 @@ documents (0.7.0 targets engine 1.2.0):
 | [#135](https://github.com/kividbio/kividb/issues/135) | `AUTH <password>` refused while the default user has no password | 1.2.0 (by design, as Redis) | Always logs in as `AUTH default <password>`; sets `masteruser default`; the exporter gets `REDIS_USER=default` |
 | [#156](https://github.com/kividbio/kividb/issues/156) | TLS certificates are not reloaded without a restart | 1.2.0 (`CONFIG SET`) | Not used yet: a renewed certificate takes effect when the pod restarts |
 | [#185](https://github.com/kividbio/kividb/issues/185) | A slow manual failover could lose writes | 1.2.0 (writes paused up to 10 s; the replica gives up after 5 s) | Reports an abandoned handover, asks again up to 5 times, and shows it in the `ShardSwitchover` condition |
-| [#331](https://github.com/kividbio/kividb/issues/331) | Writes could be lost while slots moved between shards under heavy writes (changing `spec.shards`, `redis-cli --cluster reshard`); seen only under heavy CPU contention | 1.2.1 (not released yet) | Nothing yet: on 1.2.0, change `spec.shards` while writes are light, or pause writes; set `spec.image` to 1.2.1 once it is released |
+| [#331](https://github.com/kividbio/kividb/issues/331) | Writes could be lost while slots moved between shards under heavy writes (changing `spec.shards`, `redis-cli --cluster reshard`); seen only under heavy CPU contention | 1.2.1, the default from operator 0.7.1 | Nothing: on 1.2.0, change `spec.shards` while writes are light, or pause writes |
 
 ---
 

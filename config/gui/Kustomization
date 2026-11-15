@@ -1,0 +1,15 @@
+# kubectl apply -k config/gui
+#
+# The GUI must run in the operator's namespace: it mounts the agent token
+# Secret the operator creates there. If the operator runs elsewhere, set
+# the same namespace here (kustomize edit set namespace <ns>) or in an
+# overlay.
+#
+# Named Kustomization, not kustomization.yaml, so that
+# `kubectl apply -f config/gui/` still works: it skips a file without a
+# .yaml extension.
+namespace: kividb-operator-system
+resources:
+  - rbac.yaml
+  - deployment.yaml
+  - service.yaml

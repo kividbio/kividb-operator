@@ -31,7 +31,7 @@ All fields below are under `spec:` unless stated otherwise.
 |---|---|---|---|
 | `shards` | int32 | unset | Makes the cluster **sharded**: that many shards in kividb's cluster mode. See [Sharded clusters](#sharded-clusters-shards). Set or left unset only when the cluster is created. |
 | `replicas` | int32 | `2` | Replica pods **in addition to** each master: beside the single master (total pods = `replicas + 1`), or in each shard (total = `shards × (replicas + 1)`). |
-| `image` | string | `docker.io/kividb/kividb:v1.2.0` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.2.0` or `docker.io/kividb/kividb:v1.2.0-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
+| `image` | string | `docker.io/kividb/kividb:v1.2.1` | Explicit kividb container image, e.g. `docker.io/kividb/kividb:v1.2.1` or `docker.io/kividb/kividb:v1.2.1-tls` (the same tags are on `ghcr.io/kividbio/kividb`). Used verbatim — see [Image and variant](#image-and-variant) for why the operator never constructs or modifies this value itself. |
 | `variant` | string | `standard` | One of `standard`, `tls`, `lua`, `full`. See [Image and variant](#image-and-variant) — informational only, does not affect which image gets pulled. |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
 | `imagePullSecrets` | `[]LocalObjectReference` | — | Standard Kubernetes image pull secrets. |
@@ -45,12 +45,12 @@ All fields below are under `spec:` unless stated otherwise.
 `image` is the **only** field that determines which container actually
 runs — the operator uses it verbatim and never constructs, guesses, or
 modifies it. Leave it unset to use the release default
-(`docker.io/kividb/kividb:v1.2.0` for operator 0.7.0); set it explicitly
+(`docker.io/kividb/kividb:v1.2.1` for operator 0.7.1); set it explicitly
 to pin a different tag or variant:
 
 ```yaml
 spec:
-  image: docker.io/kividb/kividb:v1.2.0-tls
+  image: docker.io/kividb/kividb:v1.2.1-tls
 ```
 
 To move to a later version, just change this value — same as any other
@@ -97,7 +97,7 @@ a referenced [`KividbConfig`](#kividbconfig)'s `spec.tls`). It does
 **not** change which image tag gets pulled — there is no "tls variant
 tag" the operator appends or looks for. If you want a TLS-capable build,
 you set `image` to one yourself (e.g.
-`docker.io/kividb/kividb:v1.2.0-tls`) *and* set `variant: tls` to match;
+`docker.io/kividb/kividb:v1.2.1-tls`) *and* set `variant: tls` to match;
 the two aren't cross-validated by the API server, since only you know
 what a given `image` value actually contains.
 
@@ -378,6 +378,7 @@ spec:
   failover:
     enabled: true                    # default
     unhealthyThresholdSeconds: 30    # default
+    restartWaitSeconds: 15           # default; 0 turns the wait off
 ```
 
 Set `enabled: false` to disable automatic promotion entirely (you'll need
@@ -389,6 +390,53 @@ aggressive at the cost of being more sensitive to transient blips (a slow
 container's liveness probe restarts an engine that has answered nothing
 for about 90 s, and a hung master should be failed over before that, not
 come back as the master (see [Liveness](#liveness)).
+
+A master whose pod is gone (deleted with `--grace-period=0 --force`, say),
+or replaced by a new pod, does not wait for `unhealthyThresholdSeconds`.
+If its engine still answers, the failover holds its writes and goes ahead
+(see below). If it no longer answers, its pod may be coming back on the
+same volume, holding writes its replicas do not: the failover waits until
+the new pod is Ready and has reported (a `FailoverWait` Warning, and
+`WaitingForMaster` on the Ready condition), then compares it with its
+replicas as for a master that restarted in place, keeping it if it holds
+as much. It waits `restartWaitSeconds` at most, counted from when the
+master was found gone (or its new pod made), whether the pod comes back or
+not: a force-deleted master costs that much at most, and up to 5 s more,
+for the wait is checked on each pass. A replacement pod that cannot be
+scheduled is not waited for, nor a master with no address or engine run
+recorded (the CRD not applied again, or an agent before 0.7.0): nothing
+then tells whether its engine is still there. The operator does not read
+Nodes, so that its RBAC stays as small as it is: the scheduler keeps new
+pods off a node that is not Ready, so a replacement pinned there by its
+volume shows as unschedulable. The cap covers the rest, a volume that
+cannot attach yet in particular: on AKS or EBS a zonal disk lets the
+replacement schedule on another node in the zone, where it sits in
+`ContainerCreating` (a Multi-Attach error) while the disk is still
+attached to the old node, and is never unschedulable. A master that
+restarts in place, as the same pod, keeps `unhealthyThresholdSeconds`.
+
+The replica promoted is the one that holds the most when the old master's
+writes are held, by its offset read then; replicas that hold as much go by
+name. `replica-priority` plays no part: a `KividbConfig` directive, it is
+the same on every pod. The replicas are asked at once, for 1 s in all. A
+replica that does not answer may hold more than the one picked: unless that
+one has caught up with the held master, the failover waits for the next
+pass (a `FailoverBlocked` Warning, and `WaitingForReplica` on the Ready
+condition) until it answers or stops being Ready. That need not happen on
+its own: a replica the operator cannot reach (a NetworkPolicy, a network
+partition between nodes) stays Ready, because its readiness probe runs from
+the kubelet on its own node. The Warning says how long the failover has
+been held. To end it, fix the network between the operator and that
+replica, delete the replica's pod, or annotate the cluster to fail over
+without the replicas that did not answer (a `FailoverForced` Warning),
+which loses any writes only they hold:
+
+```bash
+kubectl annotate kividbcluster my-cluster kividb.io/allow-unread-failover=true
+```
+
+The operator removes the annotation once the failover has gone through, so
+it never skips the hold on a later failover.
 
 **What a failover can lose.** Replication is asynchronous: a master
 acknowledges a write before its replicas have it. When a master crashes
@@ -616,7 +664,7 @@ spec:
   introduces the nodes to each other (`CLUSTER MEET`), gives each shard's
   `-0` pod an even share of the slots, and has the shard's other pods
   `CLUSTER REPLICATE` it. Each node announces its pod's DNS name to clients
-  (`cluster-announce-hostname`).
+  (`cluster-announce-hostname`), from the moment it starts.
 - **Failover is kividb's.** When a master fails, the engine promotes one of
   its replicas; the operator does not promote anything in cluster mode. It
   reports the move (`status.shards[].masterPod`, `lastFailoverTime`, a
@@ -744,7 +792,8 @@ spec:
     serving the slots until then.
   - **Write load:** on engine 1.2.0, change the shard count only while
     writes are light, or pause them: a move under heavy writes can lose
-    some (kividbio/kividb#331, fixed in engine 1.2.1).
+    some (kividbio/kividb#331, fixed in engine 1.2.1, the default from
+    operator 0.7.1).
   - **Failures:** a move that fails leaves the slots with the source,
     and is tried again after 30 s (`status.cluster.rebalance.lastError`,
     a `SlotMoveFailed` Event). If the destination restarts during a move,
@@ -961,17 +1010,18 @@ spec:
 
 A `KividbConfig` is standalone: create it once, reference it from as many
 `KividbCluster`s as share the same tuning/TLS needs via `spec.configRef`.
+Its `status.usedBy` list tracks the names of `KividbCluster`s currently referencing it
+(also visible via `kubectl get kdbc -o wide`).
 Deleting one while a cluster still references it surfaces as a reconcile
 error on that cluster, which keeps failing over but is not applied until
-the KividbConfig is back (see [ROADMAP.md](ROADMAP.md) for planned
-usage-tracking to catch this earlier).
+the KividbConfig is back.
 
 ## KividbAclConfig
 
 > **On kividb before v1.0.5 the `default` user's password does not keep
 > unauthenticated clients out.** A client that never sends `AUTH` is
 > treated as `default` (see [KIVIDB_ENGINE_ISSUES.md](KIVIDB_ENGINE_ISSUES.md),
-> issue 1). v1.0.5 and later enforce it, including v1.2.0, the default image of this release. If you
+> issue 1). v1.0.5 and later enforce it, including v1.2.1, the default image of this release. If you
 > pin an older engine with `spec.image`, limit who can reach the cluster's
 > Services with a NetworkPolicy.
 
@@ -1013,6 +1063,8 @@ spec:
   still run `PING`/`INFO`/`REPLICAOF`/backups after you turn on auth.
 - Referenced the same way as `KividbConfig`: create once, point any
   number of `KividbCluster`s at it via `spec.aclConfigRef`.
+  Its `status.usedBy` list tracks the names of `KividbCluster`s currently referencing it
+  (visible via `kubectl get kdbacl -o wide`).
 
 ### Changing the default user's password
 
@@ -1104,7 +1156,9 @@ the fact even if `source` or the cluster's replica count changes over
 time.
 
 A `KividbSnapshotConfig` is standalone: create once, reference from any
-number of `KividbCluster`s via `spec.snapshotConfigRef`. See
+number of `KividbCluster`s via `spec.snapshotConfigRef`.
+Its `status.usedBy` list tracks the names of `KividbCluster`s currently referencing it
+(visible via `kubectl get kdbsc -o wide`). See
 [BACKUP_RESTORE.md](BACKUP_RESTORE.md) for the manual restore procedure
 and how to trigger an out-of-schedule backup.
 

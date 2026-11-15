@@ -21,8 +21,18 @@ type KividbAclConfigSpec struct {
 	Users []KividbUser `json:"users,omitempty"`
 }
 
+// KividbAclConfigStatus defines the observed state of a KividbAclConfig.
+type KividbAclConfigStatus struct {
+	// UsedBy lists the names of KividbClusters in the same namespace referencing this config.
+	// Maintained by the operator from the KividbClusters that reference this config.
+	// +optional
+	UsedBy []string `json:"usedBy,omitempty"`
+}
+
 // +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=kdbacl
+// +kubebuilder:printcolumn:name="Used By",type=string,JSONPath=`.status.usedBy`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // KividbAclConfig is a reusable, standalone set of ACL users. Create one
@@ -32,7 +42,8 @@ type KividbAclConfig struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec KividbAclConfigSpec `json:"spec"`
+	Spec   KividbAclConfigSpec   `json:"spec"`
+	Status KividbAclConfigStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
