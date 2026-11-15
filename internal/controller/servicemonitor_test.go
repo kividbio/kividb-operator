@@ -544,8 +544,54 @@ func TestServiceMonitorOnForbiddenWarnsOnce(t *testing.T) {
 		t.Fatalf("3 passes: %d Events, want 1", got)
 	}
 	ev := <-rec.Events
-	if !strings.Contains(ev, "Warning ServiceMonitorUnavailable") || !strings.Contains(ev, "not allowed to manage servicemonitors") {
-		t.Fatalf("Event = %q, want a ServiceMonitorUnavailable Warning naming the missing RBAC", ev)
+	for _, want := range []string{
+		"Warning ServiceMonitorUnavailable",
+		"get, create, update and delete rule for servicemonitors",
+		"cannot get resource", // the API server's own reason is part of it: a 403 is not always RBAC
+	} {
+		if !strings.Contains(ev, want) {
+			t.Fatalf("Event = %q, want it to contain %q", ev, want)
+		}
+	}
+}
+
+// The once-per-cluster Warning is once per reason: a cluster told to install
+// the CRDs, whose CRDs are then installed but whose RBAC is old, is told about
+// that too, once.
+func TestServiceMonitorWarnsOncePerReason(t *testing.T) {
+	t.Parallel()
+	c := smCluster(true, false)
+	now := time.Unix(1000, 0)
+	r := smReconciler(t, false, c)
+	r.clock = func() time.Time { return now }
+	rec := record.NewFakeRecorder(10)
+	r.Recorder = rec
+	for range 2 {
+		if err := r.reconcileServiceMonitor(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := len(rec.Events); got != 1 {
+		t.Fatalf("no CRD: %d Events, want 1", got)
+	}
+	if ev := <-rec.Events; !strings.Contains(ev, "install the Prometheus Operator's CRDs") {
+		t.Fatalf("first Event = %q, want the missing-CRD one", ev)
 	}
 
+	// The CRDs are installed; the manager may not read them.
+	r.Client = smReconciler(t, true, c).Client
+	gets := 0
+	forbiddenServiceMonitors(r, &gets)
+	now = now.Add(serviceMonitorRecheck)
+	for range 3 {
+		if err := r.reconcileServiceMonitor(context.Background(), c); err != nil {
+			t.Fatalf("Forbidden after the CRD warning: error = %v, want none", err)
+		}
+	}
+	if got := len(rec.Events); got != 1 {
+		t.Fatalf("CRDs installed, RBAC old: %d new Events, want 1", got)
+	}
+	if ev := <-rec.Events; !strings.Contains(ev, "refused (403)") || strings.Contains(ev, "install the Prometheus Operator's CRDs") {
+		t.Fatalf("second Event = %q, want the Forbidden one", ev)
+	}
 }

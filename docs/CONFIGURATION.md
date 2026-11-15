@@ -365,7 +365,10 @@ It also needs the manager's RBAC rule for `servicemonitors` (in `config/rbac/rol
 chart). A manager that predates it, updated without re-applying the
 ClusterRole, is not allowed to read them: with `serviceMonitor` off that is
 ignored, and with it on the cluster gets the same `ServiceMonitorUnavailable`
-Warning Event, naming the missing rule, once.
+Warning Event, once, that names the rule (`get`, `create`, `update` and
+`delete` on `servicemonitors`) and quotes the API server's own refusal, since
+a 403 is not always RBAC. A cluster already told to install the CRDs is told
+about this too.
 
 Prometheus picks up a `ServiceMonitor` only if its `serviceMonitorSelector`
 and `serviceMonitorNamespaceSelector` match it. Add the label your

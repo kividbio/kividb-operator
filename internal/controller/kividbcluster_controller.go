@@ -74,7 +74,7 @@ type KividbClusterReconciler struct {
 	switchovers sync.Map
 
 	// switchoverAsked: the clusters a switchover was asked for on the pass
-	// under way ("<ns>/<cluster>" -> struct{}), see reconcileRoleChanges.
+	// under way ("<ns>/<cluster>" -> the reason, "NoCRD" or "Forbidden"), see reconcileRoleChanges.
 	switchoverAsked sync.Map
 
 	// rolloutWaits: what a cluster's rollout has been waiting for, and

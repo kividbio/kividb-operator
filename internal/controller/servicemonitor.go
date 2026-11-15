@@ -120,7 +120,7 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 			r.serviceMonitorWarned.Delete(key)
 			return nil
 		}
-		r.warnServiceMonitor(c, key, serviceMonitorNoCRD)
+		r.warnServiceMonitor(c, key, "NoCRD", serviceMonitorNoCRD)
 		return nil
 	}
 	if !want {
@@ -188,13 +188,13 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 		// been removed: as if it had never been installed. Look again after
 		// serviceMonitorRecheck.
 		r.serviceMonitorUnserved.Store(r.now().Add(serviceMonitorRecheck))
-		r.warnServiceMonitor(c, key, serviceMonitorNoCRD)
+		r.warnServiceMonitor(c, key, "NoCRD", serviceMonitorNoCRD)
 		return nil
 	}
 	if apierrors.IsForbidden(err) {
 		// No RBAC rule for servicemonitors: say so once, like a missing CRD,
 		// instead of a ReconcileError on every pass.
-		r.warnServiceMonitor(c, key, serviceMonitorNoRBAC)
+		r.warnServiceMonitor(c, key, "Forbidden", serviceMonitorNoRBAC+": "+err.Error())
 		return nil
 	}
 	if err != nil {
@@ -208,13 +208,21 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 
 const (
 	serviceMonitorNoCRD  = "spec.monitoring.serviceMonitor is set, but the API server does not serve servicemonitors.monitoring.coreos.com: install the Prometheus Operator's CRDs"
-	serviceMonitorNoRBAC = "spec.monitoring.serviceMonitor is set, but the manager is not allowed to manage servicemonitors.monitoring.coreos.com: add the get, list, watch, create, update, patch and delete rule for servicemonitors in monitoring.coreos.com to the manager's ClusterRole (config/rbac/role.yaml, or the chart's clusterrole.yaml)"
+	serviceMonitorNoRBAC = "spec.monitoring.serviceMonitor is set, but the API server refused (403) the manager's request for servicemonitors.monitoring.coreos.com. If the manager's RBAC predates this feature, add the " + serviceMonitorVerbs + " rule for servicemonitors in monitoring.coreos.com to its ClusterRole (config/rbac/role.yaml, or the chart's clusterrole.yaml)"
 )
 
-// warnServiceMonitor tells a cluster that asks for a ServiceMonitor, once,
-// why none can be made: there is no CRD, or no RBAC rule for it.
-func (r *KividbClusterReconciler) warnServiceMonitor(c *kividbv1alpha1.KividbCluster, key, msg string) {
-	if _, warned := r.serviceMonitorWarned.LoadOrStore(key, struct{}{}); !warned {
-		r.event(c, corev1.EventTypeWarning, "ServiceMonitorUnavailable", "%s", msg)
+// serviceMonitorVerbs are the verbs of the rule the manager needs, as in the
+// kubebuilder marker, config/rbac/role.yaml and the chart's ClusterRole.
+const serviceMonitorVerbs = "get, create, update and delete"
+
+// warnServiceMonitor tells a cluster that asks for a ServiceMonitor why none
+// can be made: there is no CRD, or the API server refused the request. Once
+// per cluster and reason (the value stored is the reason): a cluster told to
+// install the CRDs that then gets a Forbidden is told about that too.
+func (r *KividbClusterReconciler) warnServiceMonitor(c *kividbv1alpha1.KividbCluster, key, reason, msg string) {
+	if prev, ok := r.serviceMonitorWarned.Load(key); ok && prev == reason {
+		return
 	}
+	r.serviceMonitorWarned.Store(key, reason)
+	r.event(c, corev1.EventTypeWarning, "ServiceMonitorUnavailable", "%s", msg)
 }
