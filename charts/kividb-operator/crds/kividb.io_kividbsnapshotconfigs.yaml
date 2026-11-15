@@ -20,6 +20,8 @@ spec:
     - name: v1alpha1
       served: true
       storage: true
+      subresources:
+        status: {}
       additionalPrinterColumns:
         - name: Schedule
           type: string
@@ -27,6 +29,10 @@ spec:
         - name: Source
           type: string
           jsonPath: .spec.source
+        - name: Used By
+          type: string
+          jsonPath: .status.usedBy
+          priority: 1
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -90,3 +96,14 @@ spec:
                 jobResources:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              description: Observed state of this KividbSnapshotConfig.
+              properties:
+                usedBy:
+                  type: array
+                  description: >-
+                    KividbCluster names in this namespace that reference this config.
+                    Maintained by the operator from the KividbClusters that reference this config.
+                  items:
+                    type: string

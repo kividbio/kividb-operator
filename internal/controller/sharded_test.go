@@ -171,6 +171,37 @@ func TestShardStatefulSet(t *testing.T) {
 	}
 }
 
+// A restarted node announced no hostname, "?" in CLUSTER SLOTS, until the
+// agent set it again some seconds later (#57). It starts with the name the
+// operator would set, so the runtime CONFIG SET is left for an exposed
+// address.
+func TestShardPodsAnnounceTheirNameFromStartup(t *testing.T) {
+	c := shardedCluster("s", 3, 2)
+	c.Namespace = "kdb"
+	sts := desiredShardStatefulSet(c, 1, nil, nil, nil)
+	var kividb *corev1.Container
+	for i := range sts.Spec.Template.Spec.Containers {
+		if sts.Spec.Template.Spec.Containers[i].Name == "kividb" {
+			kividb = &sts.Spec.Template.Spec.Containers[i]
+		}
+	}
+	var hostname string
+	for i := 0; i+1 < len(kividb.Args); i++ {
+		if kividb.Args[i] == "--cluster-announce-hostname" {
+			hostname = kividb.Args[i+1]
+		}
+	}
+	hasPodName := false
+	for _, e := range kividb.Env {
+		hasPodName = hasPodName || (e.Name == "POD_NAME" && e.ValueFrom != nil && e.ValueFrom.FieldRef.FieldPath == "metadata.name")
+	}
+	// What pod s-1-2 starts with, once Kubernetes expands $(POD_NAME).
+	p := &shardPod{pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "s-1-2", Namespace: c.Namespace}}, shard: 1, index: 2}
+	if got, want := strings.ReplaceAll(hostname, "$(POD_NAME)", p.pod.Name), announceName(c, p); !hasPodName || got != want {
+		t.Fatalf("kividb args %v, POD_NAME in env %v: s-1-2 starts announcing %q, want %q", kividb.Args, hasPodName, got, want)
+	}
+}
+
 func TestShardedServices(t *testing.T) {
 	c := shardedCluster("s", 2, 1)
 	svcs := desiredShardedServices(c, nil)

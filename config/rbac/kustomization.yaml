@@ -1,3 +1,5 @@
+# docs/INSTALL.md lists these files for the install without kustomize:
+# keep the two in step.
 resources:
   - service_account.yaml
   - role.yaml

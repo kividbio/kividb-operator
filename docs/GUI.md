@@ -130,7 +130,7 @@ before anything is created. **Copy** puts it on the clipboard for
 works and the manifest is shown, but nothing can be created.
 
 Default engine image when `spec.image` is empty:
-`docker.io/kividb/kividb:v1.2.0`.
+`docker.io/kividb/kividb:v1.2.1`.
 
 ### JSON API
 
@@ -223,7 +223,11 @@ helm upgrade --install kividb-operator charts/kividb-operator \
   --set gui.auth.existingSecret=kividb-gui-auth
 ```
 
-Plain YAML: `config/gui/` (update RBAC from `config/gui/rbac.yaml`).
+Plain YAML: `kubectl apply -k config/gui` (update RBAC from
+`config/gui/rbac.yaml`). The GUI must run in the operator's namespace,
+where the operator creates the agent token Secret the GUI mounts. If that
+isn't `kividb-operator-system`, set it first: `kustomize edit set
+namespace <ns>` in `config/gui`, or an overlay.
 
 Port-forward:
 
@@ -244,5 +248,5 @@ promote). Never `secrets` via the API clients.
 ## Building the image
 
 ```sh
-docker build -f Dockerfile.gui -t docker.io/kividb/kividb-operator-gui:0.7.0 .
+docker build -f Dockerfile.gui -t docker.io/kividb/kividb-operator-gui:0.7.1 .
 ```
