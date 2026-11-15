@@ -538,11 +538,29 @@ func (in *KividbConfigSpec) DeepCopy() *KividbConfigSpec {
 	return out
 }
 
+func (in *KividbConfigStatus) DeepCopyInto(out *KividbConfigStatus) {
+	*out = *in
+	if in.UsedBy != nil {
+		out.UsedBy = make([]string, len(in.UsedBy))
+		copy(out.UsedBy, in.UsedBy)
+	}
+}
+
+func (in *KividbConfigStatus) DeepCopy() *KividbConfigStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbConfigStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
 func (in *KividbConfig) DeepCopyInto(out *KividbConfig) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
 }
 
 func (in *KividbConfig) DeepCopy() *KividbConfig {
@@ -614,11 +632,29 @@ func (in *KividbAclConfigSpec) DeepCopy() *KividbAclConfigSpec {
 	return out
 }
 
+func (in *KividbAclConfigStatus) DeepCopyInto(out *KividbAclConfigStatus) {
+	*out = *in
+	if in.UsedBy != nil {
+		out.UsedBy = make([]string, len(in.UsedBy))
+		copy(out.UsedBy, in.UsedBy)
+	}
+}
+
+func (in *KividbAclConfigStatus) DeepCopy() *KividbAclConfigStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbAclConfigStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
 func (in *KividbAclConfig) DeepCopyInto(out *KividbAclConfig) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
 }
 
 func (in *KividbAclConfig) DeepCopy() *KividbAclConfig {
@@ -713,11 +749,29 @@ func (in *KividbSnapshotConfigSpec) DeepCopy() *KividbSnapshotConfigSpec {
 	return out
 }
 
+func (in *KividbSnapshotConfigStatus) DeepCopyInto(out *KividbSnapshotConfigStatus) {
+	*out = *in
+	if in.UsedBy != nil {
+		out.UsedBy = make([]string, len(in.UsedBy))
+		copy(out.UsedBy, in.UsedBy)
+	}
+}
+
+func (in *KividbSnapshotConfigStatus) DeepCopy() *KividbSnapshotConfigStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(KividbSnapshotConfigStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
 func (in *KividbSnapshotConfig) DeepCopyInto(out *KividbSnapshotConfig) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
 }
 
 func (in *KividbSnapshotConfig) DeepCopy() *KividbSnapshotConfig {

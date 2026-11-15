@@ -1,0 +1,44 @@
+{{- if and .Values.rbac.create .Values.watchNamespace (ne .Values.watchNamespace .Release.Namespace) }}
+# With watchNamespace set to another namespace, the manager's ClusterRole is
+# bound only there, but the agent token Secret lives in the release
+# namespace: the manager reads it at startup, and creates it on the first.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kividb-operator.fullname" . }}-agent-token-role
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kividb-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    resourceNames:
+      - {{ include "kividb-operator.fullname" . }}-agent-token
+    verbs:
+      - get
+  # create cannot be limited by resourceNames.
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kividb-operator.fullname" . }}-agent-token-rolebinding
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kividb-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kividb-operator.fullname" . }}-agent-token-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kividb-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

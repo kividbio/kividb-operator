@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -28,10 +29,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -71,7 +74,7 @@ type KividbClusterReconciler struct {
 	switchovers sync.Map
 
 	// switchoverAsked: the clusters a switchover was asked for on the pass
-	// under way ("<ns>/<cluster>" -> struct{}), see reconcileRoleChanges.
+	// under way ("<ns>/<cluster>" -> the reason, "NoCRD" or "Forbidden"), see reconcileRoleChanges.
 	switchoverAsked sync.Map
 
 	// rolloutWaits: what a cluster's rollout has been waiting for, and
@@ -94,6 +97,19 @@ type KividbClusterReconciler struct {
 	// notSynced: why each replica of a replicated-mode cluster was not in
 	// sync on the last pass ("<ns>/<cluster>" -> map[pod]reason).
 	notSynced sync.Map
+
+	// serviceMonitorUnserved: until when the API server is taken not to
+	// serve the ServiceMonitor kind (time.Time), see serviceMonitorServed.
+	serviceMonitorUnserved atomic.Value
+
+	// serviceMonitorWarned: the clusters told that their ServiceMonitor
+	// cannot be made ("<ns>/<cluster>" -> struct{}), see
+	// reconcileServiceMonitor.
+	serviceMonitorWarned sync.Map
+
+	// serviceMonitorGone: the clusters, with serviceMonitor off, found to
+	// have no ServiceMonitor of their own ("<ns>/<cluster>" -> struct{}).
+	serviceMonitorGone sync.Map
 
 	// clock is time.Now, unless a test sets it.
 	clock func() time.Time
@@ -121,6 +137,7 @@ func (r *KividbClusterReconciler) agentToken() string {
 //+kubebuilder:rbac:groups="",resources=services;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;create;update;delete
 
 // Reconcile implements the main control loop for a single KividbCluster.
 func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -129,6 +146,9 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	var c kividbv1alpha1.KividbCluster
 	if err := r.Get(ctx, req.NamespacedName, &c); err != nil {
 		if apierrors.IsNotFound(err) {
+			// A cluster made again under this name is told again.
+			r.serviceMonitorWarned.Delete(req.String())
+			r.serviceMonitorGone.Delete(req.String())
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -233,6 +253,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if snapCfg != nil {
 		steps.run("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, &c, snapCfg.Name) })
 	}
+	steps.run("", func() error { return r.reconcileServiceMonitor(ctx, &c) })
 	applyErr := steps.err
 	if applyErr != nil {
 		r.warnOnChange(&c, "ReconcileError", applyErr)
@@ -994,10 +1015,11 @@ func (r *KividbClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(mapPodToCluster)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(mapAnnounceServiceToCluster)).
 		// What a cluster references: fixing or making one is picked up at
-		// once, not on the next retry.
-		Watches(&kividbv1alpha1.KividbConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
-		Watches(&kividbv1alpha1.KividbAclConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
-		Watches(&kividbv1alpha1.KividbSnapshotConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
+		// once, not on the next retry. GenerationChangedPredicate ensures
+		// status.usedBy updates on configs do not trigger cluster reconciles.
+		Watches(&kividbv1alpha1.KividbConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&kividbv1alpha1.KividbAclConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&kividbv1alpha1.KividbSnapshotConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
 		Complete(r)
 }

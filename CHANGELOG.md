@@ -6,9 +6,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-**Apply the new `kividbclusters` CRD before `helm upgrade`:** Helm does not
-upgrade it, and the spec gains `failover.restartWaitSeconds`. Until it is
-applied, the API server drops it and the restart wait keeps its default.
+**Apply the new CRDs before `helm upgrade`:** Helm does not upgrade them.
+The `kividbclusters` CRD spec gains `failover.restartWaitSeconds`.
+The `kividbconfigs`, `kividbaclconfigs`, and `kividbsnapshotconfigs` CRDs gain
+a `status` subresource with `status.usedBy` tracking referencing clusters.
+Until they are applied, the API server drops these fields.
 
 **Read before upgrading:** the pods of every sharded cluster roll once,
 replicas first and each master after a handover, for the new
@@ -16,6 +18,12 @@ replicas first and each master after a handover, for the new
 restarts its master in place: its slots are unavailable while it does,
 and with persistence off its data is lost. Scale such a shard to one
 replica first, or upgrade in a maintenance window if persistence is off.
+
+### Added
+
+- **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
+  Tracks which `KividbCluster`s in the namespace reference each shared config object,
+  displayed in `kubectl get -o wide` via a printer column.
 
 ### Fixed
 
@@ -247,6 +255,19 @@ are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
   `config/rbac/kustomization.yaml`, and on a new cluster the namespace did
   not exist. The steps now create the namespace and name the RBAC files.
   (#85, by [SaiPisey2](https://github.com/SaiPisey2))
+- **`spec.monitoring.serviceMonitor` created nothing** (#62). The operator now
+  makes a ServiceMonitor named after the cluster, in its namespace, for its
+  headless Service(s): the agent's `/metrics`, and `redis-exporter`'s with
+  `spec.monitoring.enabled`. Turning it off deletes it. Labels and fields
+  added to it are kept. Without the Prometheus Operator CRDs the cluster gets
+  a `ServiceMonitorUnavailable` Warning Event and nothing else changes. A manager
+  that is not allowed to read ServiceMonitors (RBAC from before this change)
+  is treated the same way: with the field off nothing is done and nothing is
+  logged above debug level, with it on a Warning Event names the missing
+  rule and quotes the refusal, and the cluster is not held at `ReconcileError`. The
+  manager's ClusterRole gains `servicemonitors`. See `docs/CONFIGURATION.md`
+  for Prometheus' selector and the chart's `metrics.serviceMonitor`.
+  (#84, by [SaiPisey2](https://github.com/SaiPisey2))
 - **A switchover no longer hands over without holding writes when the pause
   could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),
   `CLIENT PAUSE ... WRITE` waits up to 5 s for the writes already in progress
@@ -282,6 +303,14 @@ are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
   aborts go away once no switchover is wanted any more, or the master is
   another pod.
   (#82, by [lofoneh](https://github.com/lofoneh))
+- **The manager ignored `WATCH_NAMESPACE` and the chart's `watchNamespace`**
+  (#61). Only the GUI read it. The manager now watches only the namespaces it
+  lists (comma-separated; unset means all), and refuses to start on an invalid
+  name. With `watchNamespace` set, the chart renders the manager's and the
+  GUI's RBAC as Roles and RoleBindings in that namespace (see
+  `docs/INSTALL.md`). The OLM bundle now also offers the OwnNamespace,
+  SingleNamespace and MultiNamespace install modes.
+  (#64, by [SaiPisey2](https://github.com/SaiPisey2))
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install
   could not run `KividbDbOps` operations. After applying it again, restart

@@ -13,11 +13,11 @@ fullnameOverride: ""
 # template directly.
 namespace: kividb-operator-system
 
-# watchNamespace, if set, is passed to the manager as an env var
-# (WATCH_NAMESPACE) so a future namespace-scoped build of main.go can
-# restrict its cache/informers to a single namespace. The manager as
-# currently written watches all namespaces unconditionally; leave this
-# empty ("") for that default cluster-wide behavior.
+# watchNamespace, if set, limits the manager and the GUI to that one
+# namespace: it is passed to both as WATCH_NAMESPACE, and their RBAC is bound
+# as Roles and RoleBindings instead of ClusterRoles and ClusterRoleBindings.
+# The namespace must exist before the install. Leave it empty ("") to watch
+# every namespace.
 watchNamespace: ""
 
 crds:

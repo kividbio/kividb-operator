@@ -172,8 +172,10 @@ type MonitoringSpec struct {
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
-	// ServiceMonitor creates a Prometheus Operator ServiceMonitor object
-	// when true. Requires the monitoring.coreos.com CRDs to be installed.
+	// ServiceMonitor makes a Prometheus Operator ServiceMonitor named
+	// after the cluster, in its namespace, scraping the agent's and (with
+	// Enabled) the redis_exporter's /metrics. Requires the
+	// monitoring.coreos.com CRDs to be installed.
 	// +optional
 	ServiceMonitor bool `json:"serviceMonitor,omitempty"`
 }

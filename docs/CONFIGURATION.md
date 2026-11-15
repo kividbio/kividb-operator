@@ -343,11 +343,42 @@ agent sidecar's own lightweight `/metrics` on port 8081 (derived from
 `INFO`) is always available regardless of this setting — `enabled` only
 gates the heavier, richer exporter.
 
-`serviceMonitor: true` requires the `monitoring.coreos.com` CRDs
-(Prometheus Operator) to already be installed in the cluster. The
-generated `ServiceMonitor` (one per operator install, cluster-wide, not
-per-`KividbCluster`) scrapes both the agent's `/metrics` and, where
-present, `redis-exporter`'s `/metrics`.
+`serviceMonitor: true` makes a `ServiceMonitor` named after the cluster,
+in its namespace and owned by it. It scrapes `/metrics` on the agent port
+of every pod (the agent's metrics are always there) and, with
+`enabled: true`, on `redis-exporter`'s port too,
+through the cluster's headless Service (one per shard in a sharded
+cluster). Setting it back to `false` deletes it. The operator sets the
+selector, each endpoint's port and path, and its own labels; labels and
+fields you add (an endpoint's `interval`, `jobLabel`, the label your
+Prometheus selects by) are kept.
+A `ServiceMonitor` of the same name the cluster does not own is never
+changed or deleted; the Ready condition reports it instead.
+
+It needs the `monitoring.coreos.com` CRDs (Prometheus Operator). Without
+them, or once they are removed, the cluster gets one
+`ServiceMonitorUnavailable` Warning Event and is otherwise reconciled as
+usual. The operator looks for the CRDs again at
+most once a minute, so one installed later is picked up within a minute.
+
+It also needs the manager's RBAC rule for `servicemonitors` (in `config/rbac/role.yaml` and the
+chart). A manager that predates it, updated without re-applying the
+ClusterRole, is not allowed to read them: with `serviceMonitor` off that is
+ignored, and with it on the cluster gets the same `ServiceMonitorUnavailable`
+Warning Event, once, that names the rule (`get`, `create`, `update` and
+`delete` on `servicemonitors`) and quotes the API server's own refusal, since
+a 403 is not always RBAC. A cluster already told to install the CRDs is told
+about this too.
+
+Prometheus picks up a `ServiceMonitor` only if its `serviceMonitorSelector`
+and `serviceMonitorNamespaceSelector` match it. Add the label your
+Prometheus selects by to the `ServiceMonitor`, or, with
+kube-prometheus-stack's defaults, set
+`prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false`.
+
+The chart's `metrics.serviceMonitor.enabled` is the other way: one
+`ServiceMonitor` in the operator's namespace for every cluster. Use one
+or the other; with both, each pod is scraped twice.
 
 ### `failover`
 
@@ -1044,10 +1075,11 @@ spec:
 
 A `KividbConfig` is standalone: create it once, reference it from as many
 `KividbCluster`s as share the same tuning/TLS needs via `spec.configRef`.
+Its `status.usedBy` list tracks the names of `KividbCluster`s currently referencing it
+(also visible via `kubectl get kdbc -o wide`).
 Deleting one while a cluster still references it surfaces as a reconcile
 error on that cluster, which keeps failing over but is not applied until
-the KividbConfig is back (see [ROADMAP.md](ROADMAP.md) for planned
-usage-tracking to catch this earlier).
+the KividbConfig is back.
 
 ## KividbAclConfig
 
@@ -1096,6 +1128,8 @@ spec:
   still run `PING`/`INFO`/`REPLICAOF`/backups after you turn on auth.
 - Referenced the same way as `KividbConfig`: create once, point any
   number of `KividbCluster`s at it via `spec.aclConfigRef`.
+  Its `status.usedBy` list tracks the names of `KividbCluster`s currently referencing it
+  (visible via `kubectl get kdbacl -o wide`).
 
 ### Changing the default user's password
 
@@ -1187,7 +1221,9 @@ the fact even if `source` or the cluster's replica count changes over
 time.
 
 A `KividbSnapshotConfig` is standalone: create once, reference from any
-number of `KividbCluster`s via `spec.snapshotConfigRef`. See
+number of `KividbCluster`s via `spec.snapshotConfigRef`.
+Its `status.usedBy` list tracks the names of `KividbCluster`s currently referencing it
+(visible via `kubectl get kdbsc -o wide`). See
 [BACKUP_RESTORE.md](BACKUP_RESTORE.md) for the manual restore procedure
 and how to trigger an out-of-schedule backup.
 
