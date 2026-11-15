@@ -226,6 +226,11 @@ are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
   `config/rbac/kustomization.yaml`, and on a new cluster the namespace did
   not exist. The steps now create the namespace and name the RBAC files.
   (#85, by [SaiPisey2](https://github.com/SaiPisey2))
+- **The README quickstart named `kividb-sample` where the minimal sample
+  creates `kividb-minimal` (#73).** The rewritten quickstart already uses
+  `kividb-minimal`; it now also shows how to watch the pods come up, with
+  `kubectl get pods -l kividb.io/cluster=kividb-minimal`.
+  (#74, by [dipesh-svg](https://github.com/dipesh-svg))
 - **A switchover no longer hands over without holding writes when the pause
   could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),
   `CLIENT PAUSE ... WRITE` waits up to 5 s for the writes already in progress

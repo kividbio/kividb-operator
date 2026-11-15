@@ -46,6 +46,7 @@ spec:
 ```bash
 kubectl apply -f kividb.yaml
 kubectl get kividbcluster -w        # or: kubectl get kdb
+kubectl get pods -l kividb.io/cluster=kividb-minimal
 kubectl port-forward svc/kividb-minimal-master 6380:6380
 redis-cli -p 6380 ping
 ```
