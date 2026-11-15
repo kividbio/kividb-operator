@@ -131,8 +131,9 @@ func operatorOwnedClusterDirective(key string) bool {
 }
 
 // clusterDirectives are the cluster-mode lines of a sharded cluster's
-// kividb.conf. Per-pod values are not here: cluster-announce-ip is a
-// command-line flag from the pod's own IP (see shardPodTemplate).
+// kividb.conf. Per-pod values are not here: cluster-announce-ip and
+// cluster-announce-hostname are command-line flags from the pod's own IP
+// and name (see shardPodTemplate).
 func clusterDirectives(c *kividbv1alpha1.KividbCluster, secrets clusterSecrets) map[string]string {
 	spec := c.Spec.Cluster
 	if spec == nil {
@@ -161,8 +162,8 @@ func clusterDirectives(c *kividbv1alpha1.KividbCluster, secrets clusterSecrets) 
 		"cluster-node-timeout":          strconv.Itoa(int(timeout)),
 		"cluster-require-full-coverage": coverage,
 		// Nodes announce a name, not an IP, to clients: the pod's DNS name,
-		// or the address of a Service the user exposed it through. The
-		// agent sets it at runtime (cluster-announce-hostname).
+		// from startup, or the address of a Service the user exposed it
+		// through, which the agent sets at runtime.
 		"cluster-preferred-endpoint-type": "hostname",
 		"min-replicas-to-write":           strconv.Itoa(int(minReplicas)),
 		"min-replicas-max-lag":            strconv.Itoa(int(maxLag)),
@@ -223,8 +224,16 @@ func shardPodTemplate(c *kividbv1alpha1.KividbCluster, shard int32, kdbConfig *k
 		k.Env = append(k.Env, corev1.EnvVar{
 			Name:      "POD_IP",
 			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}},
+		}, corev1.EnvVar{
+			Name:      "POD_NAME",
+			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}},
 		})
 		k.Args = append(k.Args, "--cluster-announce-ip", "$(POD_IP)")
+		// Clients get the name it announces (announceName), from the start:
+		// a node that announces none shows as "?" in CLUSTER SLOTS, here and
+		// on its peers, until the agent sets one (#57). The agent still sets
+		// an address the pod is exposed through.
+		k.Args = append(k.Args, "--cluster-announce-hostname", shardPodDNSName(c, shard, "$(POD_NAME)"))
 	}
 	return t
 }

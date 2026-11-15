@@ -87,6 +87,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := controller.SetupConfigIndexes(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		ctrl.Log.Error(err, "unable to set up config field indexers")
+		os.Exit(1)
+	}
+
 	reconciler := &controller.KividbClusterReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
@@ -95,6 +100,11 @@ func main() {
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to create controller", "controller", "KividbCluster")
+		os.Exit(1)
+	}
+
+	if err := controller.SetupConfigUsageControllers(mgr); err != nil {
+		ctrl.Log.Error(err, "unable to set up config usage controllers")
 		os.Exit(1)
 	}
 

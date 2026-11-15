@@ -20,8 +20,8 @@ metadata:
     alm-examples: '[]'
     capabilities: Full Lifecycle
     categories: Database
-    containerImage: docker.io/kividb/kividb-operator:0.7.0
-    createdAt: "2026-11-04T03:16:50Z"
+    containerImage: docker.io/kividb/kividb-operator:0.7.1
+    createdAt: "2026-11-12T12:00:00Z"
     description: Runs KiviDB, a Redis-compatible in-memory database, on Kubernetes with replicas, sharding, failover and S3 backups.
     repository: https://github.com/kividbio/kividb-operator
     support: KiviDB
@@ -46,9 +46,9 @@ spec:
     - name: Operator source code
       url: https://github.com/kividbio/kividb-operator
     - name: Documentation
-      url: https://github.com/kividbio/kividb-operator/tree/v0.7.0/docs
+      url: https://github.com/kividbio/kividb-operator/tree/v0.7.1/docs
     - name: Changelog
-      url: https://github.com/kividbio/kividb-operator/blob/v0.7.0/CHANGELOG.md
+      url: https://github.com/kividbio/kividb-operator/blob/v0.7.1/CHANGELOG.md
     - name: KiviDB engine source code
       url: https://github.com/kividbio/kividb
   keywords:
@@ -89,9 +89,9 @@ spec:
     # exporter defaults are compiled in (internal/controller/names.go);
     # listing them lets mirroring tools copy them for disconnected clusters.
     - name: kividb
-      image: docker.io/kividb/kividb:v1.2.0
+      image: docker.io/kividb/kividb:v1.2.1
     - name: kividb-operator-agent
-      image: docker.io/kividb/kividb-operator-agent:0.7.0
+      image: docker.io/kividb/kividb-operator-agent:0.7.1
     - name: redis-exporter
       image: oliver006/redis_exporter:v1.66.0
   customresourcedefinitions:
@@ -143,7 +143,7 @@ spec:
               - urn:alm:descriptor:com.tectonic.ui:fieldGroup:storage
           - path: image
             displayName: Image
-            description: KiviDB engine image. Defaults to docker.io/kividb/kividb:v1.2.0.
+            description: KiviDB engine image. Defaults to docker.io/kividb/kividb:v1.2.1.
             x-descriptors:
               - urn:alm:descriptor:com.tectonic.ui:text
           - path: storage.size
@@ -381,9 +381,9 @@ spec:
     ```
 
     The full field reference is in
-    [CONFIGURATION.md](https://github.com/kividbio/kividb-operator/blob/v0.7.0/docs/CONFIGURATION.md),
+    [CONFIGURATION.md](https://github.com/kividbio/kividb-operator/blob/v0.7.1/docs/CONFIGURATION.md),
     and backups and restores are described in
-    [BACKUP_RESTORE.md](https://github.com/kividbio/kividb-operator/blob/v0.7.0/docs/BACKUP_RESTORE.md).
+    [BACKUP_RESTORE.md](https://github.com/kividbio/kividb-operator/blob/v0.7.1/docs/BACKUP_RESTORE.md).
 
     ## Before you install
 
@@ -395,10 +395,10 @@ spec:
       credentials. Prometheus scraping of the exporter needs a Prometheus
       that discovers the cluster's Services.
     * The API is `kividb.io/v1alpha1` and may change between releases.
-      Read the [changelog](https://github.com/kividbio/kividb-operator/blob/v0.7.0/CHANGELOG.md)
+      Read the [changelog](https://github.com/kividbio/kividb-operator/blob/v0.7.1/CHANGELOG.md)
       before an upgrade.
     * The operator's web dashboard is not part of this package. To run
-      it, see [GUI.md](https://github.com/kividbio/kividb-operator/blob/v0.7.0/docs/GUI.md).
+      it, see [GUI.md](https://github.com/kividbio/kividb-operator/blob/v0.7.1/docs/GUI.md).
 
     The operator is licensed under Apache-2.0. The KiviDB engine images it
     runs are licensed under AGPL-3.0-only.
