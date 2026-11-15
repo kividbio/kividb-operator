@@ -361,6 +361,12 @@ them, or once they are removed, the cluster gets one
 usual. The operator looks for the CRDs again at
 most once a minute, so one installed later is picked up within a minute.
 
+It also needs the manager's RBAC rule for `servicemonitors` (in `config/rbac/role.yaml` and the
+chart). A manager that predates it, updated without re-applying the
+ClusterRole, is not allowed to read them: with `serviceMonitor` off that is
+ignored, and with it on the cluster gets the same `ServiceMonitorUnavailable`
+Warning Event, naming the missing rule, once.
+
 Prometheus picks up a `ServiceMonitor` only if its `serviceMonitorSelector`
 and `serviceMonitorNamespaceSelector` match it. Add the label your
 Prometheus selects by to the `ServiceMonitor`, or, with

@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // serviceMonitorGVK is the Prometheus Operator's ServiceMonitor. The
@@ -119,7 +120,7 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 			r.serviceMonitorWarned.Delete(key)
 			return nil
 		}
-		r.warnServiceMonitorUnavailable(c, key)
+		r.warnServiceMonitor(c, key, serviceMonitorNoCRD)
 		return nil
 	}
 	if !want {
@@ -139,6 +140,16 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 		// Looked for once per cluster: after that, a ServiceMonitor of
 		// the cluster exists only if it asks for one again.
 		err := r.Get(ctx, client.ObjectKeyFromObject(sm), sm)
+		if apierrors.IsForbidden(err) {
+			// The manager's RBAC has no rule for servicemonitors yet, as after
+			// an image update without re-applying the ClusterRole. The operator
+			// never made one before, so there is nothing of its own to clean
+			// up: treat it as not there, rather than failing every pass for a
+			// feature the cluster did not ask for.
+			log.FromContext(ctx).V(1).Info("not allowed to read ServiceMonitors; treating the cluster as having none", "error", err.Error())
+			r.serviceMonitorGone.Store(key, struct{}{})
+			return nil
+		}
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("reading ServiceMonitor %s: %w", c.Name, err)
 		}
@@ -177,7 +188,13 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 		// been removed: as if it had never been installed. Look again after
 		// serviceMonitorRecheck.
 		r.serviceMonitorUnserved.Store(r.now().Add(serviceMonitorRecheck))
-		r.warnServiceMonitorUnavailable(c, key)
+		r.warnServiceMonitor(c, key, serviceMonitorNoCRD)
+		return nil
+	}
+	if apierrors.IsForbidden(err) {
+		// No RBAC rule for servicemonitors: say so once, like a missing CRD,
+		// instead of a ReconcileError on every pass.
+		r.warnServiceMonitor(c, key, serviceMonitorNoRBAC)
 		return nil
 	}
 	if err != nil {
@@ -189,11 +206,15 @@ func (r *KividbClusterReconciler) reconcileServiceMonitor(ctx context.Context, c
 	return nil
 }
 
-// warnServiceMonitorUnavailable tells a cluster that asks for a
-// ServiceMonitor, once, that there is no CRD to make it with.
-func (r *KividbClusterReconciler) warnServiceMonitorUnavailable(c *kividbv1alpha1.KividbCluster, key string) {
+const (
+	serviceMonitorNoCRD  = "spec.monitoring.serviceMonitor is set, but the API server does not serve servicemonitors.monitoring.coreos.com: install the Prometheus Operator's CRDs"
+	serviceMonitorNoRBAC = "spec.monitoring.serviceMonitor is set, but the manager is not allowed to manage servicemonitors.monitoring.coreos.com: add the get, list, watch, create, update, patch and delete rule for servicemonitors in monitoring.coreos.com to the manager's ClusterRole (config/rbac/role.yaml, or the chart's clusterrole.yaml)"
+)
+
+// warnServiceMonitor tells a cluster that asks for a ServiceMonitor, once,
+// why none can be made: there is no CRD, or no RBAC rule for it.
+func (r *KividbClusterReconciler) warnServiceMonitor(c *kividbv1alpha1.KividbCluster, key, msg string) {
 	if _, warned := r.serviceMonitorWarned.LoadOrStore(key, struct{}{}); !warned {
-		r.event(c, corev1.EventTypeWarning, "ServiceMonitorUnavailable",
-			"spec.monitoring.serviceMonitor is set, but the API server does not serve servicemonitors.monitoring.coreos.com: install the Prometheus Operator's CRDs")
+		r.event(c, corev1.EventTypeWarning, "ServiceMonitorUnavailable", "%s", msg)
 	}
 }

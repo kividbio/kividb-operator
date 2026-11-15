@@ -482,3 +482,68 @@ func TestServiceMonitorCRDRemovedWarnsOnce(t *testing.T) {
 		t.Fatalf("3 minutes after the CRD was removed: %d Events, want 1", got)
 	}
 }
+
+// forbiddenServiceMonitors makes every read of a ServiceMonitor fail with
+// Forbidden, as when the manager's ClusterRole predates the servicemonitors
+// rule. It counts the reads.
+func forbiddenServiceMonitors(r *KividbClusterReconciler, gets *int) {
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if u, ok := obj.(*unstructured.Unstructured); ok && u.GroupVersionKind() == serviceMonitorGVK {
+				*gets++
+				return apierrors.NewForbidden(schema.GroupResource{Group: "monitoring.coreos.com", Resource: "servicemonitors"}, key.Name,
+					errors.New("User \"system:serviceaccount:kividb-operator-system:kividb-operator\" cannot get resource \"servicemonitors\""))
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+}
+
+// With serviceMonitor off, a Forbidden read is as good as NotFound: the
+// operator made no ServiceMonitor before it had the rule, so there is none
+// to delete. No error, no Event, and not looked for again.
+func TestServiceMonitorOffForbiddenIsNotAnError(t *testing.T) {
+	t.Parallel()
+	c := smCluster(false, false)
+	r := smReconciler(t, true, c)
+	gets := 0
+	forbiddenServiceMonitors(r, &gets)
+	rec := record.NewFakeRecorder(10)
+	r.Recorder = rec
+	for i := range 3 {
+		if err := r.reconcileServiceMonitor(context.Background(), c); err != nil {
+			t.Fatalf("pass %d with serviceMonitor off and no RBAC: error = %v, want none", i, err)
+		}
+	}
+	if gets != 1 {
+		t.Fatalf("3 passes: %d reads, want 1 (the cluster is remembered as having none)", gets)
+	}
+	if got := len(rec.Events); got != 0 {
+		t.Fatalf("serviceMonitor off: %d Events, want none", got)
+	}
+}
+
+// With serviceMonitor on, a Forbidden gets one Warning Event per cluster that
+// names the missing rule, like a missing CRD, and no error.
+func TestServiceMonitorOnForbiddenWarnsOnce(t *testing.T) {
+	t.Parallel()
+	c := smCluster(true, false)
+	r := smReconciler(t, true, c)
+	gets := 0
+	forbiddenServiceMonitors(r, &gets)
+	rec := record.NewFakeRecorder(10)
+	r.Recorder = rec
+	for i := range 3 {
+		if err := r.reconcileServiceMonitor(context.Background(), c); err != nil {
+			t.Fatalf("pass %d with serviceMonitor on and no RBAC: error = %v, want none", i, err)
+		}
+	}
+	if got := len(rec.Events); got != 1 {
+		t.Fatalf("3 passes: %d Events, want 1", got)
+	}
+	ev := <-rec.Events
+	if !strings.Contains(ev, "Warning ServiceMonitorUnavailable") || !strings.Contains(ev, "not allowed to manage servicemonitors") {
+		t.Fatalf("Event = %q, want a ServiceMonitorUnavailable Warning naming the missing RBAC", ev)
+	}
+
+}
