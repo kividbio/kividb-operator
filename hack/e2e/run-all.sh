@@ -24,6 +24,7 @@ SUITES=(
   "07-monitor-memory.sh"
   "08-resp-acl-select.sh"
   "09-restore-over-aof.sh"
+  "10-force-delete-fence.sh"
 )
 
 # Map suite → skip env var (empty = never skip via flag; always runs).
@@ -39,6 +40,7 @@ skip_var_for() {
     07-monitor-memory.sh) echo "SKIP_MONITOR" ;;
     08-resp-acl-select.sh) echo "SKIP_RESP_ACL" ;;
     09-restore-over-aof.sh) echo "SKIP_RESTORE" ;;
+    10-force-delete-fence.sh) echo "SKIP_FENCE" ;;
     *) echo "" ;;
   esac
 }

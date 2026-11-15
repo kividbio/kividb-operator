@@ -18,7 +18,13 @@ import (
 	"github.com/kividbio/kividb-operator/internal/respclient"
 )
 
-const respTimeout = 5 * time.Second
+// respTimeout is how long the agent waits for kividb's reply to a command.
+var respTimeout = 5 * time.Second
+
+// maxExecTimeout caps the deadline an exec request may ask for its command
+// (agentapi.ExecRequest.TimeoutMs): a bad request cannot hold a handler,
+// and a connection to kividb, for long.
+var maxExecTimeout = 15 * time.Second
 
 type server struct {
 	cfg agentConfig
@@ -105,7 +111,12 @@ func (s *server) token() string {
 }
 
 func (s *server) dial() (*respclient.Client, error) {
-	c, err := respclient.Dial(s.cfg.KividbAddr, respTimeout)
+	return s.dialWithin(respTimeout)
+}
+
+// dialWithin is dial, with timeout for each command instead of respTimeout.
+func (s *server) dialWithin(timeout time.Duration) (*respclient.Client, error) {
+	c, err := respclient.Dial(s.cfg.KividbAddr, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -460,7 +471,15 @@ func (s *server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("args must be a non-empty command"))
 		return
 	}
-	c, err := s.dial()
+	timeout := respTimeout
+	if req.TimeoutMs > 0 {
+		// Clamped before it is made a Duration: a huge value overflows.
+		timeout = maxExecTimeout
+		if req.TimeoutMs < maxExecTimeout.Milliseconds() {
+			timeout = time.Duration(req.TimeoutMs) * time.Millisecond
+		}
+	}
+	c, err := s.dialWithin(timeout)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

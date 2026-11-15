@@ -226,12 +226,33 @@ func (a *AgentClient) ReplicaOf(ctx context.Context, podIP, masterHost string, m
 // Exec runs one command on the pod's kividb (POST /exec). An error reply
 // from kividb is returned as an error too, with the reply.
 func (a *AgentClient) Exec(ctx context.Context, podIP string, args ...string) (*agentapi.ExecResponse, error) {
+	return a.exec(ctx, podIP, agentapi.ExecRequest{Args: args})
+}
+
+// ExecWithin is Exec for a command that may take longer than the per-call
+// timeout: the call is given timeout, or the per-call timeout if that is
+// longer, and the agent is asked to wait for kividb's reply a little less
+// (agentWait), so that it gives up first and says why. An agent before
+// 0.7.1 still cuts the command at its own 5 s.
+func (a *AgentClient) ExecWithin(ctx context.Context, timeout time.Duration, podIP string, args ...string) (*agentapi.ExecResponse, error) {
+	timeout = max(timeout, a.http.Timeout)
+	hc := *a.http
+	hc.Timeout = timeout
+	longer := &AgentClient{http: &hc, Token: a.Token}
+	return longer.exec(ctx, podIP, agentapi.ExecRequest{Args: args, TimeoutMs: agentWait(timeout).Milliseconds()})
+}
+
+// agentWait is how long the agent is asked to wait for kividb's reply to a
+// call given timeout: six sevenths of it, 6 s of 7.
+func agentWait(timeout time.Duration) time.Duration { return timeout * 6 / 7 }
+
+func (a *AgentClient) exec(ctx context.Context, podIP string, req agentapi.ExecRequest) (*agentapi.ExecResponse, error) {
 	var out agentapi.ExecResponse
-	if err := a.postJSON(ctx, podIP, "/exec", agentapi.ExecRequest{Args: args}, &out); err != nil {
+	if err := a.postJSON(ctx, podIP, "/exec", req, &out); err != nil {
 		return nil, err
 	}
 	if out.Type == "error" {
-		return &out, fmt.Errorf("%s: %s", args[0], out.Str)
+		return &out, fmt.Errorf("%s: %s", req.Args[0], out.Str)
 	}
 	return &out, nil
 }

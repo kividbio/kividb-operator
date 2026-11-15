@@ -40,7 +40,7 @@ const ClusterLabel = "kividb.io/cluster"
 
 // KividbVariant selects which build of the kividb image to run. Each
 // variant beyond "standard" corresponds to a real, separately-published
-// image tag suffix (e.g. docker.io/kividb/kividb:v1.2.0-tls) -- the
+// image tag suffix (e.g. docker.io/kividb/kividb:v1.2.1-tls) -- the
 // features aren't runtime-togglable, they're compiled in.
 type KividbVariant string
 
@@ -188,6 +188,17 @@ type FailoverSpec struct {
 	// before the operator promotes a replica. Defaults to 30.
 	// +optional
 	UnhealthyThresholdSeconds *int32 `json:"unhealthyThresholdSeconds,omitempty"`
+
+	// RestartWaitSeconds is how long, at most, a failover waits for a
+	// master whose pod is gone or replaced, and whose engine no longer
+	// answers, to come back on its volume -- it may hold writes its
+	// replicas do not -- before promoting one of them: counted from when it
+	// was found gone, whether its pod comes back or not. Not when its
+	// replacement pod cannot be scheduled. 0 turns the wait off. Defaults
+	// to 15.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	RestartWaitSeconds *int32 `json:"restartWaitSeconds,omitempty"`
 }
 
 // ClusterModeSpec tunes kividb's cluster mode, for a KividbCluster with
@@ -265,9 +276,9 @@ type KividbClusterSpec struct {
 	Replicas int32 `json:"replicas,omitempty"`
 
 	// Image is the kividb container image, e.g.
-	// "docker.io/kividb/kividb:v1.2.0" or, for a non-standard build,
-	// "docker.io/kividb/kividb:v1.2.0-tls". Defaults to
-	// docker.io/kividb/kividb:v1.2.0 if unset -- set this explicitly to pin a specific
+	// "docker.io/kividb/kividb:v1.2.1" or, for a non-standard build,
+	// "docker.io/kividb/kividb:v1.2.1-tls". Defaults to
+	// docker.io/kividb/kividb:v1.2.1 if unset -- set this explicitly to pin a specific
 	// version. The operator uses this value verbatim; it never derives or
 	// modifies an image reference from Variant below.
 	// +optional
@@ -420,6 +431,15 @@ type BootstrapPhase string
 // master to come back instead; see reconcileRoles.
 const AllowEmptyFailoverAnnotation = "kividb.io/allow-empty-failover"
 
+// AllowUnreadFailoverAnnotation, set to "true" on a KividbCluster, lets a
+// failover go ahead without the replicas that did not say how much they
+// hold: the replica promoted is the one that holds the most of those that
+// did, and writes only the others hold are lost. Without it the failover
+// waits for them (FailoverBlocked); see reconcileRoles. The operator removes
+// it once a failover has gone through, so it never skips the hold on a
+// later one.
+const AllowUnreadFailoverAnnotation = "kividb.io/allow-unread-failover"
+
 // ShardPromoteAnnotation records, on a sharded KividbCluster, the last
 // replica someone asked to take over its shard outside the operator (the
 // console's Promote): "<pod> <RFC 3339 time>". The operator reports the
@@ -509,6 +529,13 @@ type KividbPodStatus struct {
 	// agent does not report a run_id.
 	// +optional
 	Incarnation string `json:"incarnation,omitempty"`
+
+	// PodIP is the address the pod's agent last answered on, in a
+	// replicated cluster. A failover holds the writes of the master it
+	// replaces there before promoting a replica, which still reaches a
+	// master whose pod was force-deleted while its container runs on.
+	// +optional
+	PodIP string `json:"podIP,omitempty"`
 
 	// Shard is the shard the pod belongs to, in a sharded cluster.
 	// +optional
@@ -670,6 +697,15 @@ type KividbClusterStatus struct {
 	// +optional
 	LastFailoverTime *metav1.Time `json:"lastFailoverTime,omitempty"`
 
+	// FencedMaster is the master a failover held the writes of, in a
+	// replicated cluster, until it has been made the new master's replica.
+	// It is written before the promotion: the pod object of a force-deleted
+	// master is gone, and its name soon belongs to a replacement pod at
+	// another address, so this is how a later pass, or a restarted
+	// operator, still reaches it.
+	// +optional
+	FencedMaster *FencedMaster `json:"fencedMaster,omitempty"`
+
 	// ObservedGeneration is the .metadata.generation last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -686,6 +722,18 @@ type KividbClusterStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// FencedMaster is a master whose writes a failover holds (CLIENT PAUSE
+// WRITE): where it answered, and which engine run it was.
+type FencedMaster struct {
+	// Name is its pod's name.
+	Name string `json:"name"`
+	// PodIP is the address its agent answered on.
+	PodIP string `json:"podIP"`
+	// RunID is its engine's run ID: another engine answering at PodIP is
+	// not it.
+	RunID string `json:"runID"`
 }
 
 // +kubebuilder:object:root=true

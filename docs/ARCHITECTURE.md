@@ -51,7 +51,7 @@ requested:
 
 | Container | Image | Role |
 |---|---|---|
-| `kividb` | `spec.image`, or `docker.io/kividb/kividb:v1.2.0` if unset | The database itself. `workingDir: /data`, `--configfile /etc/kividb/kividb.conf`. |
+| `kividb` | `spec.image`, or `docker.io/kividb/kividb:v1.2.1` if unset | The database itself. `workingDir: /data`, `--configfile /etc/kividb/kividb.conf`. |
 | `agent`  | `spec.agentImage` (defaults to the operator's own agent image) | A small Go HTTP sidecar (`cmd/agent`) that translates HTTP calls from the controller into RESP commands against `127.0.0.1:<port>`, and owns all S3 backup logic. |
 | `redis-exporter` | `spec.exporterImage` (defaults to `oliver006/redis_exporter`), only when `spec.monitoring.enabled: true` | The de facto standard Prometheus exporter for Redis-protocol stores, scraped separately from the agent's own lightweight `/metrics` -- see [CONFIGURATION.md](CONFIGURATION.md#monitoring). |
 
@@ -141,7 +141,7 @@ does, in order:
    `ServiceName` and `VolumeClaimTemplates` are set once at creation time
    and never touched again, since the Kubernetes API server rejects
    changes to those fields on an existing StatefulSet). The image comes
-   from `spec.image` verbatim (`docker.io/kividb/kividb:v1.2.0` if unset — see
+   from `spec.image` verbatim (`docker.io/kividb/kividb:v1.2.1` if unset — see
    [CONFIGURATION.md](CONFIGURATION.md#image-and-variant) for why
    `spec.variant` never affects this); TLS cert/key/CA are mounted from
    the `KividbConfig`'s `tls.certSecretRef` when `tls.enabled` is true.
@@ -176,8 +176,9 @@ does, in order:
    or its `Ready` condition has been `False` for at least
    `spec.failover.unhealthyThresholdSeconds` (default 30s), or its agent
    reports a role other than master, a failover is triggered (unless
-   `spec.failover.enabled: false`). So is one for a master that **came
-   back behind its replicas**. This needs evidence that the master's
+   `spec.failover.enabled: false`; a missing master whose engine no
+   longer answers is first waited for, step 5). So is one for a master
+   that **came back behind its replicas**. This needs evidence that the master's
    engine restarted since the status last recorded it as the master: a
    new engine `run_id` (`status.pods[].runID`) or, from an agent that does
    not report one, a new pod UID or a container restart
@@ -199,15 +200,60 @@ does, in order:
    keeps a pod's last offset, key count, run and stream while it cannot be
    asked, which is what makes this, and the empty-replica check below,
    work across the pod's restart.
-5. **Election**: among the remaining ready pods, pick the one with the
-   highest `replicationOffset` (most caught-up); ties break on pod name
-   for determinism. Call `POST /promote` on it, move the
-   `kividb.io/role` label to it.
+5. **Election**: among the remaining ready pods, the one with the highest
+   `replicationOffset`. A master whose pod is gone or replaced (a new
+   UID), and whose engine no longer answers, is first waited for until
+   its new pod is Ready and has reported, for `failover.restartWaitSeconds`
+   at most from when it was found gone (`FailoverWait`): back on its
+   volume in time, it goes through step 4's comparison instead. Not when
+   its replacement pod is unschedulable, or nothing (no address, no
+   engine run) was recorded for it. The cap is what covers a volume that
+   cannot attach yet (on AKS or EBS the replacement schedules on another
+   node in the zone, then sits in `ContainerCreating` with a Multi-Attach
+   error, never unschedulable); it is checked on each pass, so it can be
+   overshot by up to the 5 s between passes. A wait that ran out is
+   remembered, by master and pod, until the master changes: a failover
+   that does not go through after it is tried again at once, without
+   another wait. Before promoting anyone, hold the old master's writes
+   (`CLIENT PAUSE <ms> WRITE` through its agent, for the pod's
+   termination grace period -- 10 s at least -- and 5 s more) at the
+   address and to the engine run its status entry recorded
+   (`status.pods[].podIP`, `runID`)
+   -- after a force-delete its pod object is gone while its container
+   still runs, and takes writes, until its replicas have left it. Then
+   pick the replica by each one's offset read now with `ROLE` -- the ones
+   read at the start of the pass may be from before the master stopped
+   streaming -- ties going to the name -- and wait for it to catch up
+   with the old master, as a switchover does (5 s at most, less once the
+   old master stops answering). The replicas are asked at once, for 1 s
+   in all (`liveOffsetBudget`), inside the old master's pause. One that
+   does not answer may hold more than the one picked: unless that one
+   caught up with the held master, which none can be ahead of, no one is
+   promoted on this pass (`FailoverBlocked`, and the old master's pause is
+   lifted) -- until it answers, or stops being Ready (its readiness probe
+   goes through the same agent). An address that
+   does not answer is asked again for 1 s (`fenceRunCheckTimeout`; one
+   that refuses the connection, once); a pause that gets no answer, or
+   is refused because a write did not finish, is sent again, each try
+   given the whole call, for 3 s after the first (`fenceRetryTimeout`). If
+   none got through, the master is still recorded and demoted below when
+   any try went unanswered: it may have landed. A failover that
+   goes on without the fence, or before the candidate caught up, raises
+   `FailoverUnfenced`. Record the fenced master in
+   `status.fencedMaster`, call `POST /promote` on the candidate (a
+   failed call leaves the old master paused: it may have gone through),
+   move the `kividb.io/role` label to it, then `POST /replicaof` on the
+   old master, disconnect its clients and lift its pause -- on every
+   pass, toward a master that is ready and says it is one, until that is
+   done or the engine there is gone (another engine answers, or none
+   does twice in a row).
 6. **Convergence**: for every other ready pod, if its reported
    `masterHost:masterPort` doesn't match the new master's pod IP and
    port, call `POST /replicaof` to repoint it. This also self-heals a
    replica that was manually pointed elsewhere, or an old master that
-   comes back after a failover and needs to rejoin as a replica.
+   comes back after a failover and needs to rejoin as a replica; one that
+   kept running since it was last recorded may still hold writes, so its
+   clients are disconnected and its pause lifted.
 7. Status is stamped with `phase: FailingOver` for the reconcile pass in
    which a failover happened, then reverts to `Running`/`Degraded` once
    things settle, so the transition is visible in `kubectl get
@@ -217,15 +263,18 @@ does, in order:
 ```mermaid
 sequenceDiagram
     participant Ctrl as Controller
-    participant Old as Old master pod (dead)
+    participant Old as Old master
     participant New as Best replica
     participant Others as Other replicas
 
     Ctrl->>Old: GET /status (times out / Ready=False)
     Note over Ctrl: unhealthyThresholdSeconds exceeded
     Ctrl->>New: GET /status (compare offsets)
+    Ctrl-->>Old: CLIENT PAUSE WRITE at its last address
+    Ctrl->>New: ROLE until it has caught up with Old
     Ctrl->>New: POST /promote  (REPLICAOF NO ONE)
     Ctrl->>Ctrl: patch pod label kividb.io/role=master on New
+    Ctrl-->>Old: POST /replicaof New, CLIENT KILL, CLIENT UNPAUSE
     Ctrl->>Others: POST /replicaof {host: New's IP, port}
     Note over Ctrl: master/replica Services now resolve to New automatically
 ```
@@ -241,14 +290,23 @@ losing an acknowledged write. kividb answers `FAILOVER` with "not
 supported", so the operator runs the steps Redis's `FAILOVER` does:
 
 1. `CLIENT PAUSE <ms> WRITE` on the old master (through the agent's
-   `/exec`): it acknowledges no write from here on; reads go on. The pause
-   has its own timeout (10 s), so an operator that dies half-way leaves a
-   master that resumes by itself.
+   `/exec`): it acknowledges no write from here on; reads go on. Since
+   kividb 1.2.1 the engine waits for the writes in progress before it
+   answers, up to 5 s, so the call is given 7 s (`timeoutMs` on the agent's
+   `/exec` asks the agent for 6 s). The engine counts the pause from the
+   request, so up to 5 s of it can go to that wait: the pause lasts the
+   call, the catch-up and a 5 s margin (17 s), and an operator that dies
+   half-way still leaves a master that resumes by itself. A pause that is
+   refused, or not answered, aborts the switchover (step 2's
+   `SwitchoverAborted`); only an engine that does not know the command is
+   switched over without it.
 2. Poll `ROLE` on both until the old master's offset stays put and the
    target's applied offset has reached it, with its link `connected` --
    at most 5 s. Otherwise: `CLIENT UNPAUSE`, a `SwitchoverAborted`
    Warning, the old master stays the master, and the next attempt waits
-   30 s (not when the master pod is being deleted).
+   30 s, doubling with each abort in a row up to 10 min (2 s when the
+   master pod is being deleted); the `Switchover` condition says why until
+   one goes through.
 3. `POST /promote` on the target. It keeps the old master's replication ID
    and offset (as its second ID), so the other replicas continue from it
    with a partial resync.

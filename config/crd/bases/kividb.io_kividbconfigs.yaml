@@ -20,7 +20,13 @@ spec:
     - name: v1alpha1
       served: true
       storage: true
+      subresources:
+        status: {}
       additionalPrinterColumns:
+        - name: Used By
+          type: string
+          jsonPath: .status.usedBy
+          priority: 1
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -86,3 +92,14 @@ spec:
                             Defaults to "ca.crt". Optional -- set only if
                             client-cert verification is desired and this
                             key actually exists in the Secret.
+            status:
+              type: object
+              description: Observed state of this KividbConfig.
+              properties:
+                usedBy:
+                  type: array
+                  description: >-
+                    KividbCluster names in this namespace that reference this config.
+                    Maintained by the operator from the KividbClusters that reference this config.
+                  items:
+                    type: string

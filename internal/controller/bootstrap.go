@@ -31,8 +31,8 @@ func bootstrapJobName(c *kividbv1alpha1.KividbCluster) string {
 // BootstrapCondition says whether pod-0's volume was seeded from
 // spec.bootstrapFromSnapshot and, until it is, what the bootstrap is doing
 // or waiting for: reason WaitingForEarlierCluster, WaitingForVolumeDeletion,
-// Pending, Restoring, RestoreRetrying, RestoreFailed; True with Restored or
-// Skipped.
+// Pending, Restoring, RestoreRetrying, RestoreFailed, Refused; True with
+// Restored or Skipped.
 const BootstrapCondition = "Bootstrapped"
 
 // errEarlierRestoreJob is returned by ensureBootstrapJob for a restore Job
@@ -60,7 +60,17 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 	// However the pass ends, the Bootstrapped condition says where the
 	// bootstrap is. reason, when set, is what it waits for or does.
 	var reason string
-	defer func() { setBootstrapCondition(c, reason) }()
+	defer func() {
+		setBootstrapCondition(c, reason)
+		// A pass the bootstrap holds ends before updateStatus, which sets
+		// the phase otherwise (#51).
+		if shouldBlock || err != nil {
+			c.Status.Phase = kividbv1alpha1.PhaseProvisioning
+			if c.Status.Bootstrap != nil && c.Status.Bootstrap.Phase == kividbv1alpha1.BootstrapFailed {
+				c.Status.Phase = kividbv1alpha1.PhaseError
+			}
+		}
+	}()
 
 	snapName := c.Spec.BootstrapFromSnapshot.SnapshotRef.Name
 	if c.Status.Bootstrap == nil || bootstrapWaiting(c) {
@@ -145,6 +155,7 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 		if c.Status.Bootstrap.Phase != kividbv1alpha1.BootstrapFailed {
 			r.event(c, corev1.EventTypeWarning, "BootstrapRefused", "%v", err)
 		}
+		reason = "Refused"
 		c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapFailed
 		c.Status.Bootstrap.Error = err.Error()
 		c.Status.Bootstrap.Message = "bootstrap refused"
@@ -197,6 +208,7 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 	c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapInProgress
 	c.Status.Bootstrap.SnapshotName = snapName
 	c.Status.Bootstrap.Message = "restore Job running" + over
+	c.Status.Bootstrap.Error = "" // from before this Job: a refusal since fixed, say
 
 	if job.Status.Succeeded > 0 {
 		now := metav1.Now()
@@ -300,7 +312,9 @@ func setBootstrapCondition(c *kividbv1alpha1.KividbCluster, reason string) {
 			cond.Reason = "Restored"
 		}
 	case b.Phase == kividbv1alpha1.BootstrapFailed:
-		cond.Reason = "RestoreFailed"
+		if cond.Reason == "" {
+			cond.Reason = "RestoreFailed"
+		}
 		if b.Error != "" {
 			cond.Message = b.Message + ": " + b.Error
 		}

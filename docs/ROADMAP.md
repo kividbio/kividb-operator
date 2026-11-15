@@ -81,11 +81,11 @@ moved under 0.3.0 / Before 1.0.0.
   (now including its `KividbSnapshot` history) but has no list/detail view
   for `KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig` themselves --
   useful once clusters start sharing them.
-- **`KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig` usage
-  tracking.** No `status.usedBy` on these three -- deleting one out from
-  under a referencing `KividbCluster` currently just surfaces as a
-  reconcile error on the cluster (visible, but not proactively guarded
-  against, e.g. no admission webhook blocking the delete).
+- **`KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig` delete guard.**
+  While `status.usedBy` tracks referencing clusters, deleting a config out
+  from under a referencing `KividbCluster` still surfaces as a reconcile error
+  on the cluster (no admission webhook or finalizer blocking the delete while
+  `status.usedBy` is non-empty).
 - **Chart signing.** `values.schema.json` is shipped; GPG-signed
   provenance (`helm package --sign`) is documented in RELEASING.md but not
   wired into the release pipeline -- needs a real, verifiable signing

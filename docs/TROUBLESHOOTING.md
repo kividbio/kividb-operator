@@ -128,6 +128,56 @@ kubectl annotate kividbcluster my-cluster kividb.io/allow-empty-failover=true
 
 Remove the annotation again afterwards.
 
+## Failover held for a replica that did not answer (`FailoverBlocked`, `WaitingForReplica`)
+
+The master is gone, and a Ready replica did not say how much it holds
+(`ROLE`, asked through its agent) within 1 s. It may hold writes the
+others do not, so no one is promoted; the event says how long the failover
+has been held. A replica stays Ready while the operator cannot reach it,
+because its readiness probe runs from the kubelet on its own node: check
+NetworkPolicies and whether the operator's pod reaches the replica's agent
+on port 8081. Then fix the network, or delete the replica's pod, or, if
+losing any writes only that replica holds is acceptable:
+
+```bash
+kubectl annotate kividbcluster my-cluster kividb.io/allow-unread-failover=true
+```
+
+The operator removes the annotation once the failover has gone through.
+
+## Failover without a fence (`FailoverUnfenced`)
+
+A failover went ahead without first holding the old master's writes, or
+promoted a replica before it had caught up with the old master. A master
+that was still running then -- a force-deleted pod's container, for a
+moment -- may have acknowledged writes the new master never got. The
+event says why:
+
+- **No address or engine run recorded** (`status.pods[].podIP`, `runID`).
+  The usual cause is a `kividbclusters` CRD older than the operator: Helm
+  installs CRDs once and never upgrades them, and the API server drops
+  the status fields its CRD does not list. Apply the current CRDs:
+
+  ```bash
+  kubectl apply -f charts/kividb-operator/crds/
+  ```
+
+  The address is recorded again from the next status write. Right after
+  an upgrade, pods whose agent has not been replaced yet report no engine
+  run either; the rollout replaces them.
+- **No answer** at the old master's address: nothing listens there, or
+  nothing answered for about 1 s -- its node is down, or cut off from the
+  operator.
+- **No pause within 3 s**, or **the engine refused `CLIENT PAUSE WRITE`**
+  (kividb before 1.1).
+- **Promoting a replica before it caught up**: it was still behind after
+  5 s, or the old master stopped answering first.
+
+A `FencedMasterNotDemoted` Warning means the old master was held but could
+not yet be made the new master's replica. Its writes stay held, and the
+operator tries again every 2 s (`status.fencedMaster` shows it) until it
+is done or the old engine is gone.
+
 ## `PersistenceDisabled`, `MasterRestartedEmpty`, `ShardDataLost`
 
 - **`PersistenceDisabled`** (and the `Persistence` condition `False`): the

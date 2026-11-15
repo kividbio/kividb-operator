@@ -28,10 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -66,13 +68,30 @@ type KividbClusterReconciler struct {
 	// pods ("<ns>/<cluster>/-1/<node ID>" -> time.Time), see orphanNodes.
 	orphans sync.Map
 
-	// switchovers: when the last replicated-mode switchover of a cluster
-	// ("<ns>/<cluster>" -> time.Time) was aborted, so the next one waits.
+	// switchovers: the aborted replicated-mode switchovers of a cluster
+	// ("<ns>/<cluster>" -> *switchoverAborts), so the next one waits.
 	switchovers sync.Map
+
+	// switchoverAsked: the clusters a switchover was asked for on the pass
+	// under way ("<ns>/<cluster>" -> struct{}), see reconcileRoleChanges.
+	switchoverAsked sync.Map
 
 	// rolloutWaits: what a cluster's rollout has been waiting for, and
 	// since when ("<ns>/<cluster>" -> *rolloutWait), see rollout_wait.go.
 	rolloutWaits sync.Map
+
+	// fencedRetries: how the demotion of a replicated cluster's fenced
+	// master has gone ("<ns>/<cluster>" -> *fencedTry), see
+	// demoteFencedMaster.
+	fencedRetries sync.Map
+
+	// restartWaits: the failovers waiting for their master to come back on
+	// its volume ("<ns>/<cluster>" -> *restartWaiting), see restart_wait.go.
+	restartWaits sync.Map
+
+	// failoverHolds: the failovers held back for a replica that did not say
+	// what it holds ("<ns>/<cluster>" -> *failoverHold), see reconcileRoles.
+	failoverHolds sync.Map
 
 	// notSynced: why each replica of a replicated-mode cluster was not in
 	// sync on the last pass ("<ns>/<cluster>" -> map[pod]reason).
@@ -116,6 +135,9 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		return ctrl.Result{}, err
 	}
+	// The status as this pass read it, which may be a version behind: see
+	// writeStatus.
+	read := c.Status.DeepCopy()
 
 	if err := validateSpec(&c); err != nil {
 		return ctrl.Result{}, r.rejectSpec(ctx, &c, err)
@@ -192,6 +214,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if statusErr := r.Status().Update(ctx, &c); statusErr != nil {
 			return ctrl.Result{}, fmt.Errorf("updating bootstrap status: %w", statusErr)
 		}
+		read = c.Status.DeepCopy()
 	}
 
 	rollout := map[string]string{
@@ -242,9 +265,9 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("listing pods: %w", err)
 	}
 
-	statuses, masterPod, failoverHappened, err := r.reconcileRoles(ctx, &c, podList.Items)
+	statuses, masterPod, failoverHappened, err := r.reconcileRoles(ctx, &c, read, podList.Items)
 	if err != nil {
-		log.Error(err, "role reconciliation failed")
+		logRoles(ctx, err)
 		// Fall through to still persist a status update reflecting the
 		// error so it is visible via `kubectl get kividbcluster`, but keep
 		// requeuing quickly to retry.
@@ -255,20 +278,23 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	r.reconcileAclReload(ctx, &c, podList.Items, aclContent, generations)
-	// One change of roles per pass: a pod is replaced only on a pass that
-	// did not just move the master role (statuses are from before it).
-	if r.reconcileHandover(ctx, &c, podList.Items, statuses, masterPod) == "" &&
-		r.reconcileAuthOverlap(ctx, &c, podList.Items, generations) {
-		r.reconcileRollout(ctx, &c, podList.Items, statuses, masterPod)
-	}
+	r.reconcileRoleChanges(ctx, &c, podList.Items, statuses, masterPod, generations)
 
 	r.notePersistence(&c, kdbConfig)
-	if statusErr := r.updateStatus(ctx, &c, statuses, masterPod, previousMasterPod, failoverHappened, err); statusErr != nil {
+	if statusErr := r.updateStatus(ctx, &c, read, statuses, masterPod, previousMasterPod, failoverHappened, err); errors.Is(statusErr, errStaleStatus) {
+		log.V(1).Info("status changed since this pass read it; looking again")
+		return ctrl.Result{RequeueAfter: staleRequeue(&c)}, nil
+	} else if statusErr != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", statusErr)
 	}
 
 	if err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	if c.Status.FencedMaster != nil {
+		// A failover's fenced master is not a replica yet: try again
+		// before its pause runs out (demoteFencedMaster).
+		return ctrl.Result{RequeueAfter: fencedMasterRetry}, nil
 	}
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
 }
@@ -341,6 +367,7 @@ func (e *heldError) Unwrap() error                 { return e.err }
 // overlap and the rollout need what could not be resolved, so they wait.
 func (r *KividbClusterReconciler) reconcileHeld(ctx context.Context, c *kividbv1alpha1.KividbCluster, held *heldError) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	read := c.Status.DeepCopy() // nothing before this pass changed it
 	log.Error(held.err, "not applying the cluster's objects")
 	requeue := 5 * time.Second
 	r.warnOnChange(c, held.reason, held.err)
@@ -373,15 +400,28 @@ func (r *KividbClusterReconciler) reconcileHeld(ctx context.Context, c *kividbv1
 	}
 
 	previousMasterPod := c.Status.MasterPod
-	statuses, masterPod, failoverHappened, err := r.reconcileRoles(ctx, c, podList.Items)
+	statuses, masterPod, failoverHappened, err := r.reconcileRoles(ctx, c, read, podList.Items)
 	if err != nil {
-		log.Error(err, "role reconciliation failed")
+		logRoles(ctx, err)
 	}
 	r.reconcileHandover(ctx, c, podList.Items, statuses, masterPod)
-	if statusErr := r.updateStatus(ctx, c, statuses, masterPod, previousMasterPod, failoverHappened, errors.Join(held, err)); statusErr != nil {
+	if statusErr := r.updateStatus(ctx, c, read, statuses, masterPod, previousMasterPod, failoverHappened, errors.Join(held, err)); errors.Is(statusErr, errStaleStatus) {
+		log.V(1).Info("status changed since this pass read it; looking again")
+		return ctrl.Result{RequeueAfter: staleRequeue(c)}, nil
+	} else if statusErr != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", statusErr)
 	}
 	return ctrl.Result{RequeueAfter: requeue}, nil
+}
+
+// staleRequeue is when a pass whose status write was stale looks again:
+// soon, and while a failover holds the old master's writes, before that
+// pause runs out (fencedMasterRetry), as a pass whose write landed does.
+func staleRequeue(c *kividbv1alpha1.KividbCluster) time.Duration {
+	if c.Status.FencedMaster != nil {
+		return fencedMasterRetry
+	}
+	return 5 * time.Second
 }
 
 // listensOn reports whether the kividb container of every pod declares
@@ -649,7 +689,7 @@ func (r *KividbClusterReconciler) applyStatefulSet(ctx context.Context, c *kivid
 	return err
 }
 
-func (r *KividbClusterReconciler) updateStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, statuses []kividbv1alpha1.KividbPodStatus, masterPod, previousMasterPod string, failoverHappened bool, roleErr error) error {
+func (r *KividbClusterReconciler) updateStatus(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus, statuses []kividbv1alpha1.KividbPodStatus, masterPod, previousMasterPod string, failoverHappened bool, roleErr error) error {
 	desiredPods := c.Spec.Replicas + 1
 
 	// reconcileRoles' own failoverHappened is a transient, single-pass
@@ -709,7 +749,10 @@ func (r *KividbClusterReconciler) updateStatus(ctx context.Context, c *kividbv1a
 	}
 	setCondition(&c.Status.Conditions, readyCondition)
 
-	return r.Status().Update(ctx, c)
+	// A pass that read a stale status does not write over a newer one: that
+	// would also take previousMasterPod from the stale status, and count a
+	// failover twice.
+	return r.writeStatus(ctx, c, read)
 }
 
 // validateSpec catches spec values the API server accepted but that the
@@ -953,10 +996,11 @@ func (r *KividbClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(mapPodToCluster)).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(mapAnnounceServiceToCluster)).
 		// What a cluster references: fixing or making one is picked up at
-		// once, not on the next retry.
-		Watches(&kividbv1alpha1.KividbConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
-		Watches(&kividbv1alpha1.KividbAclConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
-		Watches(&kividbv1alpha1.KividbSnapshotConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
+		// once, not on the next retry. GenerationChangedPredicate ensures
+		// status.usedBy updates on configs do not trigger cluster reconciles.
+		Watches(&kividbv1alpha1.KividbConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&kividbv1alpha1.KividbAclConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&kividbv1alpha1.KividbSnapshotConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapReferenceToClusters)).
 		Complete(r)
 }

@@ -6,6 +6,196 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+**Apply the new CRDs before `helm upgrade`:** Helm does not upgrade them.
+The `kividbclusters` CRD spec gains `failover.restartWaitSeconds`.
+The `kividbconfigs`, `kividbaclconfigs`, and `kividbsnapshotconfigs` CRDs gain
+a `status` subresource with `status.usedBy` tracking referencing clusters.
+Until they are applied, the API server drops these fields.
+
+**Read before upgrading:** the pods of every sharded cluster roll once,
+replicas first and each master after a handover, for the new
+`--cluster-announce-hostname` flag (#57). A shard with no replicas
+restarts its master in place: its slots are unavailable while it does,
+and with persistence off its data is lost. Scale such a shard to one
+replica first, or upgrade in a maintenance window if persistence is off.
+
+### Added
+
+- **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
+  Tracks which `KividbCluster`s in the namespace reference each shared config object,
+  displayed in `kubectl get -o wide` via a printer column.
+
+### Fixed
+
+- **A restarted node of a sharded cluster showed as `?` in `CLUSTER
+  SLOTS`** (#57), on itself and on its peers, for about six seconds: it
+  started with no hostname, and the agent set one only later. A client
+  that reloaded its slot map then could not reach those slots. A node now
+  starts with `--cluster-announce-hostname`, its pod's DNS name, which
+  every engine with `--cluster-announce-ip` (1.1.0 on) takes. The agent
+  still sets the address of a Service a pod is exposed through.
+- **A failover could promote a replica that held less than another, and
+  did not wait for a force-deleted master coming back on its volume
+  (#78).** In an AKS run, a force-deleted master lost 176 acknowledged
+  writes, and the replica promoted was 640 bytes behind the other.
+  - The replica is now picked after the old master's writes are held (or
+    it is found gone), by each replica's offset read then with `ROLE`, not
+    by the offsets read at the start of the pass, which may be from before
+    the master stopped streaming. Replicas that hold as much go by name.
+    The replicas are asked at once, for 1 s in all. One that does not
+    answer may hold more than the one picked: unless that one caught up
+    with the held master, no one is promoted on that pass
+    (`FailoverBlocked` Warning, `WaitingForReplica` on the Ready
+    condition) until it answers or is no longer Ready. A replica the
+    operator cannot reach stays Ready (its readiness probe runs on its own
+    node), so the Warning says how long the failover has been held and
+    what ends it, and `kividb.io/allow-unread-failover: "true"` on the
+    cluster lets it go ahead without that replica (`FailoverForced`
+    Warning); the operator removes the annotation once the failover has
+    gone through.
+  - A master whose pod is gone, or replaced by a new pod (a force delete),
+    and whose engine no longer answers, is now waited for until its new
+    pod is Ready and has reported: it may come back on its volume holding
+    writes its replicas do not. Then it is compared with them as a master
+    that restarted in place is (#42), and kept if it holds as much. The
+    wait lasts `failover.restartWaitSeconds` at most (new, 15 s by
+    default, 0 for not at all), counted from when the master was found
+    gone, whether its pod comes back or not, so a force-deleted master
+    costs that much at most (and up to 5 s more: the wait is checked on
+    each pass). A wait that ran out is not started again for that pod of
+    the master. A master that restarts in place keeps
+    `unhealthyThresholdSeconds`. A replacement pod that cannot be scheduled
+    is not waited for, nor a master with no address or engine run
+    recorded. The operator does not read Nodes, so that its RBAC stays as
+    it is: a replacement pinned by its volume to a node that is not Ready
+    shows as unschedulable, as the scheduler keeps new pods off such a
+    node. The cap covers a volume that cannot attach yet: on AKS or EBS a
+    replacement schedules on another node in the zone and sits in
+    `ContainerCreating` (Multi-Attach), never unschedulable.
+    `FailoverWait` events say when a wait starts and how it ended, and the
+    Ready condition's reason is `WaitingForMaster` meanwhile.
+- **`kubectl apply -k config/default` warned that `commonLabels` is
+  deprecated** (#69). `config/default` sets the same two labels with
+  `labels` instead, on each object's own labels only: the manager
+  Deployment's pod template carries them in `config/manager`, and since
+  #86 its selector does too. The rendered manifests are byte-for-byte
+  identical, so nothing changes for an existing `config/default` install.
+- **Status updates of a replicated cluster conflicted at steady state**
+  (#52), each a `Reconciler error` with a growing backoff: 134 in a few
+  hours on AKS. A pass that starts within milliseconds of the last one's
+  status write reads the cluster from the cache before that write reaches
+  it, and its own write then conflicts. The status is now written as a
+  sharded cluster's is: after a change outside the status, the same
+  status goes onto the latest version, also on the pass that fails over
+  after it has recorded `status.fencedMaster`, and a pass that read a
+  status a newer pass has since replaced leaves it alone and looks again
+  in 5 s (2 s while a failover holds the old master's writes), logged at
+  debug level only.
+- **A refused bootstrap left the cluster's phase empty** (#51), and its
+  `Bootstrapped` condition said `RestoreFailed` though no restore ran. A
+  pass the bootstrap holds never reached the code that sets the phase, so
+  it was empty through every bootstrap, and the GUI showed `Unknown`. The
+  phase is now `Provisioning` while the bootstrap waits or restores, and
+  `Error` once it has failed or was refused, with the reason `Refused` on
+  the condition for a refusal. A restore started after the spec is fixed
+  no longer keeps the refusal in `status.bootstrap.error`.
+- **`make deploy` ignored `IMG`** (#63). It set the image `manager`, which
+  no image in `config/manager` is named, and without `kustomize` on the
+  PATH it set none: the manager ran `docker.io/kividb/kividb-operator:0.7.0`
+  whatever `IMG` said. It now sets the image `manager.yaml` names, with the
+  kustomize `make kustomize` installs into `bin/`.
+- **`kubectl apply -k config/default` failed on a cluster without the
+  `kividb-operator-system` namespace**, and so did `make deploy`: nothing
+  created it. `make deploy` now creates it, and `docs/INSTALL.md` says to.
+- **The GUI from `config/gui` could only run in `kividb-operator-system`**
+  (#63). It mounts the agent token Secret from the operator's namespace,
+  so with the operator anywhere else it had no token. `config/gui` is now
+  a kustomization: `kubectl apply -k config/gui`, with its namespace set
+  there or in an overlay. `kubectl apply -f config/gui/` works as before.
+
+## [0.7.1] - 2026-11-12
+
+A patch release of 0.7.0. The default engine is kividb **1.2.1**. Upgrade
+now if you run engine 1.2.1, or will: since 1.2.1 the engine refuses a
+write pause it cannot take at once, and operator 0.7.0 then switched over
+without the pause, so a write the old master acknowledged could be lost
+(#81). 0.7.1 also fences a force-deleted master's last writes before a
+failover (#53), keeps a restore from mixing the snapshot with the earlier
+cluster's append-only file (#58), fixes the images' CVEs (#76), adds an
+OLM bundle for OperatorHub.io, and fixes three install paths.
+
+**Read before upgrading: every cluster restarts, and a master with no
+replica restarts in place.** The default agent image moves to 0.7.1, and
+the default engine to 1.2.1, so every `KividbCluster` that leaves
+`spec.agentImage` or `spec.image` unset gets a rolling restart when the
+operator is upgraded. A master with replicas hands its role to an in-sync
+replica first, as in every rollout. A master with none is deleted and
+restarted on its volume, with no handover:
+
+- **`replicas: 0` (one pod):** the cluster serves nothing until the pod is
+  back.
+- **A sharded cluster with `replicas: 0`:** each shard's master restarts
+  in turn. Its slots are unavailable while it does, and if it is down for
+  longer than the node timeout (5 s by default) with `requireFullCoverage`
+  on (the default), the whole cluster refuses commands until it is back.
+- **Data:** with the append-only file on (the default since 0.7.0) the
+  master reloads everything it acknowledged. With `appendonly: "no"` it
+  comes back with its shutdown snapshot only, and with nothing saved since
+  its last snapshot if that save does not finish within
+  `terminationGracePeriodSeconds`.
+
+Before upgrading, give such clusters or shards at least one replica and
+let it sync, or accept the restart: with the append-only file on, or with
+the shutdown snapshot only. (Turning the append-only file on is a config
+change, so it restarts such a master in place too.) To put the restart off, pin
+both `spec.image: docker.io/kividb/kividb:v1.2.0` and
+`spec.agentImage: docker.io/kividb/kividb-operator-agent:0.7.0` first:
+nothing else in the pod template changes in 0.7.1. The 0.7.0 agent works
+with the 0.7.1 operator, without the agent's fixes: it cuts every pause at
+5 s, which aborts a switchover that needs longer (#81), and its restore
+lacks the #58 fix. Unpin once the cluster has a replica or its
+append-only file.
+
+**Engine 1.2.1 has upgrade notes of its own.** The rollout restarts
+replicas before their master, as 1.2.1 requires (a 1.2.0 replica cannot
+full-sync from a 1.2.1 master that holds a key 1.2.0 cannot read). Read
+the [engine's "Before you upgrade"](https://github.com/kividbio/kividb/releases/tag/v1.2.1)
+first: among others, ACL categories are Redis's from the moment a pod
+runs 1.2.1, `GEORADIUS` is refused on replicas, and there is no going
+back to 1.2.0 once 1.2.1 has saved such a key. Do not change
+`spec.shards` during the rollout: a slot move from a 1.2.0 node loses
+the moved time series' compaction rules.
+
+**The CRD change is additive, and upgrading from 0.7.0 is safe.** The
+`kividbclusters` status gains `pods[].podIP` and `fencedMaster` (`name`,
+`podIP`, `runID`), and new conditions (`Switchover`); nothing is removed
+or renamed, and the other CRDs do not change. **Apply the new
+`kividbclusters` CRD before `helm upgrade`:** Helm does not upgrade it.
+Until it is applied, the API server drops the new fields and failovers do
+not hold the old master's writes (`FailoverUnfenced` Warning). The CRDs
+are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
+"Read before upgrading" first.
+
+### Security
+
+- **The images had golang.org/x/net v0.60.0 (CVE-2026-78661, high;
+  CVE-2026-97045, medium) and an out-of-date Debian 12 base** (#76).
+  golang.org/x/net is now v0.62.0, the other golang.org/x modules are
+  current, the binaries are built with Go 1.26.11, and the images run on
+  `gcr.io/distroless/static-debian13:nonroot` (still no shell, still UID
+  65532). CI and the release workflow scan every image with Trivy and fail
+  on a fixable HIGH or CRITICAL.
+
+### Changed
+
+- **Default engine `docker.io/kividb/kividb:v1.2.1`** (it was `v1.2.0`):
+  in the controller, the CRD, the chart, the GUI, the samples and the docs.
+  See "Read before upgrading" above.
+- Default agent image **`docker.io/kividb/kividb-operator-agent:0.7.1`**.
+  A cluster that leaves `spec.agentImage` unset rolls to it in the same
+  rollout. The switchover and restore fixes below need it.
+- The e2e suite tests kividb 1.2.1 by default.
+
 ### Added
 
 - **An OLM bundle for OperatorHub.io.** `make bundle VERSION=… IMG=…` builds
@@ -16,6 +206,61 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`make deploy` didn't pass `AGENT_IMG`** (#68). It updated the manager
+  image but left the agent sidecar defaulted to the released 0.7.0 image.
+  It now patches `--default-agent-image=$(AGENT_IMG)` into the manager
+  Deployment.
+- **The plain-YAML install and `kubectl apply -k config/default` made the
+  manager Deployment with different selectors (#86).** Applying one over the
+  other failed with `spec.selector: ... field is immutable`.
+  `config/manager/manager.yaml` now selects on `app.kubernetes.io/managed-by`
+  too, as `config/default` does; what `config/default` and the OLM bundle
+  render is unchanged. A Deployment made before this from `config/manager`
+  alone, by the plain-YAML install or `kubectl apply -k config/manager`, has
+  the old selector: delete it once (`kubectl delete deploy -n
+  kividb-operator-system kividb-operator-manager`) before applying the new
+  manifests.
+  (#88, by [SaiPisey2](https://github.com/SaiPisey2))
+- **`docs/INSTALL.md`'s install without kustomize exited 1 (#67).**
+  `kubectl apply -f config/rbac/` applied the RBAC and then failed on
+  `config/rbac/kustomization.yaml`, and on a new cluster the namespace did
+  not exist. The steps now create the namespace and name the RBAC files.
+  (#85, by [SaiPisey2](https://github.com/SaiPisey2))
+- **A switchover no longer hands over without holding writes when the pause
+  could not take hold (#81).** Since kividb 1.2.1 (kividbio/kividb#629),
+  `CLIENT PAUSE ... WRITE` waits up to 5 s for the writes already in progress
+  and refuses, pausing nothing, if one has not finished (a big `FLUSHALL`, a
+  `DEL` of a huge key, a long script). The switchover took that refusal, and
+  a pause that got no answer within the agent's 5 s, for an engine before
+  kividb 1.1: it promoted the target without waiting for it to catch up,
+  and raised `SwitchoverWithoutPause` telling the user to upgrade an engine
+  that was already new. A write the old master acknowledged then could be
+  lost. Now such a switchover is called off (`SwitchoverAborted`) and tried
+  again; a pause that got no answer is lifted, in case it landed. Only an
+  engine that answers that it does not know the command is switched over
+  without the pause: every kividb has it, so any other refusal (`LOADING`,
+  `BUSY`) aborts too. The pause call is given 7 s, past the engine's wait
+  (or `--agent-timeout`, if longer), and the agent is asked to wait 6 s:
+  its exec request takes a `timeoutMs` (capped at 15 s), which the
+  operator sends for the pause only. An agent before this release ignores
+  it and cuts the pause at 5 s, which now aborts the switchover rather than
+  dropping the pause. The engine counts the pause from the request, so it
+  now lasts the call, the catch-up and a margin (17 s), and the old master
+  is a replica before it runs out. Aborted switchovers back off: 30 s,
+  doubling with each abort in a row up to 10 min, and 2 s between the tries
+  for a master pod being deleted; a `Switchover` condition (`False`,
+  `Aborted`) says why and when the next try is, until one goes through.
+  The failover fence (#53) waits for a pause the same way once the old
+  master has answered, and tries again after a refusal: every try is given
+  the whole call, and new ones start for 3 s after the first, so the fence
+  takes at most two pause calls and that window against a live master that
+  cannot pause (17 s with the default `--agent-timeout`, more with a longer
+  one). A pause that got no answer may have landed, so that
+  master is recorded in `status.fencedMaster` and demoted after the
+  promotion like a fenced one. The `Switchover` condition and the count of
+  aborts go away once no switchover is wanted any more, or the master is
+  another pod.
+  (#82, by [lofoneh](https://github.com/lofoneh))
 - **The manager ignored `WATCH_NAMESPACE` and the chart's `watchNamespace`**
   (#61). Only the GUI read it. The manager now watches only the namespaces it
   lists (comma-separated; unset means all), and refuses to start on an invalid
@@ -23,6 +268,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   GUI's RBAC as Roles and RoleBindings in that namespace (see
   `docs/INSTALL.md`). The OLM bundle now also offers the OwnNamespace,
   SingleNamespace and MultiNamespace install modes.
+  (#64, by [SaiPisey2](https://github.com/SaiPisey2))
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install
   could not run `KividbDbOps` operations. After applying it again, restart
@@ -49,6 +295,32 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   what is left of the earlier cluster's files, or part of the snapshot,
   never both, and its retry ends with the snapshot's files only. The
   manual restore in `docs/BACKUP_RESTORE.md` removes the same files.
+- **A force-deleted master's last writes were lost** (#53). Its pod object
+  is gone at once and the operator fails over within the second, but its
+  container runs on until its replicas have left it, acknowledging the
+  writes that come in on connections clients already had to it: 176 lost in
+  the AKS test on engine 1.2.1, 689 to 954 per force-delete on kind. Before
+  promoting a replica, the operator now holds the old master's writes
+  (`CLIENT PAUSE WRITE` through its agent, for the pod's termination grace
+  period -- 10 s at least -- and 5 s more) at the address and engine run
+  `status.pods[]` last recorded for it (`podIP`, new, and `runID`), waits
+  for the replica to catch up with it (5 s at most, less once the old
+  master stops answering), records it in `status.fencedMaster` (new), and
+  once the replica is promoted makes the old master its replica and
+  disconnects its clients, as a switchover does. Should that fail, or the
+  operator restart, every pass holds its writes again and retries, every
+  2 s, until it is done or the engine there is gone (another engine
+  answers, or none does twice in a row); the first failure raises a
+  `FencedMasterNotDemoted` Warning. An address that does not answer is
+  asked again for about 1 s (one that refuses the connection, once); a
+  pause that goes unanswered is sent again for up to 3 s. A failover that
+  goes on without the fence, or before the replica caught up, raises a
+  `FailoverUnfenced` Warning. A failed promotion no longer lifts the old
+  master's pause: it may have gone through. The agent's preStop hook looks at a stopping master every 10 ms
+  instead of 250 ms.
+  `hack/e2e/10-force-delete-fence.sh` force-deletes the master under load
+  and counts the writes lost (skipped in CI: `SKIP_FENCE=1`).
+  (#77, by [lofoneh](https://github.com/lofoneh))
 
 ## [0.7.0] - 2026-11-04
 
@@ -1083,7 +1355,8 @@ was lost in any of them.
 - Helm chart (`charts/kividb-operator`) and kustomize bases
   (`config/`) for installation.
 
-[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.7.0...master
+[Unreleased]: https://github.com/kividbio/kividb-operator/compare/v0.7.1...master
+[0.7.1]: https://github.com/kividbio/kividb-operator/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/kividbio/kividb-operator/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/kividbio/kividb-operator/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/kividbio/kividb-operator/compare/v0.5.2...v0.6.0

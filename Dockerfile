@@ -7,6 +7,11 @@
 
 FROM golang:1.26-bookworm AS builder
 WORKDIR /workspace
+# The golang image sets GOTOOLCHAIN=local. With auto, the go command
+# downloads the `toolchain` go.mod names (checked against the Go
+# checksum database) when this image's Go is older, so a security patch
+# release reaches the binaries before the golang image is rebuilt.
+ENV GOTOOLCHAIN=auto
 
 # Cache module downloads separately from source changes.
 COPY go.mod go.mod
@@ -25,7 +30,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o /manager .
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 WORKDIR /
 COPY --from=builder /manager /manager
 USER 65532:65532
