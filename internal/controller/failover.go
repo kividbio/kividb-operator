@@ -223,22 +223,6 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 					currentMasterName, mv.status.ReplicationOffset, previous[currentMasterName].ReplicationOffset, ahead, aheadOffset)
 				needsFailover = true
 				behindOf = ahead
-			} else if cameBackUnsynced && !aofHoldsAckedWrites(mv.status) && mv.status.KeyCountKnown {
-				// Back from a wait when no replica was in sync with it,
-				// without the append-only file holding every write it
-				// acknowledged: what it holds is no longer known to cover
-				// what the replicas do. One holding more keys takes over,
-				// rather than be resynced from it. (With that guarantee,
-				// what a replica holds is a part of its history.)
-				if ahead, keys := mostKeys(views, currentMasterName); ahead != "" && keys > mv.status.KeyCount {
-					log.Info("the master came back holding fewer keys than a replica; failing over to it", "pod", currentMasterName,
-						"masterKeys", mv.status.KeyCount, "replica", ahead, "replicaKeys", keys)
-					r.event(c, corev1.EventTypeWarning, "MasterRestartedBehind",
-						"%s came back holding %d keys, fewer than %s (%d), with no replica in sync with it and nothing saying its append-only file holds every write it acknowledged; failing over to %s rather than resync it from %s",
-						currentMasterName, mv.status.KeyCount, ahead, keys, ahead, currentMasterName)
-					needsFailover = true
-					behindOf = ahead
-				}
 			}
 		}
 	}
@@ -849,21 +833,6 @@ func failoverPool(c *kividbv1alpha1.KividbCluster, views map[string]*podView, ma
 		return withoutEmptied(views)
 	}
 	return views
-}
-
-// mostKeys returns the ready replica of views but exclude that reports
-// the most keys, and how many; ties go by name.
-func mostKeys(views map[string]*podView, exclude string) (string, int64) {
-	best, most := "", int64(-1)
-	for name, v := range views {
-		if name == exclude || !v.ready || v.status == nil || v.status.Role != agentapi.RoleReplica || !v.status.KeyCountKnown {
-			continue
-		}
-		if k := v.status.KeyCount; k > most || (k == most && name < best) {
-			best, most = name, k
-		}
-	}
-	return best, most
 }
 
 // onlySynced returns the views of the pods marked in synced.

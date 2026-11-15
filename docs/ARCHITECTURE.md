@@ -213,9 +213,8 @@ does, in order:
    `kividb.io/allow-unsynced-failover`, which lets the capped wait run
    its course (#75). A master restarting in place is held the same way
    past `unhealthyThresholdSeconds`. Not with the append-only file off: it
-   comes back with only its last save. Back from such a wait without the
-   file holding every write it acknowledged, it is failed away from if a
-   replica holds more keys. A master that still answers is fenced, and a
+   comes back with only its last save. Back from such a wait, it is kept.
+   A master that still answers is fenced, and a
    replica that was not in sync is promoted only once it has caught up
    with it; none near enough (within 1 MiB, link up), or none caught up,
    holds the failover too, with the master's writes let go. The cap is what covers a volume that

@@ -94,9 +94,8 @@ replica first, or upgrade in a maintenance window if persistence is off.
   catch up within 5 s the pause is lifted; either way no one is promoted
   and the master keeps serving. With the append-only file off there is
   nothing on the master's volume to wait for, and the failover goes ahead
-  as before. A master back from the wait without its append-only file
-  holding every write it acknowledged (an engine before 1.2.0) is failed
-  away from if a replica holds more keys. `kividb.io/allow-unsynced-failover:
+  as before. A master back from the wait is kept.
+  `kividb.io/allow-unsynced-failover:
   "true"` on the cluster lets the failover go ahead (`FailoverForced`
   Warning; for a master whose pod is gone, once `restartWaitSeconds` have
   passed), losing the writes since the replica was last in sync. The

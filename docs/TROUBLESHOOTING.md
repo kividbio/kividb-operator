@@ -151,9 +151,8 @@ The master does not answer, its pod gone or restarting in place, and no
 Ready replica was in sync with it when it went: one in the middle of a
 full resync, say, or cut off from it. The master's volume may hold
 acknowledged writes that no replica has, so the failover waits for it to
-come back, however long that takes, and then keeps it, unless it holds
-fewer keys than a replica and nothing says its append-only file holds
-every write it acknowledged. The Ready condition's message says the same,
+come back, however long that takes, and then keeps it. The Ready
+condition's message says the same,
 after the event has expired. Check why it is not back:
 `kubectl describe pod` shows a node that is not Ready, a volume that
 cannot attach (a Multi-Attach error), or the kividb container's restarts

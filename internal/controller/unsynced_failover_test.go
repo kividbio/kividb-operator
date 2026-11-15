@@ -345,17 +345,17 @@ func TestFailover_DoesNotWaitOnWithTheAppendOnlyFileOff(t *testing.T) {
 }
 
 // The master comes back after the wait with fewer keys than a replica
-// holds, and without the append-only file holding every write it
-// acknowledged (an engine before 1.2.0 acknowledges a write before it is
-// in the file): the replica that holds the most takes over, rather than be
-// resynced from it. With that guarantee the master is kept: what a replica
-// holds is a part of its history.
-func TestFailover_ComparesKeysWhenTheMasterComesBackFromTheWait(t *testing.T) {
+// holds: it is kept, with or without the append-only file holding every
+// write it acknowledged (an engine before 1.2.0 acknowledges a write before
+// it is in the file). The replica was behind it by definition, and still
+// holds every key deleted or expired on the master since it fell behind, so
+// holding more keys says nothing about holding more of its writes.
+func TestFailover_KeepsTheMasterThatComesBackFromTheWait(t *testing.T) {
 	for _, tc := range []struct {
-		name, version, want string
+		name, version string
 	}{
-		{"engine 1.1: no such guarantee", "1.1.0", "c1-1"},
-		{"engine 1.2: acknowledged once in the file", "1.2.0", "c1-0"},
+		{"engine 1.1: acknowledged before the file", "1.1.0"},
+		{"engine 1.2: acknowledged once in the file", "1.2.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, now := newGoneMasterHarness(t)
@@ -365,10 +365,6 @@ func TestFailover_ComparesKeysWhenTheMasterComesBackFromTheWait(t *testing.T) {
 			st := backOnItsVolume(2) // fewer keys than the replicas' 5
 			st.EngineVersion = tc.version
 			h.addPod(testPod{name: "c1-0", ip: "10.0.0.9", label: "master", ready: true, uid: "new", agent: st})
-			if tc.want != "c1-0" {
-				h.assertFailoverTo(tc.want)
-				return
-			}
 			if m, failover := h.reconcile(); m != "c1-0" || failover {
 				t.Fatalf("master=%q failover=%v, want c1-0 kept", m, failover)
 			}

@@ -440,10 +440,7 @@ Ready condition, whose message names the annotation below, as events
 expire after an hour). A master that restarts in place, as the same pod
 (its engine killed for its memory, say), is waited for the same way:
 `unhealthyThresholdSeconds` does not end the wait, as it reloads those
-writes from its volume. When the master is back it is kept, unless it
-comes back with fewer keys than a replica holds and nothing says its
-append-only file holds every write it acknowledged (an engine before
-1.2.0): that replica takes over then (`MasterRestartedBehind`).
+writes from its volume. When the master is back it is kept.
 
 A master whose engine still answers is not waited for: its writes are
 held, and a replica that was not in sync is promoted only once it has
