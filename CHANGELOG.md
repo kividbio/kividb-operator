@@ -261,6 +261,14 @@ are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
   aborts go away once no switchover is wanted any more, or the master is
   another pod.
   (#82, by [lofoneh](https://github.com/lofoneh))
+- **The manager ignored `WATCH_NAMESPACE` and the chart's `watchNamespace`**
+  (#61). Only the GUI read it. The manager now watches only the namespaces it
+  lists (comma-separated; unset means all), and refuses to start on an invalid
+  name. With `watchNamespace` set, the chart renders the manager's and the
+  GUI's RBAC as Roles and RoleBindings in that namespace (see
+  `docs/INSTALL.md`). The OLM bundle now also offers the OwnNamespace,
+  SingleNamespace and MultiNamespace install modes.
+  (#64, by [SaiPisey2](https://github.com/SaiPisey2))
 - **`kubectl apply -k config/default` installed no `KividbDbOps` CRD.**
   `config/crd/kustomization.yaml` did not list it, so the documented install
   could not run `KividbDbOps` operations. After applying it again, restart
