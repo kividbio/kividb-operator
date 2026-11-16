@@ -7,7 +7,11 @@ kind: RoleBinding
 kind: ClusterRoleBinding
 {{- end }}
 metadata:
-  name: {{ include "kividb-operator.fullname" . }}-manager-rolebinding
+  # Named after the role it binds: roleRef cannot change on an existing
+  # binding, so when the role's name changes (it took the release's name,
+  # #97), helm upgrade creates a new binding and deletes the old one,
+  # instead of failing to patch it.
+  name: {{ include "kividb-operator.clusterRoleName" . }}
   {{- if .Values.watchNamespace }}
   namespace: {{ .Values.watchNamespace }}
   {{- end }}
