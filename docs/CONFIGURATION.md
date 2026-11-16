@@ -83,8 +83,11 @@ last heard from it). After 2 minutes of waiting on the same pods the
 condition turns `False` with the same reason, and a `RolloutWaiting`
 Warning Event and a log line say the same, again every 10 minutes while
 it lasts. Nothing else changes: the rollout still waits, and `Ready`
-still describes the cluster's service. The condition goes once every pod
-is on the current template. Changes to a `KividbAclConfig` are
+still describes the cluster's service. `False`, reason `WouldLoseData`:
+it holds a shard master that has no replica to hand over to while its
+append-only file is off, until someone acts (see
+[Sharded clusters](#sharded-clusters-shards)). The condition goes once
+every pod is on the current template. Changes to a `KividbAclConfig` are
 applied without a restart unless the `default` user's password changed —
 see [Changing the default user's password](#changing-the-default-users-password)
 and [TROUBLESHOOTING.md](TROUBLESHOOTING.md#acl--authentication-errors-noauth-wrongpass).
@@ -731,8 +734,25 @@ spec:
   its `preStop` hook holds the engine while the replica takes over (see
   [Stopping a master](#switchovers-and-stopping-a-master)). A shard with
   `replicas: 0` has no one to hand over to: its master restarts in place,
-  and its slots are down until it is back. A pod that has been unready
-  for 30 s on an old template is replaced straight away.
+  and its slots are down until it is back (a `RestartingInPlace` Warning
+  Event says so first). With the
+  [append-only file](#persistence-the-append-only-file) off (`appendonly
+  no` in the `KividbConfig`, or the engine reporting it off), the master
+  would keep only what its save at shutdown writes in time, so the
+  rollout holds it instead: `RolloutProgressing` turns `False`, reason
+  `WouldLoseData`, with a `RolloutHeld` Warning Event. Give the cluster a
+  replica, turn the file on (`appendonly yes` in the `KividbConfig`, and
+  `CONFIG SET appendonly yes` on the running master), or annotate the
+  cluster to restart such masters anyway, each with a
+  `RestartingWithoutPersistence` Warning; the operator removes the
+  annotation once no pod is left on an old template:
+
+  ```bash
+  kubectl annotate kividbcluster my-cluster kividb.io/allow-restart-without-persistence=true
+  ```
+
+  A pod that has been unready for 30 s on an old template is replaced
+  straight away.
   - **A force-killed master that is back within the node timeout** (5 s
     by default) keeps its slots: the engine never marked it failed, so no
     replica took over. With the [append-only file](#persistence-the-append-only-file)

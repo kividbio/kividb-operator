@@ -442,6 +442,15 @@ const AllowEmptyFailoverAnnotation = "kividb.io/allow-empty-failover"
 // later one.
 const AllowUnreadFailoverAnnotation = "kividb.io/allow-unread-failover"
 
+// AllowRestartWithoutPersistenceAnnotation, set to "true" on a sharded
+// KividbCluster, lets a rollout restart a shard master that has no replica
+// to hand over to while its append-only file is off, losing the data it
+// holds. Without it the rollout holds such a master (RolloutProgressing
+// False, WouldLoseData); see reconcileShardedRollout. The operator removes
+// it once no pod is left on an outdated template, so it never lets a later
+// rollout through.
+const AllowRestartWithoutPersistenceAnnotation = "kividb.io/allow-restart-without-persistence"
+
 // ShardPromoteAnnotation records, on a sharded KividbCluster, the last
 // replica someone asked to take over its shard outside the operator (the
 // console's Promote): "<pod> <RFC 3339 time>". The operator reports the

@@ -10,6 +10,7 @@ import (
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -25,7 +26,11 @@ import (
 // until the replica has caught up), and the old master is restarted as a
 // replica afterwards. A shard with no replicas has no one to hand over
 // to, and its master is restarted in place: its slots are down until it
-// is back.
+// is back (a RestartingInPlace Warning says so first). With its
+// append-only file off, it keeps only what its save at shutdown writes in
+// time, so the rollout holds it instead (#90), until the cluster gets a
+// replica, the file is turned on, or
+// kividb.io/allow-restart-without-persistence says to go ahead.
 
 // A handover can fail: from engine 1.2 the master pauses its writes for up
 // to 10 s, and the replica gives the failover up if it has not caught up
@@ -260,8 +265,10 @@ func (r *KividbClusterReconciler) requestStepDown(ctx context.Context, pod *core
 
 // reconcileShardedRollout moves the pods onto their shard StatefulSet's
 // current template (OnDelete), one at a time across the whole cluster.
-// It reports whether it replaced a pod or asked for a step-down.
-func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c *kividbv1alpha1.KividbCluster, pods []*shardPod) bool {
+// It reports whether it replaced a pod or asked for a step-down. read is
+// the status this pass started from, and kdbConfig the cluster's
+// KividbConfig, if any.
+func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus, pods []*shardPod, kdbConfig *kividbv1alpha1.KividbConfig) bool {
 	log := logf.FromContext(ctx)
 
 	targets := map[int32]string{}
@@ -290,6 +297,9 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	}
 	if len(outdated) == 0 {
 		r.rolloutDone(c)
+		if c.Annotations[kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation] != "" {
+			r.clearRestartWithoutPersistence(ctx, c, read)
+		}
 		return false
 	}
 
@@ -370,6 +380,21 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		r.rolloutProgressed(c, fmt.Sprintf("asked shard %d's master %s to hand over, to replace it next", next.shard, next.pod.Name))
 		return r.reconcileShardStepDown(ctx, c, pods)
 	}
+	if isMaster(next) {
+		// No replica to hand over to: restarted in place.
+		if why := withoutPersistence(next, kdbConfig); why == "" {
+			r.event(c, corev1.EventTypeWarning, "RestartingInPlace",
+				"restarting shard %d's master %s in place to apply the updated pod template: it has no replica to hand over to, so its slots are unavailable until it is back", next.shard, next.pod.Name)
+		} else if c.Annotations[kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation] != "true" {
+			r.rolloutHeld(c, fmt.Sprintf("the rollout holds shard %d's master %s: it has no replica to hand over to, and %s, so restarted in place to apply the updated pod template it keeps only what its save at shutdown writes in time. Give the cluster a replica (spec.replicas), turn the file on (appendonly yes in the KividbConfig, and CONFIG SET appendonly yes on the running master), or annotate the cluster %s=true to restart it anyway",
+				next.shard, next.pod.Name, why, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation))
+			return false
+		} else {
+			r.event(c, corev1.EventTypeWarning, "RestartingWithoutPersistence",
+				"restarting shard %d's master %s in place to apply the updated pod template, with %s (%s is set): it keeps only what its save at shutdown writes in time, and its slots are unavailable until it is back",
+				next.shard, next.pod.Name, why, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+		}
+	}
 	log.Info("rollout: replacing pod to apply the updated pod template", "pod", next.pod.Name, "remaining", len(outdated)-1)
 	if err := r.Delete(ctx, next.pod); err != nil && !apierrors.IsNotFound(err) {
 		log.Error(err, "rollout: deleting pod", "pod", next.pod.Name)
@@ -378,4 +403,41 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	r.event(c, corev1.EventTypeNormal, "RollingUpdate", "replacing %s to apply the updated pod template (%d more to go)", next.pod.Name, len(outdated)-1)
 	r.rolloutProgressed(c, fmt.Sprintf("replacing %s (%d more to go)", next.pod.Name, len(outdated)-1))
 	return true
+}
+
+// withoutPersistence says why shard master p would keep only what its save
+// at shutdown writes in time if restarted, or "" if its data survives: the
+// KividbConfig turns the append-only file off (the replacement runs
+// without it), or its engine reports the file off now. An agent from
+// before 0.7.0 reports neither that nor the key count (KeyCountKnown), so
+// what it does not say is not taken for a file that is off.
+func withoutPersistence(p *shardPod, kdbConfig *kividbv1alpha1.KividbConfig) string {
+	if appendOnlyDisabled(kdbConfig) {
+		return fmt.Sprintf("KividbConfig %s sets appendonly %q", kdbConfig.Name, appendOnlySetting(kdbConfig))
+	}
+	if st := p.status; st != nil && st.KeyCountKnown && !st.AofEnabled {
+		return "its engine reports its append-only file off"
+	}
+	return ""
+}
+
+// clearRestartWithoutPersistence removes
+// AllowRestartWithoutPersistenceAnnotation from c once no pod is left on an
+// outdated template, so that it does not let a later rollout through. As
+// clearUnreadFailoverOverride does: the patch goes through a copy, and c
+// takes the new resourceVersion only if the stored status is still read.
+func (r *KividbClusterReconciler) clearRestartWithoutPersistence(ctx context.Context, c *kividbv1alpha1.KividbCluster, read *kividbv1alpha1.KividbClusterStatus) {
+	stored := c.DeepCopy()
+	patch := client.MergeFrom(stored.DeepCopy())
+	delete(stored.Annotations, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+	if err := r.Patch(ctx, stored, patch); err != nil {
+		if !apierrors.IsNotFound(err) {
+			logf.FromContext(ctx).Error(err, "removing the annotation", "annotation", kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+		}
+		return
+	}
+	delete(c.Annotations, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+	if equality.Semantic.DeepEqual(stored.Status, *read) {
+		c.ResourceVersion = stored.ResourceVersion
+	}
 }

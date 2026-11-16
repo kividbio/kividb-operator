@@ -217,6 +217,28 @@ after 2 minutes a `RolloutWaiting` Warning Event says the same:
 - **first full sync not finished**: a large dataset is still loading;
   wait.
 
+## A rollout holds a shard master (`RolloutHeld`, `WouldLoseData`)
+
+A sharded cluster with `replicas: 0` and the append-only file off: a
+shard master has no replica to hand over to, so the rollout would restart
+it in place, and it would keep only what its save at shutdown writes in
+time. The rollout holds it instead, and the `RolloutProgressing`
+condition says why. To go on:
+
+- give the cluster a replica (`spec.replicas: 1`): once it is in sync,
+  the master hands over and nothing is lost;
+- or turn the file on: `appendonly yes` in the `KividbConfig`, and
+  `CONFIG SET appendonly yes` on the running master, so that it is on
+  before the restart;
+- or, if the data can be lost, let the rollout restart the masters:
+
+  ```bash
+  kubectl annotate kividbcluster my-cluster kividb.io/allow-restart-without-persistence=true
+  ```
+
+  Each restart raises a `RestartingWithoutPersistence` Warning, and the
+  operator removes the annotation once the rollout is done.
+
 ## ACL / authentication errors (`NOAUTH`, `WRONGPASS`)
 
 The operator renders the referenced `KividbAclConfig` into the
