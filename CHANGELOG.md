@@ -19,6 +19,12 @@ restarts its master in place: its slots are unavailable while it does,
 and with persistence off its data is lost. Scale such a shard to one
 replica first, or upgrade in a maintenance window if persistence is off.
 
+**Helm releases not named `kividb-operator`:** the manager's ClusterRole
+(a Role with `watchNamespace`) is now named after the release, and its
+binding after the role (#97). `helm upgrade` creates both and then deletes
+the old ones. A release named `kividb-operator`, as the docs install it,
+keeps `kividb-operator-manager-role`; only its binding is renamed.
+
 ### Added
 
 - **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
@@ -27,6 +33,13 @@ replica first, or upgrade in a maintenance window if persistence is off.
 
 ### Fixed
 
+- **Two releases of the chart could not share a cluster** (#97): both
+  claimed the ClusterRole `kividb-operator-manager-role`, so the second
+  failed to install. The manager's role is now named after the release
+  (`<release>-kividb-operator-manager-role`, still
+  `kividb-operator-manager-role` for a release named `kividb-operator`),
+  and its binding after the role, so that `helm upgrade` replaces the
+  binding instead of failing on its `roleRef`, which cannot change.
 - **A restarted node of a sharded cluster showed as `?` in `CLUSTER
   SLOTS`** (#57), on itself and on its peers, for about six seconds: it
   started with no hostname, and the agent set one only later. A client

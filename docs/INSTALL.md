@@ -67,6 +67,10 @@ The GUI keeps one cluster-wide permission, `get`/`list` on StorageClasses,
 for its create form: StorageClasses are cluster-scoped, so a Role cannot
 grant them.
 
+Each release names its roles and bindings after itself, so several
+releases can run side by side, one per team namespace, each with its own
+`watchNamespace`; uninstalling one leaves the others' permissions alone.
+
 KividbClusters in other namespaces are ignored. If you restrict an existing
 install, the clusters outside `team-a` keep running but are no longer
 reconciled: no failover, no backups, no spec changes. Deleting one still
