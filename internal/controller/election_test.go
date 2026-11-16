@@ -181,13 +181,18 @@ func TestFailover_SaysHowLongItHasBeenHeldAndWhatEndsIt(t *testing.T) {
 	h.agents.status["10.0.0.2"].ReplicationOffset = 1000
 	h.agents.status["10.0.0.3"].ReplicationOffset = 1200
 	h.agents.roleUnanswered = map[string]bool{"10.0.0.2": true}
-	if _, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods()); err == nil {
+	start := now
+	_, _, _, first := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods())
+	if first == nil {
 		t.Fatal("pass 1: the failover went ahead, want it held")
 	}
 	now = now.Add(95 * time.Second)
+	// The Ready condition (this error) says since when, in the same words
+	// on every pass: the status is written on each, and a write starts the
+	// next pass. The event says for how long.
 	_, _, _, err := h.r.reconcileRoles(context.Background(), h.cluster, h.cluster.Status.DeepCopy(), h.pods())
-	if err == nil || !strings.Contains(err.Error(), "1m35s") {
-		t.Errorf("pass 2: error %v, want the failover held, for 1m35s", err)
+	if err == nil || err.Error() != first.Error() || !strings.Contains(err.Error(), start.UTC().Format(time.RFC3339)) {
+		t.Errorf("pass 2: error %v, want the failover held since %s, in the same words as on pass 1 (%v)", err, start.UTC().Format(time.RFC3339), first)
 	}
 	e := eventsWith(rec, "FailoverBlocked")
 	if len(e) != 2 {

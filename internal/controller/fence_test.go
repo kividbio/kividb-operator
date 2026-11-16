@@ -168,15 +168,24 @@ func TestFailover_KeepsWaitingForTheCatchUpPastFenceTimeout(t *testing.T) {
 	}
 }
 
-// A replica that has not caught up when the wait ends is promoted all the
-// same, and the operator says so.
-func TestFailover_WarnsWhenItPromotesAReplicaThatHasNotCaughtUp(t *testing.T) {
+// A replica that has not caught up when the wait ends is not promoted, in
+// sync or not (#75): the pause is lifted, and the master keeps serving if it
+// can. kividb.io/allow-unsynced-failover promotes it, and the operator says
+// what that loses.
+func TestFailover_WarnsWhenTheAnnotationPromotesAReplicaThatHasNotCaughtUp(t *testing.T) {
 	shortSwitchoverWaits(t)
 	h := newFenceHarness(t)
 	rec := h.recordEvents()
 	h.agents.status["10.0.0.1"] = masterRun(120, "stream-a", "run-0")
-	// Neither catches up: c1-1, the one that holds the most, is promoted (#78).
+	// Neither catches up: c1-1, the one that holds the most, is picked (#78).
 	h.agents.catchUp = map[string]int{"10.0.0.2": -1, "10.0.0.3": -1}
+	h.heldErr()
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "exec 10.0.0.1 CLIENT UNPAUSE")
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("events %v, want none: nothing was promoted", e)
+	}
+
+	h.annotate(kividbv1alpha1.AllowUnsyncedFailoverAnnotation, "true")
 	h.assertFailoverTo("c1-1")
 	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 || !strings.Contains(e[0], "caught up") {
 		t.Errorf("events %v, want one FailoverUnfenced saying c1-1 had not caught up", e)
@@ -185,20 +194,27 @@ func TestFailover_WarnsWhenItPromotesAReplicaThatHasNotCaughtUp(t *testing.T) {
 
 // The fenced master stops answering while the replica catches up (its
 // container stopped): it takes no more writes, so there is nothing more to
-// wait for.
+// wait for. The replica has not caught up, so no one is promoted on that
+// pass (#75); the next finds the master not answering, and goes on.
 func TestFailover_StopsWaitingForTheCatchUpWhenTheOldMasterIsGone(t *testing.T) {
 	h := newFenceHarness(t)
+	h.noRestartWait() // the old master is gone for good here
 	rec := h.recordEvents()
 	h.agents.status["10.0.0.1"] = masterRun(120, "stream-a", "run-0")
 	h.agents.catchUp = map[string]int{"10.0.0.2": -1}
 	h.agents.goneAfterPause = map[string]bool{"10.0.0.1": true}
 	start := time.Now()
-	h.assertFailoverTo("c1-1")
+	h.heldErr()
 	if took := time.Since(start); took >= switchoverCatchUpTimeout/2 {
-		t.Errorf("the failover took %s, want it to stop waiting once the old master was gone", took)
+		t.Errorf("the pass took %s, want it to stop waiting once the old master was gone", took)
 	}
-	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 || !strings.Contains(e[0], "caught up") {
-		t.Errorf("events %v, want one FailoverUnfenced saying c1-1 had not caught up", e)
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) > 0 {
+		t.Errorf("events %v, want none: nothing was promoted", e)
+	}
+
+	h.assertFailoverTo("c1-1")
+	if e := eventsWith(rec, "FailoverUnfenced"); len(e) != 1 || !strings.Contains(e[0], "no answer") {
+		t.Errorf("events %v, want one FailoverUnfenced saying the old master did not answer", e)
 	}
 }
 

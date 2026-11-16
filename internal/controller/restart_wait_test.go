@@ -74,6 +74,19 @@ func TestFailover_WaitsForAMasterWhosePodIsGone(t *testing.T) {
 	}
 }
 
+// The Ready condition says since when it is waited for, in the same words
+// on every pass: the status is written on each, and a write starts the
+// next pass.
+func TestFailover_TheWaitForTheMasterSaysTheSameOnEveryPass(t *testing.T) {
+	h, now := newGoneMasterHarness(t)
+	start := *now
+	first := h.heldErr()
+	*now = now.Add(5 * time.Second)
+	if err := h.heldErr(); err.Error() != first.Error() || !strings.Contains(err.Error(), start.UTC().Format(time.RFC3339)) {
+		t.Errorf("5 s later %q, want the same words as before (%q), with the time it began", err, first)
+	}
+}
+
 // It comes back holding at least the keys its replicas hold, with the AOF
 // acknowledging only what is in the file: it stays the master, as a master
 // that restarted in place does (#42), and the replicas follow it.

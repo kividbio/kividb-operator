@@ -145,6 +145,38 @@ kubectl annotate kividbcluster my-cluster kividb.io/allow-unread-failover=true
 
 The operator removes the annotation once the failover has gone through.
 
+## Failover waiting for a master no replica was in sync with (`FailoverBlocked`, `WaitingForMaster`)
+
+The master does not answer, its pod gone or restarting in place, and no
+Ready replica was in sync with it when it went: one in the middle of a
+full resync, say, or cut off from it. The master's volume may hold
+acknowledged writes that no replica has, so the failover waits for it to
+come back, however long that takes, and then keeps it. The Ready
+condition's message says the same,
+after the event has expired. Check why it is not back:
+`kubectl describe pod` shows a node that is not Ready, a volume that
+cannot attach (a Multi-Attach error), or the kividb container's restarts
+and last state (an OOM kill: raise `spec.resources.limits.memory`). If the
+master's node or volume is gone for good, or losing the writes it
+acknowledged since the replica was last in sync is acceptable:
+
+```bash
+kubectl annotate kividbcluster my-cluster kividb.io/allow-unsynced-failover=true
+```
+
+The failover then goes ahead (a `FailoverForced` Warning; for a master
+whose pod is gone, once `failover.restartWaitSeconds` have passed), and the
+operator removes the annotation.
+
+With `WaitingForReplica` instead, the master still answers, but no
+replica is near it (within 1 MiB, its link up), or the one picked did not
+catch up within 5 s, whether or not it was in sync when the master became
+unavailable. The master keeps serving; its writes are held for
+a catch-up only once a replica is within 1 MiB of it. Watch the replica's
+sync (`INFO replication` on it: `master_link_status`,
+`master_sync_in_progress`), or find why its link is down. The same
+annotation lets the failover go ahead.
+
 ## Failover without a fence (`FailoverUnfenced`)
 
 A failover went ahead without first holding the old master's writes, or
@@ -170,8 +202,9 @@ event says why:
   operator.
 - **No pause within 3 s**, or **the engine refused `CLIENT PAUSE WRITE`**
   (kividb before 1.1).
-- **Promoting a replica before it caught up**: it was still behind after
-  5 s, or the old master stopped answering first.
+- **Promoting a replica before it caught up**, with
+  `kividb.io/allow-unsynced-failover` set: it was still behind after 5 s,
+  or the old master stopped answering first.
 
 A `FencedMasterNotDemoted` Warning means the old master was held but could
 not yet be made the new master's replica. Its writes stay held, and the

@@ -207,7 +207,19 @@ does, in order:
    at most from when it was found gone (`FailoverWait`): back on its
    volume in time, it goes through step 4's comparison instead. Not when
    its replacement pod is unschedulable, or nothing (no address, no
-   engine run) was recorded for it. The cap is what covers a volume that
+   engine run) was recorded for it. When no Ready replica was in sync
+   with it, neither of those ends the wait, nor does the cap
+   (`FailoverBlocked`): only its return, or
+   `kividb.io/allow-unsynced-failover`, which lets the capped wait run
+   its course (#75). A master restarting in place is held the same way
+   past `unhealthyThresholdSeconds`. Not with the append-only file off: it
+   comes back with only its last save. Back from such a wait, it is kept.
+   A master that still answers is fenced, and a replica is promoted only
+   once it has caught up with it, marked in sync or not: that mark is not
+   read again while the master is unready, and the replica's link may
+   have broken since. None near enough (within 1 MiB, link up), or none
+   caught up while the pause held, holds the failover too, with the
+   master's writes let go. The cap is what covers a volume that
    cannot attach yet (on AKS or EBS the replacement schedules on another
    node in the zone, then sits in `ContainerCreating` with a Multi-Attach
    error, never unschedulable); it is checked on each pass, so it can be
@@ -238,8 +250,8 @@ does, in order:
    given the whole call, for 3 s after the first (`fenceRetryTimeout`). If
    none got through, the master is still recorded and demoted below when
    any try went unanswered: it may have landed. A failover that
-   goes on without the fence, or before the candidate caught up, raises
-   `FailoverUnfenced`. Record the fenced master in
+   goes on without the fence, or (with `kividb.io/allow-unsynced-failover`)
+   before the candidate caught up, raises `FailoverUnfenced`. Record the fenced master in
    `status.fencedMaster`, call `POST /promote` on the candidate (a
    failed call leaves the old master paused: it may have gone through),
    move the `kividb.io/role` label to it, then `POST /replicaof` on the
