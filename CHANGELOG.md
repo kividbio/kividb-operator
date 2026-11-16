@@ -88,8 +88,10 @@ replica first, or upgrade in a maintenance window if persistence is off.
   `unhealthyThresholdSeconds` for a master restarting in place ends that
   wait; the Ready condition's message names the annotation below, as the
   event expires. A master whose engine still answers is fenced, and a
-  replica that was not in sync is promoted only once it has caught up
-  with it: if none is near enough (within 1 MiB, its link up), the
+  replica, in sync or not, is promoted only once it has caught up with
+  it (a failover no longer promotes one that has not, with a
+  `FailoverUnfenced` Warning, unless the annotation below is set): if
+  none is near enough (within 1 MiB, its link up), the
   master's writes are not held at all, and if the one picked does not
   catch up within 5 s the pause is lifted; either way no one is promoted
   and the master keeps serving. With the append-only file off there is

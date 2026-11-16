@@ -168,9 +168,10 @@ The failover then goes ahead (a `FailoverForced` Warning; for a master
 whose pod is gone, once `failover.restartWaitSeconds` have passed), and the
 operator removes the annotation.
 
-With `WaitingForReplica` instead, the master still answers, but the
-replica picked was not in sync with it and is too far behind it, or did
-not catch up within 5 s. The master keeps serving; its writes are held for
+With `WaitingForReplica` instead, the master still answers, but no
+replica is near it (within 1 MiB, its link up), or the one picked did not
+catch up within 5 s, whether or not it was in sync when the master became
+unavailable. The master keeps serving; its writes are held for
 a catch-up only once a replica is within 1 MiB of it. Watch the replica's
 sync (`INFO replication` on it: `master_link_status`,
 `master_sync_in_progress`), or find why its link is down. The same
@@ -201,8 +202,9 @@ event says why:
   operator.
 - **No pause within 3 s**, or **the engine refused `CLIENT PAUSE WRITE`**
   (kividb before 1.1).
-- **Promoting a replica before it caught up**: it was still behind after
-  5 s, or the old master stopped answering first.
+- **Promoting a replica before it caught up**, with
+  `kividb.io/allow-unsynced-failover` set: it was still behind after 5 s,
+  or the old master stopped answering first.
 
 A `FencedMasterNotDemoted` Warning means the old master was held but could
 not yet be made the new master's replica. Its writes stay held, and the

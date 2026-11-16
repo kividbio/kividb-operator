@@ -443,8 +443,9 @@ expire after an hour). A master that restarts in place, as the same pod
 writes from its volume. When the master is back it is kept.
 
 A master whose engine still answers is not waited for: its writes are
-held, and a replica that was not in sync is promoted only once it has
-caught up with it. If no replica is near enough to (none has its link up
+held, and a replica is promoted only once it has caught up with it,
+whether or not it was in sync: that is not read again while the master is
+unready, and the replica's link may have broken since. If no replica is near enough to (none has its link up
 within 1 MiB of the master's offset), its writes are not held at all; if
 the one picked does not catch up within the 5 s the failover waits, the
 pause is lifted. Either way no one is promoted (a `FailoverBlocked`
@@ -532,8 +533,9 @@ held: it acknowledges writes until it is demoted. A force-deleted pod's replacem
 paused, whose data stops at the fence; it rejoins as a replica. A
 failover that goes on without the fence -- nothing answers, the engine
 refuses the pause, or no address is recorded (a `kividbclusters` CRD
-from before `podIP`, which Helm does not upgrade) -- or before the
-replica caught up raises a `FailoverUnfenced` Warning. `min-replicas-to-write` /
+from before `podIP`, which Helm does not upgrade) -- or, with
+`kividb.io/allow-unsynced-failover`, before the replica caught up raises a
+`FailoverUnfenced` Warning. `min-replicas-to-write` /
 `min-replicas-max-lag` narrow this window: a master refuses writes
 (`NOREPLICAS`) unless that many replicas acknowledged within the lag. The
 operator does not set them in a replicated cluster (it does in a sharded

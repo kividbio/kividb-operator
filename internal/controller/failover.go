@@ -287,23 +287,27 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 		heldOld := ""
 		if needsFailover && behindOf == "" {
 			last := previous[currentMasterName]
-			// No replica was in sync with the old master, and nothing lets
-			// one that has not caught up with it be promoted (#75). If it
-			// still answers and every replica is far behind it (in the
-			// middle of a full resync, say), none can catch up within the
-			// fence's wait: holding its writes would only stall them, every
-			// pass, to end in the hold below. So look first, without
-			// holding them.
-			holdUnsynced := unsyncedPick && c.Annotations[kividbv1alpha1.AllowUnsyncedFailoverAnnotation] != "true"
-			if holdUnsynced {
-				if behind, far := r.farBehind(ctx, last, tier, currentMasterName); far {
-					r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
-						"master %s is unavailable, but no replica was in sync with it, and none is near enough to catch up with it: no one is promoted, and its writes are not held, so it keeps serving if it can. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
-						currentMasterName, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
-					return nil, currentMasterName, false, heldBack("WaitingForReplica",
-						fmt.Errorf("failover held: no replica was in sync with master %s, and %s. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
-							currentMasterName, behind, kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
+			// Nothing lets a replica that has not caught up with the old
+			// master be promoted (#75): not one that was not in sync with
+			// it, nor one marked in sync, for while the master is unready
+			// its Synced stays what it was when it was last read, and the
+			// replica's link may have broken since. If it still answers and
+			// every replica is far behind it (in the middle of a full
+			// resync, say, or cut off from it), none can catch up within
+			// the fence's wait: holding its writes would only stall them,
+			// every pass, to end in the hold below. So the fence looks first,
+			// once it has found the engine there, without holding them.
+			allowUnsynced := c.Annotations[kividbv1alpha1.AllowUnsyncedFailoverAnnotation] == "true"
+			tooFar := ""
+			near := func() bool {
+				if allowUnsynced {
+					return true
 				}
+				behind, far := r.farBehind(ctx, last, tier, currentMasterName)
+				if far {
+					tooFar = behind
+				}
+				return !far
 			}
 			picked := false
 			var unread []string
@@ -312,9 +316,25 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 				candidate, unread = r.electLive(ctx, tier, currentMasterName, candidate)
 				return views[candidate]
 			}
-			var caughtUp bool
+			var paused, caughtUp bool
 			var unfenced string
-			heldOld, caughtUp, unfenced = r.fenceOldMaster(ctx, c, last, pick)
+			heldOld, paused, caughtUp, unfenced = r.fenceOldMaster(ctx, c, last, near, pick)
+			if tooFar != "" {
+				if unsyncedPick {
+					r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
+						"master %s is unavailable, but no replica was in sync with it, and none is near enough to catch up with it: no one is promoted, and its writes are not held, so it keeps serving if it can. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
+						currentMasterName, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
+					return nil, currentMasterName, false, heldBack("WaitingForReplica",
+						fmt.Errorf("failover held: no replica was in sync with master %s, and %s. To fail over anyway, losing the writes it acknowledged since that replica was last in sync, annotate the cluster %s=true",
+							currentMasterName, tooFar, kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
+				}
+				r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
+					"master %s is unavailable but still answers, and no replica is near enough to catch up with it: no one is promoted, and its writes are not held, so it keeps serving if it can. To fail over anyway, losing the writes it acknowledged that the replica promoted lacks, annotate the cluster %s=true",
+					currentMasterName, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
+				return nil, currentMasterName, false, heldBack("WaitingForReplica",
+					fmt.Errorf("failover held: master %s still answers, and %s. To fail over anyway, losing the writes it acknowledged that the replica promoted lacks, annotate the cluster %s=true",
+						currentMasterName, tooFar, kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
+			}
 			if !picked {
 				// Not held, or a pause with no answer (it may have
 				// landed): picked all the same, by what each holds now.
@@ -350,18 +370,30 @@ func (r *KividbClusterReconciler) reconcileRoles(ctx context.Context, c *kividbv
 					"master %s is unavailable; promoting %s without %s, which did not answer ROLE (%s is set): writes only %s held are lost. The annotation is removed once this failover has gone through",
 					currentMasterName, candidate, unreadList, kividbv1alpha1.AllowUnreadFailoverAnnotation, unreadList)
 			}
-			if holdUnsynced && !caughtUp && (heldOld != "" || !aofOff(tier, currentMasterName)) {
-				// The replica picked was not in sync with the old master and
-				// has not caught up with it: promoting it loses what the
-				// master acknowledged and it lacks. The master keeps serving
-				// if it can, and the replica its sync from it.
+			if !allowUnsynced && !caughtUp && (paused || unsyncedPick && (heldOld != "" || !aofOff(tier, currentMasterName))) {
+				// The replica picked has not caught up with the old master:
+				// it was not in sync with it, or the fence held the master's
+				// writes for it, whatever its Synced says, and it still did
+				// not. Promoting it loses what the master acknowledged and
+				// it lacks. The master keeps serving if it can, and the
+				// replica its sync from it. A pause with no answer (it may
+				// not have landed) still promotes a replica marked in sync,
+				// so that a hung master can be failed away from.
 				r.unpauseWrites(ctx, heldOld) // nothing is promoted yet
+				if unsyncedPick {
+					r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
+						"master %s is unavailable, but no replica was in sync with it, and %s has not caught up with it: no one is promoted, and its writes are no longer held, so it keeps serving if it can. To fail over anyway, losing the writes it acknowledged since %s was last in sync, annotate the cluster %s=true",
+						currentMasterName, candidate, candidate, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
+					return nil, currentMasterName, false, heldBack("WaitingForReplica",
+						fmt.Errorf("failover held: no replica was in sync with master %s, and %s has not caught up with it. To fail over anyway, losing the writes it acknowledged since %s was last in sync, annotate the cluster %s=true",
+							currentMasterName, candidate, candidate, kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
+				}
 				r.event(c, corev1.EventTypeWarning, "FailoverBlocked",
-					"master %s is unavailable, but no replica was in sync with it, and %s has not caught up with it: no one is promoted, and its writes are no longer held, so it keeps serving if it can. To fail over anyway, losing the writes it acknowledged since %s was last in sync, annotate the cluster %s=true",
+					"master %s is unavailable, but %s has not caught up with it while its writes were held: no one is promoted, and its writes are no longer held, so it keeps serving if it can. To fail over anyway, losing the writes it acknowledged that %s lacks, annotate the cluster %s=true",
 					currentMasterName, candidate, candidate, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
 				return nil, currentMasterName, false, heldBack("WaitingForReplica",
-					fmt.Errorf("failover held: no replica was in sync with master %s, and %s has not caught up with it. To fail over anyway, losing the writes it acknowledged since %s was last in sync, annotate the cluster %s=true",
-						currentMasterName, candidate, candidate, kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
+					fmt.Errorf("failover held: %s has not caught up with master %s while its writes were held. To fail over anyway, losing the writes it acknowledged that %s lacks, annotate the cluster %s=true",
+						candidate, currentMasterName, candidate, kividbv1alpha1.AllowUnsyncedFailoverAnnotation))
 			}
 			if unfenced != "" {
 				r.event(c, corev1.EventTypeWarning, "FailoverUnfenced", "%s", unfenced)

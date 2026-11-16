@@ -414,3 +414,84 @@ func TestFailover_FencesAMasterThatStillAnswersWithNoReplicaInSync(t *testing.T)
 	h.assertFailoverTo("c1-1")
 	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2")
 }
+
+// inPlaceMasterStillAnswering has c1-0 unready past unhealthyThresholdSeconds
+// as the same pod, its engine still answering at offset 120 (the kubelet
+// cannot reach /readyz, say, while clients on their connections write on).
+// The replicas' stored Synced stays what it was when it went unready: with
+// no status from the master, nothing updates it.
+func inPlaceMasterStillAnswering(t *testing.T) *rolesHarness {
+	t.Helper()
+	shortSwitchoverWaits(t)
+	h, _ := newGoneMasterHarness(t)
+	h.cluster.Status.Pods[0].Incarnation = "same/0"
+	h.addPod(testPod{name: "c1-0", ip: "10.0.0.1", label: "master", uid: "same", unreadyFor: time.Minute,
+		agent: masterRun(120, "stream-a", "run-0")})
+	return h
+}
+
+// The replicas were in sync when the master went unready, and their links to
+// it broke after: none is near it now. Promoting one loses what the master
+// acknowledged since, as with no replica in sync (#75), so no one is
+// promoted, and its writes are not held: it keeps serving.
+func TestFailover_HoldsWhenTheReplicasInSyncLostTheirLinkAfterTheMasterWentUnready(t *testing.T) {
+	h := inPlaceMasterStillAnswering(t)
+	rec := h.recordEvents()
+	linkDown(h.agents.status["10.0.0.2"])
+	linkDown(h.agents.status["10.0.0.3"])
+	err := h.heldErr()
+	for _, call := range h.agents.calls {
+		if strings.HasPrefix(call, "exec 10.0.0.1 CLIENT PAUSE") {
+			t.Errorf("agent calls %v: the master's writes were held, want no pause while no replica is near", h.agents.calls)
+			break
+		}
+	}
+	if !strings.Contains(err.Error(), "link") || !strings.Contains(err.Error(), kividbv1alpha1.AllowUnsyncedFailoverAnnotation) {
+		t.Errorf("%v, want it saying no replica has its link up, and naming %s", err, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
+	}
+	if e := eventsWith(rec, "FailoverBlocked"); len(e) != 1 {
+		t.Errorf("events %v, want one FailoverBlocked", e)
+	}
+
+	h.annotate(kividbv1alpha1.AllowUnsyncedFailoverAnnotation, "true")
+	h.assertFailoverTo("c1-1")
+}
+
+// The replicas in sync are near the master when asked, but none catches up
+// while its writes are held: the pause is lifted and no one is promoted.
+func TestFailover_HoldsWhenAReplicaInSyncDoesNotCatchUpWithTheFencedMaster(t *testing.T) {
+	h := inPlaceMasterStillAnswering(t)
+	rec := h.recordEvents()
+	h.agents.catchUp = map[string]int{"10.0.0.2": -1, "10.0.0.3": -1}
+	err := h.heldErr()
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "exec 10.0.0.1 CLIENT UNPAUSE")
+	if !strings.Contains(err.Error(), "c1-1") || !strings.Contains(err.Error(), kividbv1alpha1.AllowUnsyncedFailoverAnnotation) {
+		t.Errorf("%v, want it naming c1-1 and %s", err, kividbv1alpha1.AllowUnsyncedFailoverAnnotation)
+	}
+	if fm := h.storedFence(); fm != nil {
+		t.Errorf("fencedMaster %+v recorded, want none: no one was promoted", fm)
+	}
+	events := eventsWith(rec, "")
+	var blocked []string
+	for _, e := range events {
+		if strings.Contains(e, "FailoverBlocked") {
+			blocked = append(blocked, e)
+		}
+		if strings.Contains(e, "FailoverUnfenced") {
+			t.Errorf("event %q, want none: nothing was promoted", e)
+		}
+	}
+	if len(blocked) != 1 || !strings.Contains(blocked[0], "c1-1") {
+		t.Errorf("events %v, want one FailoverBlocked naming c1-1", events)
+	}
+}
+
+// A ROLE read that fails is not a link that is down: when no replica answers
+// the look before the fence, the fence and the election decide, asking again
+// (and holding the failover for a replica that still does not answer, #78).
+func TestFailover_ReplicasThatDoNotAnswerAreNotTakenForCutOff(t *testing.T) {
+	h := inPlaceMasterStillAnswering(t)
+	h.agents.roleFails = map[string]int{"10.0.0.2": 1, "10.0.0.3": 1}
+	h.assertFailoverTo("c1-1")
+	h.assertCallOrder("exec 10.0.0.1 CLIENT PAUSE 65000 WRITE", "promote 10.0.0.2")
+}
