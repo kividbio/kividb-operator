@@ -53,6 +53,9 @@ type fakeNode struct {
 	runID   string
 	paused  bool // CLIENT PAUSE WRITE
 	loading bool
+	// aofOff: the engine's append-only file is off. oldAgent: its agent is
+	// from before 0.7.0, which reports neither that nor the key count.
+	aofOff, oldAgent bool
 }
 
 func newFakeEngine() *fakeEngine {
@@ -120,7 +123,8 @@ func (e *fakeEngine) status(n *fakeNode) agentapi.ClusterStatusResponse {
 		Enabled: true, MyID: n.id, State: state, SlotsAssigned: covered, KnownNodes: len(ids),
 		Hostname: n.hostname, Nodes: agentapi.ParseClusterNodes(strings.Join(lines, "\n")),
 		ReplicationOffset: n.offset, MasterLinkUp: n.master != "" && !n.linkDown,
-		RunID: n.runID, UptimeSeconds: n.uptime, KeyCount: n.keys, KeyCountKnown: true, Loading: n.loading,
+		RunID: n.runID, UptimeSeconds: n.uptime, KeyCount: n.keys, KeyCountKnown: !n.oldAgent, Loading: n.loading,
+		AofEnabled: !n.aofOff && !n.oldAgent,
 	}
 }
 
@@ -352,6 +356,8 @@ type formingHarness struct {
 	engine  *fakeEngine
 	exposed map[string]exposure
 	ids     map[string]string // pod -> node ID, for a pod that came back as a new node
+	// kdbConfig is the cluster's KividbConfig, for the rollout; nil: none.
+	kdbConfig *kividbv1alpha1.KividbConfig
 }
 
 func newFormingHarness(t *testing.T, shards, replicas int32) *formingHarness {
