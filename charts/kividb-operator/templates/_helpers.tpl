@@ -66,11 +66,14 @@ Name of the manager ServiceAccount to use.
 {{- end -}}
 
 {{/*
-Name of the manager ClusterRole (kept as a fixed, predictable name so it
-matches config/rbac/role.yaml exactly regardless of release name).
+Name of the manager ClusterRole (a Role with watchNamespace), after the
+release like every other object here, so that two releases do not both
+claim one ClusterRole. For a release named kividb-operator, as the docs
+install it, that is still kividb-operator-manager-role, the name in
+config/rbac/role.yaml.
 */}}
 {{- define "kividb-operator.clusterRoleName" -}}
-kividb-operator-manager-role
+{{- printf "%s-manager-role" (include "kividb-operator.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
