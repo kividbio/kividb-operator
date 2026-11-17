@@ -114,6 +114,25 @@ func (r *KividbClusterReconciler) rolloutWaiting(ctx context.Context, c *kividbv
 	r.event(c, corev1.EventTypeWarning, "RolloutWaiting", "%s", message)
 }
 
+// rolloutHeld records that the rollout of c will not replace the next pod
+// until someone acts, as message says: RolloutProgressing False, reason
+// WouldLoseData, and a Warning Event (RolloutHeld) when that starts, not
+// on every pass.
+func (r *KividbClusterReconciler) rolloutHeld(c *kividbv1alpha1.KividbCluster, message string) {
+	r.rolloutWaits.Delete(rolloutWaitKey(c))
+	if prev := findCondition(c.Status.Conditions, RolloutProgressingCondition); prev == nil ||
+		prev.Reason != "WouldLoseData" || prev.Message != message {
+		r.event(c, corev1.EventTypeWarning, "RolloutHeld", "%s", message)
+	}
+	setCondition(&c.Status.Conditions, metav1.Condition{
+		Type:               RolloutProgressingCondition,
+		Status:             metav1.ConditionFalse,
+		Reason:             "WouldLoseData",
+		Message:            message,
+		ObservedGeneration: c.Generation,
+	})
+}
+
 // rolloutProgressed records that the rollout of c replaced a pod (or asked
 // the master to hand over first).
 func (r *KividbClusterReconciler) rolloutProgressed(c *kividbv1alpha1.KividbCluster, message string) {

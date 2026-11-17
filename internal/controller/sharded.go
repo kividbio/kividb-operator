@@ -516,7 +516,7 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	}
 	// A password change restarts pods only once the ones still on the
 	// previous password accept the new one (see auth_overlap.go).
-	if held == nil && (!r.reconcileAuthOverlap(ctx, c, pods.Items, generations) || r.reconcileShardedRollout(ctx, c, observed)) {
+	if held == nil && (!r.reconcileAuthOverlap(ctx, c, pods.Items, generations) || r.reconcileShardedRollout(ctx, c, read, observed, kdbConfig)) {
 		acted = true
 	}
 
