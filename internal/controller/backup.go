@@ -202,7 +202,7 @@ func (r *KividbClusterReconciler) failOrphanedSnapshots(ctx context.Context, c *
 		now := metav1.Now()
 		snap.Status.Phase = kividbv1alpha1.SnapshotFailed
 		snap.Status.CompletionTime = &now
-		snap.Status.Error = fmt.Sprintf("backup Job %s was deleted before it finished", snap.Name)
+		snap.Status.Error = fmt.Sprintf("backup Job %s is gone and its result was never recorded", snap.Name)
 		if err := r.Status().Update(ctx, snap); err != nil {
 			return fmt.Errorf("snapshot %s: %w", snap.Name, err)
 		}

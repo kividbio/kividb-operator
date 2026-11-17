@@ -208,7 +208,7 @@ func TestSnapshotWhoseJobIsGoneIsFailed(t *testing.T) {
 	for _, name := range []string{"c1-backup-gone", "c1-backup-unwritten"} {
 		got := getSnapshot(t, r, name).Status
 		if got.Phase != kividbv1alpha1.SnapshotFailed || got.CompletionTime == nil ||
-			got.Error != "backup Job "+name+" was deleted before it finished" {
+			got.Error != "backup Job "+name+" is gone and its result was never recorded" {
 			t.Errorf("%s: phase %q, completion %v, error %q; want Failed, a completion time, the Job named", name, got.Phase, got.CompletionTime, got.Error)
 		}
 	}

@@ -203,7 +203,7 @@ kubectl get kdbs my-cluster-backups-20260721t000004z -o yaml
 
 `status.phase` is `Pending` → `InProgress` → `Succeeded`/`Failed`.
 `status.error` is the error of the Job's latest attempt: a Job retries a
-failed pod up to twice, so an `InProgress` record can show the error of
+failed pod up to twice, so between attempts an `InProgress` record shows the error of
 the attempt before, and a retry that succeeds clears it. On a `Failed`
 record check it first, then `kubectl get jobs -l
 kividb.io/cluster=my-cluster` and `kubectl logs` on the most recent Job
