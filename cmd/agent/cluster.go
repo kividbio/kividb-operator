@@ -80,8 +80,7 @@ func (s *server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if info, err := c.Info("keyspace"); err == nil {
-		out.KeyCount = keyspaceKeyCount(info)
-		out.KeyCountKnown = true
+		out.KeyCount, out.KeyCountKnown = keyspaceKeyCount(info)
 	}
 	if info, err := c.Info("persistence"); err == nil {
 		persistence := respclient.ParseInfo(info)

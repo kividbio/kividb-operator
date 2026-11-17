@@ -46,6 +46,13 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 
 ### Fixed
 
+- **An `INFO keyspace` reply the agent could not read counted as 0 keys.**
+  The agent reported a known count of 0 for any reply it found no database
+  line in, the empty reply an engine gives for a section it does not have
+  included, and the operator acts on a count of 0 (a failover keeps away
+  from replicas that hold nothing, for one). The count is now known only
+  when a `dbN` line is read, or the section's header stands alone; anything
+  else leaves it unknown, which the operator treats as holding keys.
 - **A `KividbConfig` `dir` off the pod's volume was passed to the
   engine** (#109), which then kept its snapshot and append-only file on
   the container's own filesystem: every restart lost the data, the

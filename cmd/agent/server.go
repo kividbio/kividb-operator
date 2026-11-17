@@ -250,29 +250,71 @@ func (s *server) queryStatus() (*agentapi.StatusResponse, error) {
 		out.AofAckAfterWrite = v.Array[1].Str
 	}
 	if info, err := c.Info("keyspace"); err == nil {
-		out.KeyCount = keyspaceKeyCount(info)
-		out.KeyCountKnown = true
+		out.KeyCount, out.KeyCountKnown = keyspaceKeyCount(info)
 	}
 	return out, nil
 }
 
 // keyspaceKeyCount sums keys=N over the "dbN:keys=N,expires=M,..." lines
-// of INFO keyspace.
-func keyspaceKeyCount(info string) int64 {
+// of INFO keyspace, and says whether that is the count: only when it read
+// at least one such line, or the section is there and empty (its "#
+// Keyspace" header and nothing under it). Anything else, a line of a
+// database it cannot read, or the empty reply an engine gives for a section
+// it does not have, is no count: the operator takes an unknown count as
+// holding keys, never as 0.
+func keyspaceKeyCount(info string) (int64, bool) {
 	var total int64
-	for name, value := range respclient.ParseInfo(info) {
-		if !strings.HasPrefix(name, "db") {
-			continue
-		}
-		for _, field := range strings.Split(value, ",") {
-			if n, ok := strings.CutPrefix(field, "keys="); ok {
-				if v, err := strconv.ParseInt(n, 10, 64); err == nil {
-					total += v
-				}
+	header, read, other := false, false, false
+	for _, line := range strings.Split(info, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
+		case strings.HasPrefix(line, "#"):
+			header = header || strings.EqualFold(strings.TrimSpace(line[1:]), "Keyspace")
+		default:
+			name, value, _ := strings.Cut(line, ":")
+			if !isDatabaseName(name) {
+				other = true
+				continue
 			}
+			n, ok := databaseKeys(value)
+			if !ok {
+				return 0, false
+			}
+			total += n
+			read = true
 		}
 	}
-	return total
+	if read || (header && !other) {
+		return total, true
+	}
+	return 0, false
+}
+
+// isDatabaseName reports whether name is an INFO keyspace database: "db"
+// and its number.
+func isDatabaseName(name string) bool {
+	n, ok := strings.CutPrefix(name, "db")
+	if !ok || n == "" {
+		return false
+	}
+	for _, r := range n {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// databaseKeys reads keys=N from a database's "keys=N,expires=M,..." line.
+func databaseKeys(value string) (int64, bool) {
+	for _, field := range strings.Split(value, ",") {
+		if n, ok := strings.CutPrefix(field, "keys="); ok {
+			v, err := strconv.ParseInt(n, 10, 64)
+			return v, err == nil && v >= 0
+		}
+	}
+	return 0, false
 }
 
 // fileHash returns the ACL-file fingerprint of path's contents (see
