@@ -231,14 +231,7 @@ func agentEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.KividbA
 
 	if snapCfg != nil {
 		s3 := snapCfg.Spec.S3
-		accessKeyKey := s3.CredentialsSecretRef.AccessKeyIDKey
-		if accessKeyKey == "" {
-			accessKeyKey = "accessKeyId"
-		}
-		secretKeyKey := s3.CredentialsSecretRef.SecretAccessKeyKey
-		if secretKeyKey == "" {
-			secretKeyKey = "secretAccessKey"
-		}
+		accessKeyKey, secretKeyKey := s3CredentialKeys(s3.CredentialsSecretRef)
 		env = append(env,
 			corev1.EnvVar{Name: "S3_ENDPOINT", Value: s3.Endpoint},
 			corev1.EnvVar{Name: "S3_BUCKET", Value: s3.Bucket},
@@ -345,21 +338,14 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 	}
 
 	if tls := kividbTLSSpec(kdbConfig); tls != nil && tls.Enabled {
-		certKey := tls.CertSecretRef.CertKey
-		if certKey == "" {
-			certKey = "tls.crt"
-		}
-		keyKey := tls.CertSecretRef.KeyKey
-		if keyKey == "" {
-			keyKey = "tls.key"
-		}
+		certKey, keyKey, caKey := tlsSecretKeys(tls.CertSecretRef)
 		items := []corev1.KeyToPath{
 			{Key: certKey, Path: "tls.crt"},
 			{Key: keyKey, Path: "tls.key"},
 		}
-		hasCA := tls.CertSecretRef.CAKey != ""
+		hasCA := caKey != ""
 		if hasCA {
-			items = append(items, corev1.KeyToPath{Key: tls.CertSecretRef.CAKey, Path: "ca.crt"})
+			items = append(items, corev1.KeyToPath{Key: caKey, Path: "ca.crt"})
 		}
 		volumes = append(volumes, corev1.Volume{
 			Name: "tls",

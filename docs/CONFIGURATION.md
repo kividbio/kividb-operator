@@ -157,8 +157,10 @@ namespace):
 - Omit `snapshotConfigRef` to disable scheduled backups entirely.
 
 If a reference names an object that doesn't exist (or a Secret it names
-does not), the cluster's objects are left as they are, with a clear error
-on `status.conditions` (`Ready` `False`, reason `ReconcileError`, plus a
+does not, or that Secret lacks a key it names: the ACL passwords, the TLS
+certificate's `certKey`/`keyKey`/`caKey`, or the S3 credentials'
+`accessKeyIdKey`/`secretAccessKeyKey`, defaults included), the cluster's
+objects are left as they are, with a clear error on `status.conditions` (`Ready` `False`, reason `ReconcileError`, plus a
 Warning Event of that reason each time the error changes) — the
 cluster does not silently fall back to defaults for a *typo'd* reference
 (only for an *absent* one). The same holds for an input the cluster
@@ -1033,7 +1035,7 @@ spec:
       name: my-cluster-tls
       certKey: tls.crt              # default shown
       keyKey: tls.key                # default shown
-      caKey: ca.crt                  # default shown; omit the key from the Secret to skip client-cert verification
+      caKey: ca.crt                  # no default: leave it unset to skip client-cert verification
 ```
 
 - `directives`: any directive kividb's `--configfile` accepts (see
@@ -1082,6 +1084,10 @@ spec:
   Secret matching the standard `kubernetes.io/tls` Secret's default key
   layout, so a cert-manager-issued `Certificate`'s Secret can usually be
   referenced directly without relabeling keys.
+
+  `caKey` has no default. A cert-manager Secret carries `ca.crt`, but the
+  operator mounts it, and so asks for client certificates, only when
+  `caKey` names it.
 
   With a CA (`caKey`), kividb v1.1.0 and later **require a client
   certificate** signed by that CA, as Redis does; earlier engines accepted

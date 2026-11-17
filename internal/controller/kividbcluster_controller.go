@@ -195,6 +195,9 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err != nil {
 		return r.reconcileHeld(ctx, &c, heldBack("ReconcileError", fmt.Errorf("resolving referenced secrets: %w", err)))
 	}
+	if err := r.checkMountedSecrets(ctx, &c, kdbConfig, snapCfg); err != nil {
+		return r.reconcileHeld(ctx, &c, heldBack("ReconcileError", fmt.Errorf("resolving referenced secrets: %w", err)))
+	}
 
 	aclContent, err := renderACLFile(aclConfig, secretValues)
 	if err != nil {
@@ -221,7 +224,8 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	steps.run("reconciling services", func() error { return r.reconcileServices(ctx, &c, kdbConfig) })
 
 	blockSTS, bootErr := r.reconcileBootstrap(ctx, &c)
-	if bootErr != nil {
+	var heldBoot *heldBootstrapError
+	if bootErr != nil && !errors.As(bootErr, &heldBoot) {
 		log.Error(bootErr, "bootstrap reconciliation failed")
 	}
 	if c.Spec.BootstrapFromSnapshot != nil {
@@ -255,6 +259,11 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	steps.run("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, &c, snapshotConfigName(snapCfg)) })
 	steps.run("", func() error { return r.reconcileServiceMonitor(ctx, &c) })
 	applyErr := steps.err
+	if applyErr == nil && heldBoot != nil {
+		// Reported as a refused step is, though not returned as one: the
+		// pass is retried on the requeue below, not on the backoff.
+		applyErr = heldBoot
+	}
 	if applyErr != nil {
 		r.warnOnChange(&c, "ReconcileError", applyErr)
 	}
@@ -266,7 +275,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.noteBootstrapApplyErr(ctx, &c, applyErr); err != nil {
 			return ctrl.Result{}, err
 		}
-		if applyErr != nil {
+		if applyErr != nil && applyErr != error(heldBoot) {
 			return ctrl.Result{}, applyErr
 		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -547,6 +556,28 @@ func (r *KividbClusterReconciler) resolveSecretValues(ctx context.Context, c *ki
 		values[key] = string(v)
 	}
 	return values, nil
+}
+
+// checkMountedSecrets makes sure each Secret the pods mount or take an
+// env var from (see mountedSecrets) is there with the keys they use. The
+// kubelet does not start a container whose Secret volume item or
+// secretKeyRef is missing: the pod waits in ContainerCreating or
+// CreateContainerConfigError, and a rollout to such a template would take
+// the cluster's pods down one by one. Held back here, the running pods
+// keep serving and the cause is on the Ready condition.
+func (r *KividbClusterReconciler) checkMountedSecrets(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) error {
+	for _, m := range mountedSecrets(kdbConfig, snapCfg) {
+		var secret corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Name: m.name, Namespace: c.Namespace}, &secret); err != nil {
+			return fmt.Errorf("%s: secret %s: %w", m.from, m.name, err)
+		}
+		for _, key := range m.keys {
+			if _, ok := secret.Data[key]; !ok {
+				return fmt.Errorf("%s: secret %s has no key %q", m.from, m.name, key)
+			}
+		}
+	}
+	return nil
 }
 
 // reconcileSecret writes the operator's auth Secret: the ACL file, base
@@ -1062,12 +1093,31 @@ func (r *KividbClusterReconciler) referencesSecret(ctx context.Context, c *kivid
 	if c.Spec.Cluster != nil && c.Spec.Cluster.BusSecretRef != nil && c.Spec.Cluster.BusSecretRef.Name == name {
 		return true
 	}
-	acl, err := r.resolveAclConfig(ctx, c)
-	if err != nil {
-		return false // reconciled once the KividbAclConfig is there
+	// A reference that cannot be read is reconciled once it is there.
+	if acl, err := r.resolveAclConfig(ctx, c); err == nil {
+		for _, ref := range collectSecretRefs(acl) {
+			if ref.Name == name {
+				return true
+			}
+		}
 	}
-	for _, ref := range collectSecretRefs(acl) {
-		if ref.Name == name {
+	kdbConfig, err := r.resolveKividbConfig(ctx, c)
+	if err != nil {
+		kdbConfig = nil
+	}
+	snapCfg, err := r.resolveSnapshotConfig(ctx, c)
+	if err != nil {
+		snapCfg = nil
+	}
+	for _, m := range mountedSecrets(kdbConfig, snapCfg) {
+		if m.name == name {
+			return true
+		}
+	}
+	// The restore Job of a bootstrap not yet done reads its snapshot's
+	// credentials, which may be another config's.
+	for _, m := range mountedSecrets(nil, r.bootstrapSnapshotConfig(ctx, c)) {
+		if m.name == name {
 			return true
 		}
 	}

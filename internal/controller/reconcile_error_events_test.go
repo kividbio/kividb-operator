@@ -66,7 +66,7 @@ func TestReconcile_RefusedApplyStepWarnsOncePerChange(t *testing.T) {
 	which := "cronjob"
 	f := newFailoverCase(t, func(c *kividbv1alpha1.KividbCluster) {
 		c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "snap"}
-	}, cronJobOrService(&which), backupConfig())
+	}, cronJobOrService(&which), backupConfig(), s3Credentials("s3"))
 	f.r.Recorder = record.NewFakeRecorder(100)
 
 	f.wantFailedOver(t, f.reconcile(t, 5*time.Second), "ReconcileError", "reconciling backup cronjob")
@@ -153,12 +153,12 @@ func TestReconcileSharded_RefusedApplyStepWarnsOnce(t *testing.T) {
 	snap := &kividbv1alpha1.KividbSnapshotConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "hourly", Namespace: "default"},
 		Spec: kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: "0 * * * *",
-			S3: kividbv1alpha1.S3StorageSpec{Endpoint: "https://s3.example.com", Bucket: "b"}},
+			S3: kividbv1alpha1.S3StorageSpec{Endpoint: "https://s3.example.com", Bucket: "b", CredentialsSecretRef: kividbv1alpha1.S3CredentialsSecretRef{Name: "s3"}}},
 	}
 	h := formedForReconcile(t, func(obj client.Object) bool {
 		_, ok := obj.(*batchv1.CronJob)
 		return ok
-	}, snap)
+	}, snap, s3Credentials("s3"))
 	h.c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "hourly"}
 	if err := h.r.Update(context.Background(), h.c); err != nil {
 		t.Fatal(err)
@@ -197,6 +197,15 @@ func backupConfig() *kividbv1alpha1.KividbSnapshotConfig {
 	}
 }
 
+// s3Credentials is the S3 credentials Secret name, with the keys a
+// KividbSnapshotConfig reads by default.
+func s3Credentials(name string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Data:       map[string][]byte{"accessKeyId": []byte("AKIA"), "secretAccessKey": []byte("secret")},
+	}
+}
+
 // bootstrapWaitingCase is newFailoverCase while a bootstrap waits (pods
 // with the cluster's labels and no StatefulSet: an earlier cluster's), a
 // backup CronJob refused while *which is "cronjob".
@@ -205,7 +214,7 @@ func bootstrapWaitingCase(t *testing.T, which *string) *failoverCase {
 	f := newFailoverCase(t, func(c *kividbv1alpha1.KividbCluster) {
 		c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "snap"}
 		c.Spec.BootstrapFromSnapshot = &kividbv1alpha1.BootstrapFromSnapshotSpec{SnapshotRef: corev1.LocalObjectReference{Name: "seed"}}
-	}, cronJobOrService(which), backupConfig())
+	}, cronJobOrService(which), backupConfig(), s3Credentials("s3"))
 	f.r.Recorder = record.NewFakeRecorder(100)
 	return f
 }
@@ -272,7 +281,7 @@ func TestReconcile_BootstrapWaitReadyConflictReturnsTheRefusal(t *testing.T) {
 func TestReconcile_ConflictIsNotAWarning(t *testing.T) {
 	f := newFailoverCase(t, func(c *kividbv1alpha1.KividbCluster) {
 		c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "snap"}
-	}, nil, backupConfig())
+	}, nil, backupConfig(), s3Credentials("s3"))
 	f.r.Recorder = record.NewFakeRecorder(100)
 	conflicts := 0
 	f.r.Client = interceptor.NewClient(f.r.Client.(client.WithWatch), interceptor.Funcs{

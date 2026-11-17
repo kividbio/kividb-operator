@@ -131,13 +131,14 @@ func bootstrapFixture(name string) (*kividbv1alpha1.KividbCluster, []client.Obje
 		Spec:       kividbv1alpha1.KividbSnapshotSpec{SnapshotConfigRef: corev1.LocalObjectReference{Name: "s3"}},
 		Status:     kividbv1alpha1.KividbSnapshotStatus{Phase: kividbv1alpha1.SnapshotSucceeded, ObjectKey: "rep/rep-0-20260101T000000Z.tar.gz"},
 	}
-	cfg := &kividbv1alpha1.KividbSnapshotConfig{ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: "default"}}
+	cfg := &kividbv1alpha1.KividbSnapshotConfig{ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: "default"},
+		Spec: kividbv1alpha1.KividbSnapshotConfigSpec{S3: kividbv1alpha1.S3StorageSpec{CredentialsSecretRef: kividbv1alpha1.S3CredentialsSecretRef{Name: "s3"}}}}
 	c := testCluster(name)
 	c.UID = types.UID("uid-" + name)
 	c.Spec.Replicas = 2
 	c.Spec.Storage = kividbv1alpha1.StorageSpec{Size: "1Gi"}
 	c.Spec.BootstrapFromSnapshot = &kividbv1alpha1.BootstrapFromSnapshotSpec{SnapshotRef: corev1.LocalObjectReference{Name: snap.Name}}
-	return c, []client.Object{snap, cfg}
+	return c, []client.Object{snap, cfg, s3Credentials("s3")}
 }
 
 // bootstrapFromSnapshot added to a cluster that is already running scaled
