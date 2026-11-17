@@ -45,8 +45,9 @@ type fakeNode struct {
 	offset                   int64
 	linkDown                 bool // a replica whose link to its master is down
 	// hung: the engine accepts connections and answers nothing, so its
-	// agent cannot report; the others mark it failed.
-	hung bool
+	// agent cannot report; the others mark it failed. agentDown: only its
+	// agent does not answer; the engine runs, and the others see it as ever.
+	hung, agentDown bool
 	// keys, uptime (seconds; nil: not reported) and runID, as INFO says.
 	keys    int64
 	uptime  *int64
@@ -138,6 +139,9 @@ func (e *fakeEngine) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	if n.hung {
 		return nil, fmt.Errorf("agent %s: kividb does not answer", ip)
+	}
+	if n.agentDown {
+		return nil, fmt.Errorf("agent %s does not answer", ip)
 	}
 	if !agentapi.TokenMatches(req, "tok") {
 		return reply(http.StatusUnauthorized, nil), nil

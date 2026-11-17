@@ -74,7 +74,8 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   restart them anyway, each with a `RestartingWithoutPersistence`
   Warning, and is removed once the rollout is done. With the file on, a
   `RestartingInPlace` Warning comes first. A master that reports no keys
-  is not held, having nothing to lose: it gets the same Warning (#108).
+  is not held, having nothing to lose, with a grace period of 10 s or
+  more: it gets the same Warning (#108).
 - **`KividbSnapshot` records could name a config their backup did not go
   to, keep a retried backup's old error, or stay `InProgress` for good**
   (#104).

@@ -593,3 +593,114 @@ func TestShardedRolloutRestartsAnEmptyMasterBesideAHeldOne(t *testing.T) {
 		t.Fatalf("events:\n%s\nwant one RolloutHeld", ev)
 	}
 }
+
+// Below 10 s of grace the kubelet may kill the engine before or during its
+// save at shutdown, and a write that reached an empty master after its
+// agent's report would be lost: the master is held like one with keys.
+func TestShardedRolloutHoldsAnEmptyMasterWithAShortGracePeriod(t *testing.T) {
+	for _, tc := range []struct {
+		grace    int64
+		wantHeld bool
+	}{
+		{0, true},
+		{9, true},
+		{10, false},
+	} {
+		t.Run(fmt.Sprintf("%d s", tc.grace), func(t *testing.T) {
+			h := formedForRollout(t, 1, 0)
+			h.kdbConfig = appendOnlyOff()
+			h.c.Spec.TerminationGracePeriodSeconds = &tc.grace
+			h.node(shardPodName(h.c, 0, 0)).keys = 0
+			deleted := h.rolloutPass()
+			if held := len(deleted) == 0; held != tc.wantHeld {
+				t.Fatalf("replaced %v, want held=%v", deleted, tc.wantHeld)
+			}
+		})
+	}
+}
+
+// Only this pass's report counts: an empty master whose pod is not Ready
+// (for less than stuckPodGrace), or whose agent does not answer, is held,
+// though buildView does not count it as a master. The not-Ready one's
+// engine runs and its probe says 0 keys: a probe does not count either.
+// s-1-0, which holds keys, is held too, so that nothing else is replaced.
+func TestShardedRolloutHoldsAnEmptyMasterItDidNotHearFrom(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(h *formingHarness)
+	}{
+		{"pod not Ready", func(h *formingHarness) {
+			ctx := context.Background()
+			var pod corev1.Pod
+			if err := h.r.Get(ctx, client.ObjectKey{Namespace: h.c.Namespace, Name: shardPodName(h.c, 0, 0)}, &pod); err != nil {
+				h.t.Fatal(err)
+			}
+			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse,
+				LastTransitionTime: metav1.Now()}}
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: kividbContainerName,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+			if err := h.r.Status().Update(ctx, &pod); err != nil {
+				if err := h.r.Update(ctx, &pod); err != nil {
+					h.t.Fatal(err)
+				}
+			}
+		}},
+		{"agent does not answer", func(h *formingHarness) { h.node(shardPodName(h.c, 0, 0)).agentDown = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := formedForRollout(t, 2, 0)
+			h.kdbConfig = appendOnlyOff()
+			h.node(shardPodName(h.c, 0, 0)).keys = 0
+			tc.set(h)
+			if deleted := h.rolloutPass(); len(deleted) > 0 {
+				t.Fatalf("replaced %v, want every master held", deleted)
+			}
+		})
+	}
+}
+
+// With the annotation set, an empty master is restarted with the
+// RestartingInPlace Warning, not RestartingWithoutPersistence: it has
+// nothing to lose, whatever the annotation allows.
+func TestShardedRolloutAnnotationRestartsAnEmptyMasterInPlace(t *testing.T) {
+	h := formedForRollout(t, 1, 0)
+	h.kdbConfig = appendOnlyOff()
+	h.allowRestartWithoutPersistence()
+	h.node(shardPodName(h.c, 0, 0)).keys = 0
+	_ = events(h.r)
+	if deleted := h.rolloutPass(); fmt.Sprint(deleted) != "[s-0-0]" {
+		t.Fatalf("replaced %v, want s-0-0", deleted)
+	}
+	if ev := events(h.r); !strings.Contains(ev, "RestartingInPlace") || strings.Contains(ev, "RestartingWithoutPersistence") {
+		t.Fatalf("events:\n%s\nwant RestartingInPlace and no RestartingWithoutPersistence", ev)
+	}
+}
+
+// With the file on, an empty master is restarted as before: nothing in the
+// status about its keys, since they are not why it went ahead.
+func TestShardedRolloutRestartsAnEmptyMasterWithTheFileOnAsBefore(t *testing.T) {
+	h := formedForRollout(t, 1, 0)
+	h.node(shardPodName(h.c, 0, 0)).keys = 0
+	if deleted := h.rolloutPass(); fmt.Sprint(deleted) != "[s-0-0]" {
+		t.Fatalf("replaced %v, want s-0-0", deleted)
+	}
+	cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition)
+	if cond == nil || cond.Message != "replacing s-0-0 (0 more to go)" {
+		t.Fatalf("condition %+v, want the plain replacing message", cond)
+	}
+}
+
+// A master the pass did not hear from, with the file on, is restarted in
+// place with the RestartingInPlace Warning first, as one it heard from:
+// buildView does not count it as a master, but with no replicas it is one.
+func TestShardedRolloutWarnsBeforeRestartingAMasterItDidNotHearFrom(t *testing.T) {
+	h := formedForRollout(t, 2, 0)
+	h.node(shardPodName(h.c, 0, 0)).agentDown = true
+	_ = events(h.r)
+	if deleted := h.rolloutPass(); fmt.Sprint(deleted) != "[s-0-0]" {
+		t.Fatalf("replaced %v, want s-0-0", deleted)
+	}
+	if ev := events(h.r); !strings.Contains(ev, "RestartingInPlace") {
+		t.Fatalf("events:\n%s\nwant RestartingInPlace", ev)
+	}
+}

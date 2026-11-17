@@ -361,6 +361,13 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	// on or off per master): the next is the first that is not held, and
 	// the hold is reported only once every pod left is held.
 	//
+	// With no replicas, every pod is its shard's only one (counted above),
+	// and so its master: also one this pass did not hear from (not Ready,
+	// or its agent did not answer), which buildView does not count as a
+	// master. It is held the same when the KividbConfig turns the file off;
+	// when only its engine said so, a pass that does not hear from it cannot
+	// tell, and it goes as one with the file on.
+	//
 	// An empty master has nothing to lose, and a write that reaches it after
 	// its agent's report is not lost either: with the file off, either way
 	// withoutPersistence finds it so, the engine still writes a snapshot as
@@ -368,15 +375,20 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	// (`save ""` and shutdown-on-sigterm change nothing, and the operator
 	// never sends SHUTDOWN NOSAVE), the agent's /prestop returns at once for
 	// a master with no replicas, and the snapshot of a near-empty dataset is
-	// written in milliseconds, well inside any grace period. It goes to the
-	// engine's working directory, /data, the pod's volume, unless a
-	// KividbConfig `dir` moves it off, which loses data with the file on
-	// too (#109).
+	// written in milliseconds, inside a grace period of 10 s or more (below
+	// that, the master counts as holding keys: see holdsNoKeys). The save
+	// can still fail (a full or unwritable volume ends the process without
+	// a snapshot), and a script running past its time limit can use up the
+	// grace period; neither changes the decision, since both are about a
+	// write landing in a window of seconds on an empty master. The snapshot
+	// goes to the engine's working directory, /data, the pod's volume,
+	// unless a KividbConfig `dir` moves it off, which loses data with the
+	// file on too (#109).
 	allowLoss := c.Annotations[kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation] == "true"
 	var next *shardPod
 	var held []*shardPod
 	for _, p := range outdated {
-		if isMaster(p) && c.Spec.Replicas == 0 && !allowLoss && withoutPersistence(p, kdbConfig) != "" && !holdsNoKeys(p) {
+		if c.Spec.Replicas == 0 && !allowLoss && withoutPersistence(p, kdbConfig) != "" && !holdsNoKeys(c, p) {
 			held = append(held, p)
 			continue
 		}
@@ -415,15 +427,15 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		return r.reconcileShardStepDown(ctx, c, pods)
 	}
 	progress := fmt.Sprintf("replacing %s (%d more to go)", next.pod.Name, len(outdated)-1)
-	if isMaster(next) {
-		// No replica to hand over to: restarted in place. Without the file,
-		// only because it holds no keys, which the status says so that it
-		// reads apart from a restart with the file on, or because the
-		// annotation says so (see above).
+	if c.Spec.Replicas == 0 {
+		// Its shard's master, with no replica to hand over to: restarted in
+		// place. Without the file, only because it holds no keys, which the
+		// status says so that it reads apart from a restart with the file
+		// on, or because the annotation says so (see above).
 		why := withoutPersistence(next, kdbConfig)
-		empty := why != "" && holdsNoKeys(next)
+		empty := why != "" && holdsNoKeys(c, next)
 		if empty {
-			progress += fmt.Sprintf(": %s, but it reported no keys, so restarted in place it loses nothing", why)
+			progress += fmt.Sprintf(": %s, but it reported no keys, so a restart in place has nothing to lose", why)
 		}
 		if why == "" || empty {
 			r.event(c, corev1.EventTypeWarning, "RestartingInPlace",
@@ -444,13 +456,24 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	return true
 }
 
-// holdsNoKeys reports whether shard pod p's engine holds no keys, as its
-// agent reports it: on a count the agent knows (one from before 0.7.0
-// reports none), and not while the engine loads its data, when it can still
-// show 0. An unready pod's probe does not count.
-func holdsNoKeys(p *shardPod) bool {
+// emptyRestartMinGrace is the shortest grace period
+// (spec.terminationGracePeriodSeconds), in seconds, with which a shard
+// master that holds no keys is restarted in place with its append-only
+// file off: below it, the kubelet may kill the engine before or during its
+// save at shutdown, and a write that reached it after its agent's report
+// would be lost.
+const emptyRestartMinGrace = 10
+
+// holdsNoKeys reports whether shard pod p of c holds no keys, for the hold
+// (#108): as its agent reports it, on a count the agent knows (one from
+// before 0.7.0 reports none), not while the engine loads its data, when it
+// can still show 0, and only with a grace period of emptyRestartMinGrace or
+// more. Otherwise it counts as holding keys. An unready pod's probe does
+// not count.
+func holdsNoKeys(c *kividbv1alpha1.KividbCluster, p *shardPod) bool {
 	st := p.status
-	return st != nil && st.KeyCountKnown && !st.Loading && st.KeyCount == 0
+	return st != nil && st.KeyCountKnown && !st.Loading && st.KeyCount == 0 &&
+		*gracePeriod(c) >= emptyRestartMinGrace
 }
 
 // withoutPersistence says why shard master p would keep only what its save
