@@ -364,9 +364,12 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	// With no replicas, every pod is its shard's only one (counted above),
 	// and so its master: also one this pass did not hear from (not Ready,
 	// or its agent did not answer), which buildView does not count as a
-	// master. It is held the same when the KividbConfig turns the file off;
-	// when only its engine said so, a pass that does not hear from it cannot
-	// tell, and it goes as one with the file on.
+	// master. Such a master is held whatever the KividbConfig says: without
+	// its report, whether its engine has the file off (CONFIG SET appendonly
+	// no) is not known, and the rollout does not restart on a guess. One not
+	// Ready is replaced once it has been so for stuckPodGrace (above); one
+	// whose agent does not answer is held for as long as it does not, and
+	// the hold says so.
 	//
 	// An empty master has nothing to lose, and a write that reaches it after
 	// its agent's report is not lost either: with the file off, either way
@@ -388,7 +391,7 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	var next *shardPod
 	var held []*shardPod
 	for _, p := range outdated {
-		if c.Spec.Replicas == 0 && !allowLoss && withoutPersistence(p, kdbConfig) != "" && !holdsNoKeys(c, p) {
+		if c.Spec.Replicas == 0 && !allowLoss && (p.status == nil || withoutPersistence(p, kdbConfig) != "") && !holdsNoKeys(c, p) {
 			held = append(held, p)
 			continue
 		}
@@ -493,28 +496,70 @@ func withoutPersistence(p *shardPod, kdbConfig *kividbv1alpha1.KividbConfig) str
 }
 
 // heldMastersMessage says which shard masters the rollout holds (held, in
-// any order, at least one), why, and how to go on. They are held for the
-// same reason: the KividbConfig, which is the cluster's, or else each
-// one's engine.
+// any order, at least one), why, and how to go on: those with the file off,
+// then those the pass did not hear from.
 func heldMastersMessage(held []*shardPod, kdbConfig *kividbv1alpha1.KividbConfig) string {
+	var off, unheard []*shardPod
+	for _, p := range held {
+		if withoutPersistence(p, kdbConfig) != "" {
+			off = append(off, p)
+		} else {
+			unheard = append(unheard, p)
+		}
+	}
+	var parts []string
+	if len(off) > 0 {
+		parts = append(parts, fileOffMessage(off, kdbConfig))
+	}
+	if len(unheard) > 0 {
+		parts = append(parts, unheardMessage(unheard))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// unheardMessage says that the rollout holds the shard masters in held
+// (at least one), which the pass did not hear from, and how to go on.
+func unheardMessage(held []*shardPod) string {
+	if len(held) == 1 {
+		p := held[0]
+		return fmt.Sprintf("the rollout holds shard %d's master %s: it has no replica to hand over to, and its agent did not answer, so whether its append-only file is on is not known, nor whether a restart in place to apply the updated pod template would lose data. Get its agent answering (its log says why it does not), give the cluster a replica (spec.replicas), or annotate the cluster %s=true to restart it anyway",
+			p.shard, p.pod.Name, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+	}
+	shards, names := heldNames(held)
+	return fmt.Sprintf("the rollout holds the masters of shards %s (%s): none has a replica to hand over to, and their agents did not answer, so whether their append-only files are on is not known, nor whether a restart in place to apply the updated pod template would lose data. Get their agents answering (their logs say why they do not), give the cluster a replica (spec.replicas), or annotate the cluster %s=true to restart them anyway",
+		shards, names, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+}
+
+// heldNames lists held (at least two) by shard: "0, 1 and 2" and their
+// pods' names, "s-0-0, s-1-0, s-2-0".
+func heldNames(held []*shardPod) (shards, names string) {
+	held = slices.Clone(held)
+	slices.SortFunc(held, func(a, b *shardPod) int { return int(a.shard) - int(b.shard) })
+	s := make([]string, len(held))
+	n := make([]string, len(held))
+	for i, p := range held {
+		s[i], n[i] = fmt.Sprint(p.shard), p.pod.Name
+	}
+	return strings.Join(s[:len(s)-1], ", ") + " and " + s[len(s)-1], strings.Join(n, ", ")
+}
+
+// fileOffMessage says that the rollout holds the shard masters in held (at
+// least one), whose append-only file is off, and how to go on. They are
+// held for the same reason: the KividbConfig, which is the cluster's, or
+// else each one's engine.
+func fileOffMessage(held []*shardPod, kdbConfig *kividbv1alpha1.KividbConfig) string {
 	if len(held) == 1 {
 		p := held[0]
 		return fmt.Sprintf("the rollout holds shard %d's master %s: it has no replica to hand over to, and %s, so restarted in place to apply the updated pod template it keeps only what its save at shutdown writes in time. Give the cluster a replica (spec.replicas), turn the file on (appendonly yes in the KividbConfig, and CONFIG SET appendonly yes on the running master), or annotate the cluster %s=true to restart it anyway",
 			p.shard, p.pod.Name, withoutPersistence(p, kdbConfig), kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
 	}
-	held = slices.Clone(held)
-	slices.SortFunc(held, func(a, b *shardPod) int { return int(a.shard) - int(b.shard) })
-	shards := make([]string, len(held))
-	names := make([]string, len(held))
-	for i, p := range held {
-		shards[i], names[i] = fmt.Sprint(p.shard), p.pod.Name
-	}
+	shards, names := heldNames(held)
 	why := withoutPersistence(held[0], kdbConfig)
 	if !appendOnlyDisabled(kdbConfig) {
 		why = "the engine of each reports its append-only file off"
 	}
-	return fmt.Sprintf("the rollout holds the masters of shards %s and %s (%s): none has a replica to hand over to, and %s, so restarted in place to apply the updated pod template each keeps only what its save at shutdown writes in time. Give the cluster a replica (spec.replicas), turn the file on (appendonly yes in the KividbConfig, and CONFIG SET appendonly yes on each running master), or annotate the cluster %s=true to restart them anyway",
-		strings.Join(shards[:len(shards)-1], ", "), shards[len(shards)-1], strings.Join(names, ", "), why, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+	return fmt.Sprintf("the rollout holds the masters of shards %s (%s): none has a replica to hand over to, and %s, so restarted in place to apply the updated pod template each keeps only what its save at shutdown writes in time. Give the cluster a replica (spec.replicas), turn the file on (appendonly yes in the KividbConfig, and CONFIG SET appendonly yes on each running master), or annotate the cluster %s=true to restart them anyway",
+		shards, names, why, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
 }
 
 // clearRestartWithoutPersistence removes

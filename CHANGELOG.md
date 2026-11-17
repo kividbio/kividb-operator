@@ -67,7 +67,8 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 - **A rollout restarted a shard master with no replica in place even with
   its append-only file off** (#90), on an operator upgrade or any other
   pod template change, so it kept only what its save at shutdown wrote in
-  time. The rollout now holds such a master and goes on with the others;
+  time. The rollout now holds such a master, and one it does not hear
+  from (its file may be off), and goes on with the others;
   once only held ones are left, `RolloutProgressing` turns False (reason
   `WouldLoseData`) with a `RolloutHeld` Warning saying how to go on.
   `kividb.io/allow-restart-without-persistence`, set after that, lets it

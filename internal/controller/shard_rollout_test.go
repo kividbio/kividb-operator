@@ -690,15 +690,44 @@ func TestShardedRolloutRestartsAnEmptyMasterWithTheFileOnAsBefore(t *testing.T) 
 	}
 }
 
-// A master the pass did not hear from, with the file on, is restarted in
-// place with the RestartingInPlace Warning first, as one it heard from:
-// buildView does not count it as a master, but with no replicas it is one.
-func TestShardedRolloutWarnsBeforeRestartingAMasterItDidNotHearFrom(t *testing.T) {
+// A master whose agent does not answer is held whatever the KividbConfig
+// says, its file on here: whether its engine has the file off is not
+// known, and the rollout does not restart on a guess. The hold says the
+// agent is what to fix. The pass after the agent answers, reporting the
+// file on, the master is restarted with the RestartingInPlace Warning.
+func TestShardedRolloutHoldsAMasterUntilItsAgentAnswers(t *testing.T) {
 	h := formedForRollout(t, 2, 0)
+	h.kdbConfig = &kividbv1alpha1.KividbConfig{ObjectMeta: metav1.ObjectMeta{Name: "aof", Namespace: "default"},
+		Spec: kividbv1alpha1.KividbConfigSpec{Directives: map[string]string{"appendonly": "yes"}}}
+	// Only s-0-0 is left on the old template.
+	ctx := context.Background()
+	var pod corev1.Pod
+	if err := h.r.Get(ctx, client.ObjectKey{Namespace: h.c.Namespace, Name: shardPodName(h.c, 1, 0)}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Labels[appsv1.StatefulSetRevisionLabel] = "new"
+	if err := h.r.Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
 	h.node(shardPodName(h.c, 0, 0)).agentDown = true
 	_ = events(h.r)
+	for i := 0; i < 2; i++ {
+		if deleted := h.rolloutPass(); len(deleted) > 0 {
+			t.Fatalf("pass %d replaced %v, want s-0-0 held", i, deleted)
+		}
+	}
+	cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition)
+	if cond == nil || cond.Reason != "WouldLoseData" || !strings.Contains(cond.Message, "s-0-0") ||
+		!strings.Contains(cond.Message, "its agent did not answer, so whether its append-only file is on is not known") {
+		t.Fatalf("condition %+v, want WouldLoseData saying s-0-0's agent did not answer", cond)
+	}
+	if ev := events(h.r); strings.Count(ev, "RolloutHeld") != 1 {
+		t.Fatalf("events:\n%s\nwant one RolloutHeld", ev)
+	}
+
+	h.node(shardPodName(h.c, 0, 0)).agentDown = false
 	if deleted := h.rolloutPass(); fmt.Sprint(deleted) != "[s-0-0]" {
-		t.Fatalf("replaced %v, want s-0-0", deleted)
+		t.Fatalf("replaced %v once its agent answered, want s-0-0", deleted)
 	}
 	if ev := events(h.r); !strings.Contains(ev, "RestartingInPlace") {
 		t.Fatalf("events:\n%s\nwant RestartingInPlace", ev)

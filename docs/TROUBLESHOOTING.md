@@ -267,6 +267,11 @@ keys. To go on:
 - or turn the file on: `appendonly yes` in the `KividbConfig`, and
   `CONFIG SET appendonly yes` on the running master, so that it is on
   before the restart;
+- or, if the hold says its agent did not answer, so whether its
+  append-only file is on is not known, get the agent answering (its
+  container's log says why it does not): the pass after it reports the
+  file on, the master is restarted. A master whose pod is not Ready is
+  held the same, and replaced once it has been so for 30 s;
 - or, if the data can be lost, let the rollout restart the masters:
 
   ```bash

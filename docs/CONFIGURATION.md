@@ -800,8 +800,11 @@ spec:
   A master that reports no keys has nothing to lose, and is restarted in
   place as with the file on, as long as `terminationGracePeriodSeconds`
   is 10 or more: with less, the engine may be killed before or during
-  its save at shutdown, so it is held like the others. Once only held
-  masters are left, `RolloutProgressing` turns `False`,
+  its save at shutdown, so it is held like the others. A master the
+  operator does not hear from (its pod not Ready, or its agent not
+  answering) is held too, whatever the `KividbConfig` says, since whether
+  its file is on is not known. Once only held masters are left,
+  `RolloutProgressing` turns `False`,
   reason `WouldLoseData`, with a `RolloutHeld` Warning Event. Give the
   cluster a replica, turn the file on (`appendonly yes` in the
   `KividbConfig`, and `CONFIG SET appendonly yes` on the running master),
