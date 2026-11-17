@@ -57,6 +57,10 @@ type fakeNode struct {
 	// aofOff: the engine's append-only file is off. oldAgent: its agent is
 	// from before 0.7.0, which reports neither that nor the key count.
 	aofOff, oldAgent bool
+	// clusterFail: this node reports cluster_state fail, as every node does
+	// once the others have marked a master failed after the node timeout
+	// (one loading, or hung), its slots then uncovered.
+	clusterFail bool
 }
 
 func newFakeEngine() *fakeEngine {
@@ -117,7 +121,7 @@ func (e *fakeEngine) status(n *fakeNode) agentapi.ClusterStatusResponse {
 		lines = append(lines, strings.TrimSpace(fmt.Sprintf("%s %s %s %s 0 0 1 connected %s", id, addr, flags, master, strings.Join(slots, " "))))
 	}
 	state := "fail"
-	if covered == agentapi.TotalSlots {
+	if covered == agentapi.TotalSlots && !n.clusterFail {
 		state = "ok"
 	}
 	return agentapi.ClusterStatusResponse{

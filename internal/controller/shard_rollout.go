@@ -33,7 +33,8 @@ import (
 // replica, the file is turned on, or
 // kividb.io/allow-restart-without-persistence says to go ahead. The other
 // masters go on meanwhile. A master that holds no keys has nothing to lose,
-// and is not held (#108).
+// and is not held (#108). One that is not Ready is replaced as a stuck pod
+// only once its engine is dead (#113).
 
 // A handover can fail: from engine 1.2 the master pauses its writes for up
 // to 10 s, and the replica gives the failover up if it has not caught up
@@ -306,10 +307,19 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		return false
 	}
 
-	// A pod serving nothing has nothing to protect.
+	// A pod serving nothing has nothing to protect. A master the hold below
+	// keeps (no replica to hand over to, no annotation: one not Ready is not
+	// heard from, so held whatever the KividbConfig says) is that only once
+	// its engine is dead (engineDead): one whose kividb container runs,
+	// loading a large snapshot or too busy to answer its probe, holds data
+	// in memory, and stays held, the hold saying so (#113).
+	allowLoss := c.Annotations[kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation] == "true"
 	replaced := false
 	for _, p := range outdated {
 		if p.ready || time.Since(unreadySince(p.pod)) < stuckPodGrace {
+			continue
+		}
+		if c.Spec.Replicas == 0 && !allowLoss && !engineDead(p.pod) {
 			continue
 		}
 		log.Info("rollout: replacing unready pod on an outdated template", "pod", p.pod.Name)
@@ -328,9 +338,24 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		return false // slots are moving: restarts wait for the new shard count
 	}
 
-	// The rest only while the cluster is whole and serving every slot.
+	// The rest only while the cluster is whole and serving every slot. A
+	// held master that is alive but not Ready (kept from the stuck-pod pass
+	// above) is reported before that: one loading or hung has its slots seen
+	// as failed by the others after the node timeout, so the cluster is not
+	// ok, and the hold below would never be reached (#113).
 	v := buildView(c, pods)
 	if int32(len(pods)) != shardCount(c)*(c.Spec.Replicas+1) || !v.formed || v.anchor == nil || v.anchor.status.State != "ok" {
+		if c.Spec.Replicas == 0 && !allowLoss {
+			var alive []*shardPod
+			for _, p := range outdated {
+				if !p.ready && !engineDead(p.pod) {
+					alive = append(alive, p)
+				}
+			}
+			if len(alive) > 0 {
+				r.rolloutHeld(c, heldMastersMessage(alive, kdbConfig))
+			}
+		}
 		return false
 	}
 	healthy := map[*shardPod]bool{}
@@ -387,7 +412,6 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	// goes to the engine's working directory, /data, the pod's volume,
 	// unless a KividbConfig `dir` moves it off, which loses data with the
 	// file on too (#109).
-	allowLoss := c.Annotations[kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation] == "true"
 	var next *shardPod
 	var held []*shardPod
 	for _, p := range outdated {
@@ -514,20 +538,56 @@ func heldMastersMessage(held []*shardPod, kdbConfig *kividbv1alpha1.KividbConfig
 	if len(unheard) > 0 {
 		parts = append(parts, unheardMessage(unheard))
 	}
+	if alive := aliveNotReady(held); alive != "" {
+		parts = append(parts, alive)
+	}
 	return strings.Join(parts, "; ")
 }
 
+// aliveNotReady says which of held have been not Ready for stuckPodGrace
+// though their engine is alive, and so are not replaced as stuck pods
+// (#113), and how to restart one alone, or "". Before stuckPodGrace a pod
+// is not eligible either way, so nothing is said of it.
+func aliveNotReady(held []*shardPod) string {
+	var names []string
+	for _, p := range held {
+		if !p.ready && !engineDead(p.pod) && time.Since(unreadySince(p.pod)) >= stuckPodGrace {
+			names = append(names, p.pod.Name)
+		}
+	}
+	sort.Strings(names)
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return fmt.Sprintf("%s is alive but not Ready (its kividb container runs), so it is not replaced as a stuck pod while it does; to restart it alone, delete pod %s by hand, though a hung engine may not finish its save at shutdown", names[0], names[0])
+	}
+	return fmt.Sprintf("%s are alive but not Ready (their kividb containers run), so they are not replaced as stuck pods while they do; to restart one alone, delete its pod by hand, though a hung engine may not finish its save at shutdown", strings.Join(names, ", "))
+}
+
 // unheardMessage says that the rollout holds the shard masters in held
-// (at least one), which the pass did not hear from, and how to go on.
+// (at least one), which the pass did not hear from (not Ready, or their
+// agent did not answer), and how to go on.
 func unheardMessage(held []*shardPod) string {
 	if len(held) == 1 {
 		p := held[0]
-		return fmt.Sprintf("the rollout holds shard %d's master %s: it has no replica to hand over to, and its agent did not answer, so whether its append-only file is on is not known, nor whether a restart in place to apply the updated pod template would lose data. Get its agent answering (its log says why it does not), give the cluster a replica (spec.replicas), or annotate the cluster %s=true to restart it anyway",
-			p.shard, p.pod.Name, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+		why, fix := "its agent did not answer", "Get its agent answering (its log says why it does not)"
+		if !p.ready {
+			why, fix = "it is not Ready", "Get it Ready (its log says why it is not)"
+		}
+		return fmt.Sprintf("the rollout holds shard %d's master %s: it has no replica to hand over to, and %s, so whether its append-only file is on is not known, nor whether a restart in place to apply the updated pod template would lose data. %s, give the cluster a replica (spec.replicas), or annotate the cluster %s=true to restart it anyway",
+			p.shard, p.pod.Name, why, fix, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+	}
+	why, fix := "their agents did not answer", "Get their agents answering (their logs say why they do not)"
+	for _, p := range held {
+		if !p.ready {
+			why, fix = "the operator did not hear from them (not Ready, or their agent not answering)", "Get them Ready and their agents answering (their logs say why not)"
+			break
+		}
 	}
 	shards, names := heldNames(held)
-	return fmt.Sprintf("the rollout holds the masters of shards %s (%s): none has a replica to hand over to, and their agents did not answer, so whether their append-only files are on is not known, nor whether a restart in place to apply the updated pod template would lose data. Get their agents answering (their logs say why they do not), give the cluster a replica (spec.replicas), or annotate the cluster %s=true to restart them anyway",
-		shards, names, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+	return fmt.Sprintf("the rollout holds the masters of shards %s (%s): none has a replica to hand over to, and %s, so whether their append-only files are on is not known, nor whether a restart in place to apply the updated pod template would lose data. %s, give the cluster a replica (spec.replicas), or annotate the cluster %s=true to restart them anyway",
+		shards, names, why, fix, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
 }
 
 // heldNames lists held (at least two) by shard: "0, 1 and 2" and their

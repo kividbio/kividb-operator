@@ -818,7 +818,10 @@ spec:
   Set it after the hold appears: the operator removes it whenever no pod
   is on an old template, so set before the change it does nothing. A pod
   that has been unready for 30 s on an old template is replaced
-  straight away.
+  straight away, except a held master whose kividb container still runs
+  and has not restarted in that time: it may be loading or overloaded,
+  with data in memory, so it stays held, and the hold says it is alive
+  but not Ready.
   - **A force-killed master that is back within the node timeout** (5 s
     by default) keeps its slots: the engine never marked it failed, so no
     replica took over. With the [append-only file](#persistence-the-append-only-file)

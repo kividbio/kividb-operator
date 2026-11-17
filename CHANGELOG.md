@@ -86,8 +86,11 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   its append-only file off** (#90), on an operator upgrade or any other
   pod template change, so it kept only what its save at shutdown wrote in
   time. The rollout now holds such a master, and one it does not hear
-  from (its file may be off), and goes on with the others;
-  once only held ones are left, `RolloutProgressing` turns False (reason
+  from (its file may be off), and goes on with the others. A held master
+  that is not Ready is replaced as a stuck pod after 30 s only if its
+  kividb container is not running or restarted in that time; one that
+  runs stays held, alive but not Ready (#113). Once only held ones are
+  left, `RolloutProgressing` turns False (reason
   `WouldLoseData`) with a `RolloutHeld` Warning saying how to go on.
   `kividb.io/allow-restart-without-persistence`, set after that, lets it
   restart them anyway, each with a `RestartingWithoutPersistence`
