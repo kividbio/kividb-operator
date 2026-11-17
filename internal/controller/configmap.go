@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -140,6 +141,48 @@ func persistenceDirectives(directives map[string]string) map[string]string {
 		out["appendfsync"] = defaultAppendFsync
 	}
 	return out
+}
+
+// dataDirOffVolume returns kdbConfig's `dir` and where it resolves to, when
+// that is off the pod's volume, or "", "" when it stays on it (#109). The
+// engine changes into `dir` at start, from its working directory DataDir,
+// and keeps its snapshot and append-only file there, where the agent's
+// backups and restores look for them too: a `dir` off the volume loses
+// them on every restart. A relative `dir` resolves against DataDir; the
+// path is cleaned first, so /data/../tmp is off it.
+func dataDirOffVolume(kdbConfig *kividbv1alpha1.KividbConfig) (dir, resolved string) {
+	if kdbConfig == nil {
+		return "", ""
+	}
+	for k, v := range kdbConfig.Spec.Directives {
+		if !strings.EqualFold(k, "dir") {
+			continue
+		}
+		p := configWord(v)
+		if !path.IsAbs(p) {
+			p = path.Join(DataDir, p)
+		}
+		if p = path.Clean(p); p != DataDir && !strings.HasPrefix(p, DataDir+"/") {
+			return v, p
+		}
+	}
+	return "", ""
+}
+
+// configWord is a directive value's first word, as the engine's config file
+// reads it: the inside of "..." or '...', else up to the first space (a
+// "#" there starts a comment).
+func configWord(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') {
+		if end := strings.IndexByte(v[1:], v[0]); end >= 0 {
+			return v[1 : 1+end]
+		}
+	}
+	if words := strings.Fields(v); len(words) > 0 {
+		return words[0]
+	}
+	return ""
 }
 
 // appendOnlyDisabled reports whether kdbConfig turns the append-only file

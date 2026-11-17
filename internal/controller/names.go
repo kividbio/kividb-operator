@@ -24,9 +24,11 @@ const (
 	KividbPortName = "kividb"
 
 	// DataDir is the shared volume mount path for both containers. kividb
-	// has no `dir` config directive; it writes dump.kdb/appendonly.aof
-	// relative to its working directory, so the kividb container's
-	// workingDir is set to DataDir and the PVC is mounted here.
+	// writes dump.kdb/appendonly.aof in its working directory, so the
+	// kividb container's workingDir is set to DataDir and the PVC is
+	// mounted here. A KividbConfig `dir` moves them (the engine changes
+	// into it at start): one that leaves DataDir is refused, see
+	// dataDirOffVolume.
 	DataDir = "/data"
 
 	// ConfigDir is where the rendered kividb.conf Secret is mounted.

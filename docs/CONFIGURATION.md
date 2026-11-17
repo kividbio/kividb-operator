@@ -1069,6 +1069,14 @@ spec:
   `port` and `aclfile` are pinned so the operator's own probes/mounts stay
   correct).
 
+  **`dir`** must stay on the pod's volume, `/data`: the engine keeps its
+  snapshot and append-only file in it, and the backups read them there. A
+  relative `dir`, or an absolute one under `/data`, is passed through; one
+  that resolves outside it (`/data/../tmp` included) is refused, `Ready`
+  `False` with reason `InvalidSpec`, and the cluster's objects are left as
+  they are (see
+  [TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-kividbconfig-dir-off-the-volume-invalidspec)).
+
   **`bind`**: unless you set `bind` or `protected-mode` yourself, the
   operator sets `bind 0.0.0.0`, the address kividb has always listened on.
   kividb v1.1.0 and later enforce protected mode as Redis does: while the
