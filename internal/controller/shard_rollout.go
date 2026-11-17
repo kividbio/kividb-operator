@@ -32,7 +32,8 @@ import (
 // time, so the rollout holds it instead (#90), until the cluster gets a
 // replica, the file is turned on, or
 // kividb.io/allow-restart-without-persistence says to go ahead. The other
-// masters go on meanwhile.
+// masters go on meanwhile. A master that holds no keys has nothing to lose,
+// and is not held (#108).
 
 // A handover can fail: from engine 1.2 the master pauses its writes for up
 // to 10 s, and the replica gives the failover up if it has not caught up
@@ -355,15 +356,27 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		return a.pod.Name > b.pod.Name
 	})
 	// A master with no replica to hand over to and its append-only file off
-	// is held (#90), unless the annotation says to restart it anyway. It
-	// does not hold the others back (the file is on or off per master): the
-	// next is the first that is not held, and the hold is reported only
-	// once every pod left is held.
+	// is held (#90), unless it holds no keys (#108) or the annotation says
+	// to restart it anyway. It does not hold the others back (the file is
+	// on or off per master): the next is the first that is not held, and
+	// the hold is reported only once every pod left is held.
+	//
+	// An empty master has nothing to lose, and a write that reaches it after
+	// its agent's report is not lost either: with the file off, either way
+	// withoutPersistence finds it so, the engine still writes a snapshot as
+	// it stops, keys and index definitions alike. SIGTERM always saves
+	// (`save ""` and shutdown-on-sigterm change nothing, and the operator
+	// never sends SHUTDOWN NOSAVE), the agent's /prestop returns at once for
+	// a master with no replicas, and the snapshot of a near-empty dataset is
+	// written in milliseconds, well inside any grace period. It goes to the
+	// engine's working directory, /data, the pod's volume, unless a
+	// KividbConfig `dir` moves it off, which loses data with the file on
+	// too (#109).
 	allowLoss := c.Annotations[kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation] == "true"
 	var next *shardPod
 	var held []*shardPod
 	for _, p := range outdated {
-		if isMaster(p) && c.Spec.Replicas == 0 && !allowLoss && withoutPersistence(p, kdbConfig) != "" {
+		if isMaster(p) && c.Spec.Replicas == 0 && !allowLoss && withoutPersistence(p, kdbConfig) != "" && !holdsNoKeys(p) {
 			held = append(held, p)
 			continue
 		}
@@ -401,10 +414,18 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		r.rolloutProgressed(c, fmt.Sprintf("asked shard %d's master %s to hand over, to replace it next", next.shard, next.pod.Name))
 		return r.reconcileShardStepDown(ctx, c, pods)
 	}
+	progress := fmt.Sprintf("replacing %s (%d more to go)", next.pod.Name, len(outdated)-1)
 	if isMaster(next) {
 		// No replica to hand over to: restarted in place. Without the file,
-		// only because the annotation says so (see above).
-		if why := withoutPersistence(next, kdbConfig); why == "" {
+		// only because it holds no keys, which the status says so that it
+		// reads apart from a restart with the file on, or because the
+		// annotation says so (see above).
+		why := withoutPersistence(next, kdbConfig)
+		empty := why != "" && holdsNoKeys(next)
+		if empty {
+			progress += fmt.Sprintf(": %s, but it reported no keys, so restarted in place it loses nothing", why)
+		}
+		if why == "" || empty {
 			r.event(c, corev1.EventTypeWarning, "RestartingInPlace",
 				"restarting shard %d's master %s in place to apply the updated pod template: it has no replica to hand over to, so its slots are unavailable until it is back", next.shard, next.pod.Name)
 		} else {
@@ -419,8 +440,17 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		return false
 	}
 	r.event(c, corev1.EventTypeNormal, "RollingUpdate", "replacing %s to apply the updated pod template (%d more to go)", next.pod.Name, len(outdated)-1)
-	r.rolloutProgressed(c, fmt.Sprintf("replacing %s (%d more to go)", next.pod.Name, len(outdated)-1))
+	r.rolloutProgressed(c, progress)
 	return true
+}
+
+// holdsNoKeys reports whether shard pod p's engine holds no keys, as its
+// agent reports it: on a count the agent knows (one from before 0.7.0
+// reports none), and not while the engine loads its data, when it can still
+// show 0. An unready pod's probe does not count.
+func holdsNoKeys(p *shardPod) bool {
+	st := p.status
+	return st != nil && st.KeyCountKnown && !st.Loading && st.KeyCount == 0
 }
 
 // withoutPersistence says why shard master p would keep only what its save

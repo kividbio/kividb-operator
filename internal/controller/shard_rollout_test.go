@@ -26,6 +26,11 @@ func formedForRollout(t *testing.T, shards, replicas int32) *formingHarness {
 	if h.c.Status.Phase != kividbv1alpha1.PhaseRunning {
 		t.Fatalf("not formed: %s", h.c.Status.Phase)
 	}
+	// A cluster in use: every node holds keys. A master that holds none is
+	// not held by the rollout (#108), and the tests of that set it to 0.
+	for _, n := range h.engine.nodes {
+		n.keys = 100
+	}
 	for s := int32(0); s < shards; s++ {
 		sts := &appsv1.StatefulSet{
 			ObjectMeta: metav1.ObjectMeta{Name: shardStatefulSetName(h.c, s), Namespace: h.c.Namespace},
@@ -515,5 +520,76 @@ func TestShardedRolloutReplacesAnUnreadyMasterItHolds(t *testing.T) {
 	}
 	if ev := events(h.r); !strings.Contains(ev, "StuckPodReplaced") {
 		t.Fatalf("events:\n%s\nwant StuckPodReplaced", ev)
+	}
+}
+
+// A master that reports no keys loses nothing to a restart in place, so it
+// is not held (#108). Only on a count its agent knows (one from before
+// 0.7.0 reports none), and not while its engine loads its data, when it can
+// still show 0.
+func TestShardedRolloutHoldsOnlyAMasterThatMayHoldKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		set      func(*fakeNode)
+		wantHeld bool
+	}{
+		{"no keys", func(n *fakeNode) { n.keys = 0 }, false},
+		{"keys", func(n *fakeNode) {}, true},
+		{"no keys while loading", func(n *fakeNode) { n.keys, n.loading = 0, true }, true},
+		{"agent too old to count", func(n *fakeNode) { n.keys, n.oldAgent = 0, true }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := formedForRollout(t, 1, 0)
+			h.kdbConfig = appendOnlyOff()
+			tc.set(h.node(shardPodName(h.c, 0, 0)))
+			deleted := h.rolloutPass()
+			if held := len(deleted) == 0; held != tc.wantHeld {
+				t.Fatalf("replaced %v, want held=%v", deleted, tc.wantHeld)
+			}
+		})
+	}
+}
+
+// It is restarted with the RestartingInPlace Warning, as with the file on
+// (its slots are down until it is back), and RolloutProgressing says it
+// went ahead because the master reported no keys.
+func TestShardedRolloutSaysWhyItRestartsAnEmptyMaster(t *testing.T) {
+	h := formedForRollout(t, 1, 0)
+	h.kdbConfig = appendOnlyOff()
+	h.node(shardPodName(h.c, 0, 0)).keys = 0
+	_ = events(h.r)
+	if deleted := h.rolloutPass(); fmt.Sprint(deleted) != "[s-0-0]" {
+		t.Fatalf("replaced %v, want s-0-0", deleted)
+	}
+	if ev := events(h.r); !strings.Contains(ev, "RestartingInPlace") || strings.Contains(ev, "RestartingWithoutPersistence") {
+		t.Fatalf("events:\n%s\nwant RestartingInPlace and no RestartingWithoutPersistence", ev)
+	}
+	cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition)
+	if cond == nil || cond.Status != metav1.ConditionTrue || !strings.Contains(cond.Message, "s-0-0") || !strings.Contains(cond.Message, "no keys") {
+		t.Fatalf("condition %+v, want True, saying s-0-0 reported no keys", cond)
+	}
+}
+
+// An empty master does not wait behind one that is held: the rollout
+// restarts it, then reports the hold for the other alone.
+func TestShardedRolloutRestartsAnEmptyMasterBesideAHeldOne(t *testing.T) {
+	h := formedForRollout(t, 2, 0)
+	h.kdbConfig = appendOnlyOff()
+	// s-1-0 comes first by name, and holds keys.
+	h.node(shardPodName(h.c, 0, 0)).keys = 0
+	_ = events(h.r)
+	var order []string
+	for i := 0; i < 5; i++ {
+		order = append(order, h.rolloutPass()...)
+	}
+	if fmt.Sprint(order) != "[s-0-0]" || fmt.Sprint(h.outdated()) != "[s-1-0]" {
+		t.Fatalf("replaced %v, outdated %v; want s-0-0 replaced and s-1-0 held", order, h.outdated())
+	}
+	cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition)
+	if cond == nil || cond.Reason != "WouldLoseData" || !strings.Contains(cond.Message, "s-1-0") || strings.Contains(cond.Message, "s-0-0") {
+		t.Fatalf("condition %+v, want WouldLoseData naming s-1-0 only", cond)
+	}
+	if ev := events(h.r); strings.Count(ev, "RolloutHeld") != 1 {
+		t.Fatalf("events:\n%s\nwant one RolloutHeld", ev)
 	}
 }

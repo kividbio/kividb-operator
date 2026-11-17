@@ -257,7 +257,8 @@ shard master has no replica to hand over to, so the rollout would restart
 it in place, and it would keep only what its save at shutdown writes in
 time. The rollout holds it instead and goes on with the other masters;
 once only held ones are left, the `RolloutProgressing` condition says
-why. To go on:
+why. A master that reports no keys is not held: it has nothing to lose.
+To go on:
 
 - give the cluster a replica (`spec.replicas: 1`): once it is in sync,
   the master hands over and nothing is lost;

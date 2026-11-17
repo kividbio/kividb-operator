@@ -84,8 +84,8 @@ condition turns `False` with the same reason, and a `RolloutWaiting`
 Warning Event and a log line say the same, again every 10 minutes while
 it lasts. Nothing else changes: the rollout still waits, and `Ready`
 still describes the cluster's service. `False`, reason `WouldLoseData`:
-the only pods left are shard masters with no replica to hand over to
-and their append-only file off, held until someone acts (see
+the only pods left are shard masters with no replica to hand over to,
+their append-only file off and keys to lose, held until someone acts (see
 [Sharded clusters](#sharded-clusters-shards)). The condition goes once
 every pod is on the current template. Changes to a `KividbAclConfig` are
 applied without a restart unless the `default` user's password changed —
@@ -797,7 +797,9 @@ spec:
   no` in the `KividbConfig`, or the engine reporting it off), the master
   would keep only what its save at shutdown writes in time, so the
   rollout holds it instead, and goes on with the masters it can restart.
-  Once only held masters are left, `RolloutProgressing` turns `False`,
+  A master that reports no keys has nothing to lose, and is restarted in
+  place as with the file on. Once only held masters are left,
+  `RolloutProgressing` turns `False`,
   reason `WouldLoseData`, with a `RolloutHeld` Warning Event. Give the
   cluster a replica, turn the file on (`appendonly yes` in the
   `KividbConfig`, and `CONFIG SET appendonly yes` on the running master),
