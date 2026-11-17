@@ -32,7 +32,8 @@ import (
 // time, so the rollout holds it instead (#90), until the cluster gets a
 // replica, the file is turned on, or
 // kividb.io/allow-restart-without-persistence says to go ahead. The other
-// masters go on meanwhile.
+// masters go on meanwhile. A master that holds no keys has nothing to lose,
+// and is not held (#108).
 
 // A handover can fail: from engine 1.2 the master pauses its writes for up
 // to 10 s, and the replica gives the failover up if it has not caught up
@@ -355,15 +356,42 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		return a.pod.Name > b.pod.Name
 	})
 	// A master with no replica to hand over to and its append-only file off
-	// is held (#90), unless the annotation says to restart it anyway. It
-	// does not hold the others back (the file is on or off per master): the
-	// next is the first that is not held, and the hold is reported only
-	// once every pod left is held.
+	// is held (#90), unless it holds no keys (#108) or the annotation says
+	// to restart it anyway. It does not hold the others back (the file is
+	// on or off per master): the next is the first that is not held, and
+	// the hold is reported only once every pod left is held.
+	//
+	// With no replicas, every pod is its shard's only one (counted above),
+	// and so its master: also one this pass did not hear from (not Ready,
+	// or its agent did not answer), which buildView does not count as a
+	// master. Such a master is held whatever the KividbConfig says: without
+	// its report, whether its engine has the file off (CONFIG SET appendonly
+	// no) is not known, and the rollout does not restart on a guess. One not
+	// Ready is replaced once it has been so for stuckPodGrace (above); one
+	// whose agent does not answer is held for as long as it does not, and
+	// the hold says so.
+	//
+	// An empty master has nothing to lose, and a write that reaches it after
+	// its agent's report is not lost either: with the file off, either way
+	// withoutPersistence finds it so, the engine still writes a snapshot as
+	// it stops, keys and index definitions alike. SIGTERM always saves
+	// (`save ""` and shutdown-on-sigterm change nothing, and the operator
+	// never sends SHUTDOWN NOSAVE), the agent's /prestop returns at once for
+	// a master with no replicas, and the snapshot of a near-empty dataset is
+	// written in milliseconds, inside a grace period of 10 s or more (below
+	// that, the master counts as holding keys: see holdsNoKeys). The save
+	// can still fail (a full or unwritable volume ends the process without
+	// a snapshot), and a script running past its time limit can use up the
+	// grace period; neither changes the decision, since both are about a
+	// write landing in a window of seconds on an empty master. The snapshot
+	// goes to the engine's working directory, /data, the pod's volume,
+	// unless a KividbConfig `dir` moves it off, which loses data with the
+	// file on too (#109).
 	allowLoss := c.Annotations[kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation] == "true"
 	var next *shardPod
 	var held []*shardPod
 	for _, p := range outdated {
-		if isMaster(p) && c.Spec.Replicas == 0 && !allowLoss && withoutPersistence(p, kdbConfig) != "" {
+		if c.Spec.Replicas == 0 && !allowLoss && (p.status == nil || withoutPersistence(p, kdbConfig) != "") && !holdsNoKeys(c, p) {
 			held = append(held, p)
 			continue
 		}
@@ -401,10 +429,18 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		r.rolloutProgressed(c, fmt.Sprintf("asked shard %d's master %s to hand over, to replace it next", next.shard, next.pod.Name))
 		return r.reconcileShardStepDown(ctx, c, pods)
 	}
-	if isMaster(next) {
-		// No replica to hand over to: restarted in place. Without the file,
-		// only because the annotation says so (see above).
-		if why := withoutPersistence(next, kdbConfig); why == "" {
+	progress := fmt.Sprintf("replacing %s (%d more to go)", next.pod.Name, len(outdated)-1)
+	if c.Spec.Replicas == 0 {
+		// Its shard's master, with no replica to hand over to: restarted in
+		// place. Without the file, only because it holds no keys, which the
+		// status says so that it reads apart from a restart with the file
+		// on, or because the annotation says so (see above).
+		why := withoutPersistence(next, kdbConfig)
+		empty := why != "" && holdsNoKeys(c, next)
+		if empty {
+			progress += fmt.Sprintf(": %s, but it reported no keys, so a restart in place has nothing to lose", why)
+		}
+		if why == "" || empty {
 			r.event(c, corev1.EventTypeWarning, "RestartingInPlace",
 				"restarting shard %d's master %s in place to apply the updated pod template: it has no replica to hand over to, so its slots are unavailable until it is back", next.shard, next.pod.Name)
 		} else {
@@ -419,8 +455,28 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		return false
 	}
 	r.event(c, corev1.EventTypeNormal, "RollingUpdate", "replacing %s to apply the updated pod template (%d more to go)", next.pod.Name, len(outdated)-1)
-	r.rolloutProgressed(c, fmt.Sprintf("replacing %s (%d more to go)", next.pod.Name, len(outdated)-1))
+	r.rolloutProgressed(c, progress)
 	return true
+}
+
+// emptyRestartMinGrace is the shortest grace period
+// (spec.terminationGracePeriodSeconds), in seconds, with which a shard
+// master that holds no keys is restarted in place with its append-only
+// file off: below it, the kubelet may kill the engine before or during its
+// save at shutdown, and a write that reached it after its agent's report
+// would be lost.
+const emptyRestartMinGrace = 10
+
+// holdsNoKeys reports whether shard pod p of c holds no keys, for the hold
+// (#108): as its agent reports it, on a count the agent knows (one from
+// before 0.7.0 reports none), not while the engine loads its data, when it
+// can still show 0, and only with a grace period of emptyRestartMinGrace or
+// more. Otherwise it counts as holding keys. An unready pod's probe does
+// not count.
+func holdsNoKeys(c *kividbv1alpha1.KividbCluster, p *shardPod) bool {
+	st := p.status
+	return st != nil && st.KeyCountKnown && !st.Loading && st.KeyCount == 0 &&
+		*gracePeriod(c) >= emptyRestartMinGrace
 }
 
 // withoutPersistence says why shard master p would keep only what its save
@@ -440,28 +496,70 @@ func withoutPersistence(p *shardPod, kdbConfig *kividbv1alpha1.KividbConfig) str
 }
 
 // heldMastersMessage says which shard masters the rollout holds (held, in
-// any order, at least one), why, and how to go on. They are held for the
-// same reason: the KividbConfig, which is the cluster's, or else each
-// one's engine.
+// any order, at least one), why, and how to go on: those with the file off,
+// then those the pass did not hear from.
 func heldMastersMessage(held []*shardPod, kdbConfig *kividbv1alpha1.KividbConfig) string {
+	var off, unheard []*shardPod
+	for _, p := range held {
+		if withoutPersistence(p, kdbConfig) != "" {
+			off = append(off, p)
+		} else {
+			unheard = append(unheard, p)
+		}
+	}
+	var parts []string
+	if len(off) > 0 {
+		parts = append(parts, fileOffMessage(off, kdbConfig))
+	}
+	if len(unheard) > 0 {
+		parts = append(parts, unheardMessage(unheard))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// unheardMessage says that the rollout holds the shard masters in held
+// (at least one), which the pass did not hear from, and how to go on.
+func unheardMessage(held []*shardPod) string {
+	if len(held) == 1 {
+		p := held[0]
+		return fmt.Sprintf("the rollout holds shard %d's master %s: it has no replica to hand over to, and its agent did not answer, so whether its append-only file is on is not known, nor whether a restart in place to apply the updated pod template would lose data. Get its agent answering (its log says why it does not), give the cluster a replica (spec.replicas), or annotate the cluster %s=true to restart it anyway",
+			p.shard, p.pod.Name, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+	}
+	shards, names := heldNames(held)
+	return fmt.Sprintf("the rollout holds the masters of shards %s (%s): none has a replica to hand over to, and their agents did not answer, so whether their append-only files are on is not known, nor whether a restart in place to apply the updated pod template would lose data. Get their agents answering (their logs say why they do not), give the cluster a replica (spec.replicas), or annotate the cluster %s=true to restart them anyway",
+		shards, names, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+}
+
+// heldNames lists held (at least two) by shard: "0, 1 and 2" and their
+// pods' names, "s-0-0, s-1-0, s-2-0".
+func heldNames(held []*shardPod) (shards, names string) {
+	held = slices.Clone(held)
+	slices.SortFunc(held, func(a, b *shardPod) int { return int(a.shard) - int(b.shard) })
+	s := make([]string, len(held))
+	n := make([]string, len(held))
+	for i, p := range held {
+		s[i], n[i] = fmt.Sprint(p.shard), p.pod.Name
+	}
+	return strings.Join(s[:len(s)-1], ", ") + " and " + s[len(s)-1], strings.Join(n, ", ")
+}
+
+// fileOffMessage says that the rollout holds the shard masters in held (at
+// least one), whose append-only file is off, and how to go on. They are
+// held for the same reason: the KividbConfig, which is the cluster's, or
+// else each one's engine.
+func fileOffMessage(held []*shardPod, kdbConfig *kividbv1alpha1.KividbConfig) string {
 	if len(held) == 1 {
 		p := held[0]
 		return fmt.Sprintf("the rollout holds shard %d's master %s: it has no replica to hand over to, and %s, so restarted in place to apply the updated pod template it keeps only what its save at shutdown writes in time. Give the cluster a replica (spec.replicas), turn the file on (appendonly yes in the KividbConfig, and CONFIG SET appendonly yes on the running master), or annotate the cluster %s=true to restart it anyway",
 			p.shard, p.pod.Name, withoutPersistence(p, kdbConfig), kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
 	}
-	held = slices.Clone(held)
-	slices.SortFunc(held, func(a, b *shardPod) int { return int(a.shard) - int(b.shard) })
-	shards := make([]string, len(held))
-	names := make([]string, len(held))
-	for i, p := range held {
-		shards[i], names[i] = fmt.Sprint(p.shard), p.pod.Name
-	}
+	shards, names := heldNames(held)
 	why := withoutPersistence(held[0], kdbConfig)
 	if !appendOnlyDisabled(kdbConfig) {
 		why = "the engine of each reports its append-only file off"
 	}
-	return fmt.Sprintf("the rollout holds the masters of shards %s and %s (%s): none has a replica to hand over to, and %s, so restarted in place to apply the updated pod template each keeps only what its save at shutdown writes in time. Give the cluster a replica (spec.replicas), turn the file on (appendonly yes in the KividbConfig, and CONFIG SET appendonly yes on each running master), or annotate the cluster %s=true to restart them anyway",
-		strings.Join(shards[:len(shards)-1], ", "), shards[len(shards)-1], strings.Join(names, ", "), why, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
+	return fmt.Sprintf("the rollout holds the masters of shards %s (%s): none has a replica to hand over to, and %s, so restarted in place to apply the updated pod template each keeps only what its save at shutdown writes in time. Give the cluster a replica (spec.replicas), turn the file on (appendonly yes in the KividbConfig, and CONFIG SET appendonly yes on each running master), or annotate the cluster %s=true to restart them anyway",
+		shards, names, why, kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation)
 }
 
 // clearRestartWithoutPersistence removes

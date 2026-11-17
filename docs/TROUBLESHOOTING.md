@@ -257,13 +257,21 @@ shard master has no replica to hand over to, so the rollout would restart
 it in place, and it would keep only what its save at shutdown writes in
 time. The rollout holds it instead and goes on with the other masters;
 once only held ones are left, the `RolloutProgressing` condition says
-why. To go on:
+why. A master that reports no keys is not held: it has nothing to lose.
+An agent too old to report a count, an engine still loading its data, or
+a pod with `terminationGracePeriodSeconds` under 10 counts as holding
+keys. To go on:
 
 - give the cluster a replica (`spec.replicas: 1`): once it is in sync,
   the master hands over and nothing is lost;
 - or turn the file on: `appendonly yes` in the `KividbConfig`, and
   `CONFIG SET appendonly yes` on the running master, so that it is on
   before the restart;
+- or, if the hold says its agent did not answer, so whether its
+  append-only file is on is not known, get the agent answering (its
+  container's log says why it does not): the pass after it reports the
+  file on, the master is restarted. A master whose pod is not Ready is
+  held the same, and replaced once it has been so for 30 s;
 - or, if the data can be lost, let the rollout restart the masters:
 
   ```bash
