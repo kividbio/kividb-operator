@@ -144,6 +144,12 @@ func commonLabels(c *kividbv1alpha1.KividbCluster) map[string]string {
 	return l
 }
 
+// snapshotConfigLabel names, on the backup CronJob and on each Job it
+// starts, the KividbSnapshotConfig the Job backs up to. A Job keeps it
+// after spec.snapshotConfigRef changes, so its KividbSnapshot record is
+// labelled from the Job, not from the cluster.
+const snapshotConfigLabel = "kividb.io/snapshot-config"
+
 // backupLabels labels the backup CronJob and the Jobs/Pods it spawns.
 // Deliberately NOT commonLabels/selectorLabels: those are also the
 // StatefulSet's pod selector, and the controller lists pods by that same
