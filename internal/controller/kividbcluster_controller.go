@@ -922,7 +922,18 @@ func validateKividbConfig(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1al
 	if kdbConfig == nil {
 		return nil
 	}
+	// First that every directive is one line of the config file, as the
+	// engine reads it, so that the checks below judge what the engine gets.
+	if err := directivesError(kdbConfig); err != nil {
+		return err
+	}
 	if err := validateTLSPort(c, kdbConfig); err != nil {
+		return err
+	}
+	// Refused, not dropped: a cluster that runs with such a `dir` has its
+	// files there, and without it would start empty in DataDir. Refused, the
+	// cluster's objects stay as they are, and nothing restarts onto it.
+	if err := dataDirError(kdbConfig); err != nil {
 		return err
 	}
 	if isSharded(c) {

@@ -46,6 +46,17 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 
 ### Fixed
 
+- **A `KividbConfig` `dir` off the pod's volume was passed to the
+  engine** (#109), which then kept its snapshot and append-only file on
+  the container's own filesystem: every restart lost the data, the
+  append-only file's included, and backups found nothing. A `dir` that
+  resolves outside `/data` is now refused (`Ready` False, reason
+  `InvalidSpec`, naming the `KividbConfig` and the path), and the
+  cluster's objects are left as they are. A `dir` inside `/data` works as
+  before. A cluster already running with one gets the condition and is
+  not restarted: see TROUBLESHOOTING.md for the way out. A directive name
+  that is not one plain word, or a value with a line break, is refused the
+  same way: the engine would read another directive than the one checked.
 - **A missing TLS or S3 credentials Secret, or a key it lacks, left the
   pods stuck instead of holding back** (#106). The pods take these two
   Secrets straight from the API server, and nothing checked them. A pod
