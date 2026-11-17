@@ -461,12 +461,12 @@ func TestReconcileSharded_RefusedApplyStepIsNotReady(t *testing.T) {
 	snap := &kividbv1alpha1.KividbSnapshotConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "hourly", Namespace: "default"},
 		Spec: kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: "0 * * * *",
-			S3: kividbv1alpha1.S3StorageSpec{Endpoint: "https://s3.example.com", Bucket: "b"}},
+			S3: kividbv1alpha1.S3StorageSpec{Endpoint: "https://s3.example.com", Bucket: "b", CredentialsSecretRef: kividbv1alpha1.S3CredentialsSecretRef{Name: "s3"}}},
 	}
 	h := formedForReconcile(t, func(obj client.Object) bool {
 		_, ok := obj.(*batchv1.CronJob)
 		return ok
-	}, snap)
+	}, snap, s3Credentials("s3"))
 	h.c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "hourly"}
 	if err := h.r.Update(context.Background(), h.c); err != nil {
 		t.Fatal(err)
@@ -546,7 +546,7 @@ func TestReconcileSharded_RebalanceWaitsOnlyForTheWorkloads(t *testing.T) {
 	snap := &kividbv1alpha1.KividbSnapshotConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "hourly", Namespace: "default"},
 		Spec: kividbv1alpha1.KividbSnapshotConfigSpec{Schedule: "0 * * * *",
-			S3: kividbv1alpha1.S3StorageSpec{Endpoint: "https://s3.example.com", Bucket: "b"}},
+			S3: kividbv1alpha1.S3StorageSpec{Endpoint: "https://s3.example.com", Bucket: "b", CredentialsSecretRef: kividbv1alpha1.S3CredentialsSecretRef{Name: "s3"}}},
 	}
 	for _, tc := range []struct {
 		name      string
@@ -564,7 +564,7 @@ func TestReconcileSharded_RebalanceWaitsOnlyForTheWorkloads(t *testing.T) {
 		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := formedForReconcile(t, tc.refuse, snap.DeepCopy())
+			h := formedForReconcile(t, tc.refuse, snap.DeepCopy(), s3Credentials("s3"))
 			ctx := context.Background()
 			// The new shard's pods, as its StatefulSet made them on an
 			// earlier pass.

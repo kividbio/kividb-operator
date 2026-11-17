@@ -33,6 +33,19 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 
 ### Fixed
 
+- **A missing TLS or S3 credentials Secret, or a key it lacks, left the
+  pods stuck instead of holding back** (#106). The pods take these two
+  Secrets straight from the API server, and nothing checked them. A pod
+  of such a template waits in `ContainerCreating` (a TLS key) or
+  `CreateContainerConfigError` (an S3 key), so a rollout stalled with a
+  pod down, and a new cluster had none up. Both Secrets and the keys the
+  pods read, defaults included, are now checked like the ACL password
+  Secrets: until they are there, every write is held back with a
+  `ReconcileError` naming the field, the Secret and the key, and creating
+  or fixing the Secret is picked up at once.
+- **`caKey` was documented to default to `ca.crt`** (#106). It has no
+  default: a CA is mounted, and client certificates required, only when
+  `caKey` is set. The docs and the field's description now say so.
 - **`KividbSnapshot` records could name a config their backup did not go
   to, keep a retried backup's old error, or stay `InProgress` for good**
   (#104).

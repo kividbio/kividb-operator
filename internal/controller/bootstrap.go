@@ -471,14 +471,7 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 		return nil, err
 	}
 
-	accessKeyKey := snapCfg.Spec.S3.CredentialsSecretRef.AccessKeyIDKey
-	if accessKeyKey == "" {
-		accessKeyKey = "accessKeyId"
-	}
-	secretKeyKey := snapCfg.Spec.S3.CredentialsSecretRef.SecretAccessKeyKey
-	if secretKeyKey == "" {
-		secretKeyKey = "secretAccessKey"
-	}
+	accessKeyKey, secretKeyKey := s3CredentialKeys(snapCfg.Spec.S3.CredentialsSecretRef)
 
 	backoff := int32(1)
 	ttl := int32(86400)

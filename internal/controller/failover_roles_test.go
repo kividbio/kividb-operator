@@ -1224,7 +1224,7 @@ func TestReconcile_RefusedApplyStepStillFailsOver(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFailoverCase(t, func(c *kividbv1alpha1.KividbCluster) {
 				c.Spec.SnapshotConfigRef = &corev1.LocalObjectReference{Name: "snap"}
-			}, tc.refuse, snap.DeepCopy())
+			}, tc.refuse, snap.DeepCopy(), s3Credentials("s3"))
 			got := f.reconcile(t, 5*time.Second)
 			f.wantFailedOver(t, got, "ReconcileError", tc.wantMsg)
 			if tc.noSTS {
@@ -1377,8 +1377,14 @@ func TestReferencedObjectsEnqueueTheirClusters(t *testing.T) {
 			Users:                []kividbv1alpha1.KividbUser{{Name: "app", PasswordSecretRef: &kividbv1alpha1.SecretKeyRef{Name: "app-pw", Key: "password"}}},
 		},
 	}
+	conf := &kividbv1alpha1.KividbConfig{ObjectMeta: metav1.ObjectMeta{Name: "conf", Namespace: "a"},
+		Spec: kividbv1alpha1.KividbConfigSpec{TLS: &kividbv1alpha1.KividbTLSSpec{Enabled: true, CertSecretRef: kividbv1alpha1.TLSSecretRef{Name: "tls"}}}}
+	tlsOff := &kividbv1alpha1.KividbConfig{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "a"},
+		Spec: kividbv1alpha1.KividbConfigSpec{TLS: &kividbv1alpha1.KividbTLSSpec{CertSecretRef: kividbv1alpha1.TLSSecretRef{Name: "tls-off"}}}}
+	snap := &kividbv1alpha1.KividbSnapshotConfig{ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "a"},
+		Spec: kividbv1alpha1.KividbSnapshotConfigSpec{S3: kividbv1alpha1.S3StorageSpec{CredentialsSecretRef: kividbv1alpha1.S3CredentialsSecretRef{Name: "s3"}}}}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		acl,
+		acl, conf, tlsOff, snap,
 		cluster("one", "a", func(c *kividbv1alpha1.KividbCluster) {
 			c.Spec.ConfigRef, c.Spec.AclConfigRef, c.Spec.SnapshotConfigRef = ref("conf"), ref("acl"), ref("snap")
 		}),
@@ -1402,6 +1408,9 @@ func TestReferencedObjectsEnqueueTheirClusters(t *testing.T) {
 		{&corev1.Secret{ObjectMeta: in("pw")}, "a/one"},
 		{&corev1.Secret{ObjectMeta: in("app-pw")}, "a/one"},
 		{&corev1.Secret{ObjectMeta: in("bus")}, "a/two"},
+		{&corev1.Secret{ObjectMeta: in("tls")}, "a/one a/two"},
+		{&corev1.Secret{ObjectMeta: in("tls-off")}, ""},
+		{&corev1.Secret{ObjectMeta: in("s3")}, "a/one"},
 		{&corev1.Secret{ObjectMeta: in("unrelated")}, ""},
 	} {
 		var got []string

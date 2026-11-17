@@ -207,3 +207,65 @@ func desiredAuthSecret(c *kividbv1alpha1.KividbCluster, aclContent, agentToken s
 		},
 	}
 }
+
+// tlsSecretKeys returns the keys of a KividbConfig's TLS Secret that the
+// pods mount: the certificate and private key, with their defaults, and
+// the CA, which is mounted only when caKey is set.
+func tlsSecretKeys(ref kividbv1alpha1.TLSSecretRef) (cert, key, ca string) {
+	cert, key = ref.CertKey, ref.KeyKey
+	if cert == "" {
+		cert = "tls.crt"
+	}
+	if key == "" {
+		key = "tls.key"
+	}
+	return cert, key, ref.CAKey
+}
+
+// s3CredentialKeys returns the keys of a KividbSnapshotConfig's S3
+// credentials Secret, with their defaults.
+func s3CredentialKeys(ref kividbv1alpha1.S3CredentialsSecretRef) (accessKeyID, secretAccessKey string) {
+	accessKeyID, secretAccessKey = ref.AccessKeyIDKey, ref.SecretAccessKeyKey
+	if accessKeyID == "" {
+		accessKeyID = "accessKeyId"
+	}
+	if secretAccessKey == "" {
+		secretAccessKey = "secretAccessKey"
+	}
+	return accessKeyID, secretAccessKey
+}
+
+// mountedSecret is a Secret the pods read without the operator: a volume
+// or an env var's secretKeyRef, which name the keys they need.
+type mountedSecret struct {
+	from string // the field that names it, for the error
+	name string
+	keys []string
+}
+
+// mountedSecrets lists the Secrets a cluster's pods take straight from
+// the API server: the TLS certificate (a volume of the kividb container)
+// and the S3 credentials (the agent's env). The ACL passwords are read by
+// the operator itself, in resolveSecretValues.
+func mountedSecrets(kdbConfig *kividbv1alpha1.KividbConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) []mountedSecret {
+	var out []mountedSecret
+	if tls := kividbTLSSpec(kdbConfig); tls != nil && tls.Enabled {
+		cert, key, ca := tlsSecretKeys(tls.CertSecretRef)
+		keys := []string{cert, key}
+		if ca != "" {
+			keys = append(keys, ca)
+		}
+		out = append(out, mountedSecret{
+			from: fmt.Sprintf("KividbConfig %s spec.tls.certSecretRef", kdbConfig.Name),
+			name: tls.CertSecretRef.Name, keys: keys,
+		})
+	}
+	if snapCfg != nil {
+		accessKeyID, secretAccessKey := s3CredentialKeys(snapCfg.Spec.S3.CredentialsSecretRef)
+		out = append(out, mountedSecret{
+			from: fmt.Sprintf("KividbSnapshotConfig %s spec.s3.credentialsSecretRef", snapCfg.Name),
+			name: snapCfg.Spec.S3.CredentialsSecretRef.Name, keys: []string{accessKeyID, secretAccessKey},
+		})
+	}
+	return out
+}

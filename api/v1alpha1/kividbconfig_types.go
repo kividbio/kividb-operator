@@ -45,8 +45,10 @@ type TLSSecretRef struct {
 	KeyKey string `json:"keyKey,omitempty"`
 
 	// CAKey is the key holding a PEM CA certificate, if client-cert
-	// verification is desired. Defaults to "ca.crt". Optional -- if the
-	// key doesn't exist in the Secret, no --tls-ca-cert-file is set.
+	// verification is desired. It has no default: unset, no CA is mounted
+	// and no --tls-ca-cert-file is set, even when the Secret has a
+	// "ca.crt" (as cert-manager's do). Set, the key must be in the Secret,
+	// like certKey and keyKey; until it is, the operator holds back.
 	// +optional
 	CAKey string `json:"caKey,omitempty"`
 }
