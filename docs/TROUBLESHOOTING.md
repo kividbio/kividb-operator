@@ -276,6 +276,11 @@ keys. To go on:
   pull, never started) or restarted in that time; one whose container
   runs, loading a large snapshot or too busy to answer its probe, stays
   held, and the hold says it is alive but not Ready;
+- or, for one such master that does not come back (an engine that never
+  gets Ready again), delete that pod by hand: only it restarts, where the
+  annotation below lets every held master go. A hung engine may not finish
+  its save at shutdown, so with the file off it can come back with less
+  than it held;
 - or, if the data can be lost, let the rollout restart the masters:
 
   ```bash

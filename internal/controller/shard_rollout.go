@@ -338,9 +338,24 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		return false // slots are moving: restarts wait for the new shard count
 	}
 
-	// The rest only while the cluster is whole and serving every slot.
+	// The rest only while the cluster is whole and serving every slot. A
+	// held master that is alive but not Ready (kept from the stuck-pod pass
+	// above) is reported before that: one loading or hung has its slots seen
+	// as failed by the others after the node timeout, so the cluster is not
+	// ok, and the hold below would never be reached (#113).
 	v := buildView(c, pods)
 	if int32(len(pods)) != shardCount(c)*(c.Spec.Replicas+1) || !v.formed || v.anchor == nil || v.anchor.status.State != "ok" {
+		if c.Spec.Replicas == 0 && !allowLoss {
+			var alive []*shardPod
+			for _, p := range outdated {
+				if !p.ready && !engineDead(p.pod) {
+					alive = append(alive, p)
+				}
+			}
+			if len(alive) > 0 {
+				r.rolloutHeld(c, heldMastersMessage(alive, kdbConfig))
+			}
+		}
 		return false
 	}
 	healthy := map[*shardPod]bool{}
@@ -529,12 +544,14 @@ func heldMastersMessage(held []*shardPod, kdbConfig *kividbv1alpha1.KividbConfig
 	return strings.Join(parts, "; ")
 }
 
-// aliveNotReady says which of held are not Ready though their engine is
-// alive, and so are not replaced as stuck pods (#113), or "".
+// aliveNotReady says which of held have been not Ready for stuckPodGrace
+// though their engine is alive, and so are not replaced as stuck pods
+// (#113), and how to restart one alone, or "". Before stuckPodGrace a pod
+// is not eligible either way, so nothing is said of it.
 func aliveNotReady(held []*shardPod) string {
 	var names []string
 	for _, p := range held {
-		if !p.ready && !engineDead(p.pod) {
+		if !p.ready && !engineDead(p.pod) && time.Since(unreadySince(p.pod)) >= stuckPodGrace {
 			names = append(names, p.pod.Name)
 		}
 	}
@@ -543,9 +560,9 @@ func aliveNotReady(held []*shardPod) string {
 	case 0:
 		return ""
 	case 1:
-		return fmt.Sprintf("%s is alive but not Ready (its kividb container runs), so it is not replaced as a stuck pod while it does", names[0])
+		return fmt.Sprintf("%s is alive but not Ready (its kividb container runs), so it is not replaced as a stuck pod while it does; to restart it alone, delete pod %s by hand, though a hung engine may not finish its save at shutdown", names[0], names[0])
 	}
-	return fmt.Sprintf("%s are alive but not Ready (their kividb containers run), so they are not replaced as stuck pods while they do", strings.Join(names, ", "))
+	return fmt.Sprintf("%s are alive but not Ready (their kividb containers run), so they are not replaced as stuck pods while they do; to restart one alone, delete its pod by hand, though a hung engine may not finish its save at shutdown", strings.Join(names, ", "))
 }
 
 // unheardMessage says that the rollout holds the shard masters in held

@@ -73,6 +73,9 @@ func engineDead(pod *corev1.Pod) bool {
 			continue
 		}
 		run := cs.State.Running
+		// StartedAt is the node's clock, compared with the operator's: a node
+		// clock more than stuckPodGrace ahead makes an old restart look
+		// recent, and the engine dead. Rare enough to leave.
 		return run == nil || (cs.RestartCount > 0 && time.Since(run.StartedAt.Time) < stuckPodGrace)
 	}
 	return true
