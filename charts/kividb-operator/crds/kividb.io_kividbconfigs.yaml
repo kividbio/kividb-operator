@@ -89,9 +89,11 @@ spec:
                         caKey:
                           type: string
                           description: >-
-                            Defaults to "ca.crt". Optional -- set only if
-                            client-cert verification is desired and this
-                            key actually exists in the Secret.
+                            No default. Set it to mount a CA and have kividb
+                            verify clients' certificates; unset, no CA is
+                            mounted, even when the Secret holds a "ca.crt".
+                            A key named here that the Secret lacks holds the
+                            cluster back, like a missing certKey or keyKey.
             status:
               type: object
               description: Observed state of this KividbConfig.

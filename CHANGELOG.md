@@ -19,6 +19,16 @@ restarts its master in place: its slots are unavailable while it does,
 and with persistence off its data is lost. Scale such a shard to one
 replica first, or upgrade in a maintenance window if persistence is off.
 
+**TLS with a CA: client certificates are verified only when `caKey` is
+set** (#106). Until now the `caKey` description and the TLS example in
+`CONFIGURATION.md` said it defaulted to `ca.crt`. That was wrong, and the
+operator has never behaved that way: with `caKey` unset no CA is mounted,
+and kividb does not ask clients for a certificate, even when the Secret
+holds a `ca.crt` (cert-manager's always do). If you relied on the old
+text for client-certificate verification, set `caKey: ca.crt`, and make
+sure your clients present certificates first, since kividb then refuses
+the ones that do not. Nothing changes for a cluster on upgrade.
+
 **Helm releases not named `kividb-operator`:** the manager's ClusterRole
 (a Role with `watchNamespace`) is now named after the release, and its
 binding after the role (#97). `helm upgrade` creates both and then deletes
@@ -42,10 +52,15 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   pods read, defaults included, are now checked like the ACL password
   Secrets: until they are there, every write is held back with a
   `ReconcileError` naming the field, the Secret and the key, and creating
-  or fixing the Secret is picked up at once.
+  or fixing the Secret is picked up at once. A running cluster keeps its
+  pods; a Secret deleted or emptied later is reported the same way. The
+  restore Job of `bootstrapFromSnapshot`, which read the same Secret and
+  waited for good, is not made until its credentials are there.
 - **`caKey` was documented to default to `ca.crt`** (#106). It has no
-  default: a CA is mounted, and client certificates required, only when
-  `caKey` is set. The docs and the field's description now say so.
+  default: a CA is mounted, and client certificates verified, only when
+  `caKey` is set, and a `caKey` naming a key the Secret lacks is an error
+  like any other missing key. The docs and the field's description now
+  say so; see the note above.
 - **`KividbSnapshot` records could name a config their backup did not go
   to, keep a retried backup's old error, or stay `InProgress` for good**
   (#104).

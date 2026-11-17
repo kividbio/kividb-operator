@@ -244,7 +244,7 @@ spec:
 Watch progress on `status.bootstrap` and the `Bootstrapped` condition:
 `False` until the restore Job succeeds, with a reason that says what the
 bootstrap waits for or does (`WaitingForEarlierCluster`,
-`WaitingForVolumeDeletion`, `Restoring`, `RestoreRetrying`,
+`WaitingForVolumeDeletion`, `ReconcileError`, `Restoring`, `RestoreRetrying`,
 `RestoreFailed`, or `Refused` for a snapshot it cannot restore, such as a
 sharded cluster's backup), then `True`. Until then the cluster's phase is
 `Provisioning`, or `Error` once the bootstrap has failed or was refused.
@@ -266,6 +266,13 @@ cluster (still being garbage-collected, or orphaned with
 `data-<cluster>-0` PVC that is still being deleted (held by a finalizer,
 say) is waited for too: `status.bootstrap.message` names it, with a
 `BootstrapWaitingForVolume` Event.
+The restore Job reads the S3 credentials of the snapshot's own
+`KividbSnapshotConfig`, which need not be the cluster's
+`snapshotConfigRef`. If that Secret, or a key it names, is missing, no
+restore Job is made: the bootstrap waits in `Pending` (reason
+`ReconcileError`) with `status.bootstrap.error` naming the Secret and the
+key, and `Ready` is `False` with the same reason and message. Creating or
+fixing the Secret starts the restore.
 
 **Re-creating a deleted cluster with the same name.** The StatefulSet
 keeps its PVCs when the cluster is deleted, so the new cluster finds

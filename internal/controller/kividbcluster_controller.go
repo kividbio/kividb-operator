@@ -224,7 +224,8 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	steps.run("reconciling services", func() error { return r.reconcileServices(ctx, &c, kdbConfig) })
 
 	blockSTS, bootErr := r.reconcileBootstrap(ctx, &c)
-	if bootErr != nil {
+	var heldBoot *heldBootstrapError
+	if bootErr != nil && !errors.As(bootErr, &heldBoot) {
 		log.Error(bootErr, "bootstrap reconciliation failed")
 	}
 	if c.Spec.BootstrapFromSnapshot != nil {
@@ -258,6 +259,11 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	steps.run("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, &c, snapshotConfigName(snapCfg)) })
 	steps.run("", func() error { return r.reconcileServiceMonitor(ctx, &c) })
 	applyErr := steps.err
+	if applyErr == nil && heldBoot != nil {
+		// Reported as a refused step is, though not returned as one: the
+		// pass is retried on the requeue below, not on the backoff.
+		applyErr = heldBoot
+	}
 	if applyErr != nil {
 		r.warnOnChange(&c, "ReconcileError", applyErr)
 	}
@@ -269,7 +275,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.noteBootstrapApplyErr(ctx, &c, applyErr); err != nil {
 			return ctrl.Result{}, err
 		}
-		if applyErr != nil {
+		if applyErr != nil && applyErr != error(heldBoot) {
 			return ctrl.Result{}, applyErr
 		}
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -1104,6 +1110,13 @@ func (r *KividbClusterReconciler) referencesSecret(ctx context.Context, c *kivid
 		snapCfg = nil
 	}
 	for _, m := range mountedSecrets(kdbConfig, snapCfg) {
+		if m.name == name {
+			return true
+		}
+	}
+	// The restore Job of a bootstrap not yet done reads its snapshot's
+	// credentials, which may be another config's.
+	for _, m := range mountedSecrets(nil, r.bootstrapSnapshotConfig(ctx, c)) {
 		if m.name == name {
 			return true
 		}

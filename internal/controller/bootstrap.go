@@ -31,13 +31,40 @@ func bootstrapJobName(c *kividbv1alpha1.KividbCluster) string {
 // BootstrapCondition says whether pod-0's volume was seeded from
 // spec.bootstrapFromSnapshot and, until it is, what the bootstrap is doing
 // or waiting for: reason WaitingForEarlierCluster, WaitingForVolumeDeletion,
-// Pending, Restoring, RestoreRetrying, RestoreFailed, Refused; True with
+// ReconcileError (its S3 credentials Secret is missing), Pending, Restoring, RestoreRetrying, RestoreFailed, Refused; True with
 // Restored or Skipped.
 const BootstrapCondition = "Bootstrapped"
 
 // errEarlierRestoreJob is returned by ensureBootstrapJob for a restore Job
 // with this cluster's name that an earlier cluster with the name made.
 var errEarlierRestoreJob = errors.New("not this cluster's but an earlier cluster's with this name; waiting for it to be deleted")
+
+// heldBootstrapError is a bootstrap held back by a reference that cannot
+// be used yet, such as a missing Secret. Like a held-back reconcile, it
+// is reported on the Ready condition (reason ReconcileError) and retried,
+// not logged as a failure.
+type heldBootstrapError struct{ err error }
+
+func (e *heldBootstrapError) Error() string { return e.err.Error() }
+func (e *heldBootstrapError) Unwrap() error { return e.err }
+
+// bootstrapSnapshotConfig returns the KividbSnapshotConfig the restore
+// Job of a bootstrap not yet done reads: the snapshot's own, which need
+// not be the cluster's spec.snapshotConfigRef. nil if there is none.
+func (r *KividbClusterReconciler) bootstrapSnapshotConfig(ctx context.Context, c *kividbv1alpha1.KividbCluster) *kividbv1alpha1.KividbSnapshotConfig {
+	if c.Spec.BootstrapFromSnapshot == nil || (c.Status.Bootstrap != nil && c.Status.Bootstrap.Completed) {
+		return nil
+	}
+	var snap kividbv1alpha1.KividbSnapshot
+	if err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: c.Spec.BootstrapFromSnapshot.SnapshotRef.Name}, &snap); err != nil {
+		return nil
+	}
+	var snapCfg kividbv1alpha1.KividbSnapshotConfig
+	if err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: snap.Spec.SnapshotConfigRef.Name}, &snapCfg); err != nil {
+		return nil
+	}
+	return &snapCfg
+}
 
 // reconcileBootstrap seeds pod-0's PVC from spec.bootstrapFromSnapshot
 // before the StatefulSet is allowed to run. Returns shouldBlock=true while
@@ -167,6 +194,16 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 		c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapFailed
 		c.Status.Bootstrap.Error = fmt.Sprintf("snapshotConfig %q: %v", snap.Spec.SnapshotConfigRef.Name, err)
 		return true, err
+	}
+	// The restore Job reads the S3 credentials as the agent does: a pod
+	// whose Secret or key is missing never starts, and the Job never
+	// fails, so the bootstrap would say "restore Job running" for good.
+	if err := r.checkMountedSecrets(ctx, c, nil, &snapCfg); err != nil {
+		reason = "ReconcileError"
+		c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapPending
+		c.Status.Bootstrap.Message = "restore Job not created: waiting for its S3 credentials"
+		c.Status.Bootstrap.Error = err.Error()
+		return true, &heldBootstrapError{fmt.Errorf("bootstrap: resolving referenced secrets: %w", err)}
 	}
 
 	kept, deleting, err := r.ensureBootstrapPVC(ctx, c)
