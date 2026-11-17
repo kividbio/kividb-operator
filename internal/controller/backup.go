@@ -106,7 +106,7 @@ func desiredBackupCronJob(c *kividbv1alpha1.KividbCluster, snapCfg *kividbv1alph
 	successHistory := int32(3)
 	failedHistory := int32(3)
 	labels := backupLabels(c)
-	labels["kividb.io/snapshot-config"] = snapCfg.Name
+	labels[snapshotConfigLabel] = snapCfg.Name
 
 	return &batchv1.CronJob{
 		ObjectMeta: metav1.ObjectMeta{
@@ -176,21 +176,57 @@ func (r *KividbClusterReconciler) reconcileSnapshots(ctx context.Context, c *kiv
 			return fmt.Errorf("job %s: %w", job.Name, err)
 		}
 	}
+	return r.failOrphanedSnapshots(ctx, c, jobs.Items)
+}
+
+// failOrphanedSnapshots marks Failed each of c's KividbSnapshot records
+// that has not finished but whose backup Job is gone. Only a record whose
+// Job still exists is brought up to date above, so without this a record
+// stays InProgress for good once its Job is deleted mid-run: by hand, or
+// with the CronJob when spec.snapshotConfigRef is removed. Such a backup
+// never wrote its object key, so it is not one to restore from.
+func (r *KividbClusterReconciler) failOrphanedSnapshots(ctx context.Context, c *kividbv1alpha1.KividbCluster, jobs []batchv1.Job) error {
+	var snaps kividbv1alpha1.KividbSnapshotList
+	if err := r.List(ctx, &snaps, client.InNamespace(c.Namespace), client.MatchingLabels{kividbv1alpha1.ClusterLabel: c.Name}); err != nil {
+		return fmt.Errorf("listing snapshots: %w", err)
+	}
+	live := make(map[string]bool, len(jobs))
+	for i := range jobs {
+		live[snapshotName(&jobs[i])] = true
+	}
+	for i := range snaps.Items {
+		snap := &snaps.Items[i]
+		if live[snap.Name] || snapshotFinished(snap.Status.Phase) {
+			continue
+		}
+		now := metav1.Now()
+		snap.Status.Phase = kividbv1alpha1.SnapshotFailed
+		snap.Status.CompletionTime = &now
+		snap.Status.Error = fmt.Sprintf("backup Job %s is gone and its result was never recorded", snap.Name)
+		if err := r.Status().Update(ctx, snap); err != nil {
+			return fmt.Errorf("snapshot %s: %w", snap.Name, err)
+		}
+	}
 	return nil
+}
+
+func snapshotFinished(p kividbv1alpha1.SnapshotPhase) bool {
+	return p == kividbv1alpha1.SnapshotSucceeded || p == kividbv1alpha1.SnapshotFailed
 }
 
 func (r *KividbClusterReconciler) reconcileOneSnapshot(ctx context.Context, c *kividbv1alpha1.KividbCluster, snapshotConfigName string, job *batchv1.Job) error {
 	snap := &kividbv1alpha1.KividbSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: snapshotName(job), Namespace: c.Namespace},
 	}
+	configName := jobSnapshotConfig(job, snapshotConfigName)
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, snap, func() error {
 		if snap.Labels == nil {
 			snap.Labels = map[string]string{}
 		}
 		snap.Labels[kividbv1alpha1.ClusterLabel] = c.Name
-		snap.Labels["kividb.io/snapshot-config"] = snapshotConfigName
+		snap.Labels[snapshotConfigLabel] = configName
 		snap.Spec.ClusterRef = corev1.LocalObjectReference{Name: c.Name}
-		snap.Spec.SnapshotConfigRef = corev1.LocalObjectReference{Name: snapshotConfigName}
+		snap.Spec.SnapshotConfigRef = corev1.LocalObjectReference{Name: configName}
 		// Deliberately no OwnerReference to the KividbCluster: backup
 		// history should survive cluster deletion (the S3 objects
 		// certainly do), not cascade-delete with it.
@@ -207,10 +243,36 @@ func (r *KividbClusterReconciler) reconcileOneSnapshot(ctx context.Context, c *k
 	return r.Status().Update(ctx, snap)
 }
 
+// snapshotConfigName is snapCfg's name, or "" for none.
+func snapshotConfigName(snapCfg *kividbv1alpha1.KividbSnapshotConfig) string {
+	if snapCfg == nil {
+		return ""
+	}
+	return snapCfg.Name
+}
+
+// jobSnapshotConfig returns the KividbSnapshotConfig a backup Job backs
+// up to: the one on its own label, which the CronJob gave it when it
+// started. The cluster's spec.snapshotConfigRef may name another by now,
+// and the CronJob keeps the earlier config's Jobs in its history; a
+// record of one of them must still point at the bucket its backup is in,
+// or a bootstrapFromSnapshot of it reads the wrong bucket. fallback is
+// for a Job without the label, such as one created by hand.
+func jobSnapshotConfig(job *batchv1.Job, fallback string) string {
+	if name := job.Labels[snapshotConfigLabel]; name != "" {
+		return name
+	}
+	return fallback
+}
+
 // populateSnapshotStatus derives status purely from Kubernetes-native
 // state: the Job's own conditions/timestamps, and (once available) the
 // backup-trigger container's termination message on its most recent pod.
 func populateSnapshotStatus(ctx context.Context, c client.Client, job *batchv1.Job, snap *kividbv1alpha1.KividbSnapshot) {
+	// The error is rebuilt each pass from the Job as it is now: a Job
+	// retries a failed pod (BackoffLimit), and a retry that succeeded
+	// must not keep showing the failed attempt's error.
+	snap.Status.Error = ""
 	if job.Status.StartTime != nil {
 		snap.Status.StartTime = job.Status.StartTime
 	}

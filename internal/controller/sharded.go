@@ -468,9 +468,9 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 	// What moving slots waits for: the shards' workloads, not the backups.
 	workloadsErr := steps.err
 	steps.run("reconciling backup cronjob", func() error { return r.reconcileBackupCronJob(ctx, c, snapCfg) })
-	if snapCfg != nil {
-		steps.run("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, c, snapCfg.Name) })
-	}
+	// Also with no snapshotConfigRef: a record whose Job went with the
+	// CronJob is failed rather than left InProgress.
+	steps.run("reconciling snapshots", func() error { return r.reconcileSnapshots(ctx, c, snapshotConfigName(snapCfg)) })
 	steps.run("", func() error { return r.reconcileServiceMonitor(ctx, c) })
 	applyErr := steps.err
 	if applyErr != nil && held == nil {
