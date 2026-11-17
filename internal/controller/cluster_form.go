@@ -61,6 +61,23 @@ func engineRunning(pod *corev1.Pod) bool {
 	return false
 }
 
+// engineDead reports whether the pod's kividb container holds nothing in
+// memory (#113): it never got one (the pod is unschedulable, or its
+// container is still being created), it is not running (waiting, in
+// CrashLoopBackOff or ImagePullBackOff say, or terminated), or it restarted
+// within stuckPodGrace, since a crash loop runs for a moment between
+// restarts. One that has run longer than that, not Ready or not, is alive.
+func engineDead(pod *corev1.Pod) bool {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name != kividbContainerName {
+			continue
+		}
+		run := cs.State.Running
+		return run == nil || (cs.RestartCount > 0 && time.Since(run.StartedAt.Time) < stuckPodGrace)
+	}
+	return true
+}
+
 func (p *shardPod) myself() (agentapi.ClusterNode, bool) {
 	if p.status == nil {
 		return agentapi.ClusterNode{}, false

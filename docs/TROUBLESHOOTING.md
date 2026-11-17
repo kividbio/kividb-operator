@@ -271,7 +271,11 @@ keys. To go on:
   append-only file is on is not known, get the agent answering (its
   container's log says why it does not): the pass after it reports the
   file on, the master is restarted. A master whose pod is not Ready is
-  held the same, and replaced once it has been so for 30 s;
+  held the same. After 30 s it is replaced as a stuck pod only if its
+  kividb container is not running (a crash loop, an image it cannot
+  pull, never started) or restarted in that time; one whose container
+  runs, loading a large snapshot or too busy to answer its probe, stays
+  held, and the hold says it is alive but not Ready;
 - or, if the data can be lost, let the rollout restart the masters:
 
   ```bash

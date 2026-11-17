@@ -493,9 +493,10 @@ func TestShardedRolloutGoesOnOnceTheMasterIsSafe(t *testing.T) {
 	}
 }
 
-// A master that has been unready on an old template for stuckPodGrace
-// serves nothing, so the hold does not keep it: it is replaced as any
-// stuck pod is.
+// A master that has been unready on an old template for stuckPodGrace,
+// with no kividb container running (here it has none), holds nothing in
+// memory, so the hold does not keep it: it is replaced as any stuck pod
+// is. One whose container runs stays held (shard_stuck_test.go).
 func TestShardedRolloutReplacesAnUnreadyMasterItHolds(t *testing.T) {
 	h := formedForRollout(t, 1, 0)
 	h.kdbConfig = appendOnlyOff()
