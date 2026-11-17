@@ -18,7 +18,7 @@ replicas first and each master after a handover, for the new
 restarts its master in place: its slots are unavailable while it does.
 With persistence off, the rollout now holds such a master instead
 (`RolloutProgressing` False, `WouldLoseData`, #90): give the cluster a
-replica first, turn the append-only file on, or set
+replica first, turn the append-only file on, or, once the hold shows, set
 `kividb.io/allow-restart-without-persistence` to restart it anyway.
 
 **Helm releases not named `kividb-operator`:** the manager's ClusterRole
@@ -38,11 +38,12 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 - **A rollout restarted a shard master with no replica in place even with
   its append-only file off** (#90), on an operator upgrade or any other
   pod template change, so it kept only what its save at shutdown wrote in
-  time. The rollout now holds such a master, with `RolloutProgressing`
-  False (reason `WouldLoseData`) and a `RolloutHeld` Warning saying how
-  to go on; `kividb.io/allow-restart-without-persistence` lets it restart
-  them anyway, each with a `RestartingWithoutPersistence` Warning, and is
-  removed once the rollout is done. With the file on, a
+  time. The rollout now holds such a master and goes on with the others;
+  once only held ones are left, `RolloutProgressing` turns False (reason
+  `WouldLoseData`) with a `RolloutHeld` Warning saying how to go on.
+  `kividb.io/allow-restart-without-persistence`, set after that, lets it
+  restart them anyway, each with a `RestartingWithoutPersistence`
+  Warning, and is removed once the rollout is done. With the file on, a
   `RestartingInPlace` Warning comes first.
 - **Two releases of the chart could not share a cluster** (#97): both
   claimed the ClusterRole `kividb-operator-manager-role`, so the second

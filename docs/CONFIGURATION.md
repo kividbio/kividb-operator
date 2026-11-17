@@ -84,8 +84,8 @@ condition turns `False` with the same reason, and a `RolloutWaiting`
 Warning Event and a log line say the same, again every 10 minutes while
 it lasts. Nothing else changes: the rollout still waits, and `Ready`
 still describes the cluster's service. `False`, reason `WouldLoseData`:
-it holds a shard master that has no replica to hand over to while its
-append-only file is off, until someone acts (see
+the only pods left are shard masters with no replica to hand over to
+and their append-only file off, held until someone acts (see
 [Sharded clusters](#sharded-clusters-shards)). The condition goes once
 every pod is on the current template. Changes to a `KividbAclConfig` are
 applied without a restart unless the `default` user's password changed —
@@ -794,19 +794,21 @@ spec:
   [append-only file](#persistence-the-append-only-file) off (`appendonly
   no` in the `KividbConfig`, or the engine reporting it off), the master
   would keep only what its save at shutdown writes in time, so the
-  rollout holds it instead: `RolloutProgressing` turns `False`, reason
-  `WouldLoseData`, with a `RolloutHeld` Warning Event. Give the cluster a
-  replica, turn the file on (`appendonly yes` in the `KividbConfig`, and
-  `CONFIG SET appendonly yes` on the running master), or annotate the
-  cluster to restart such masters anyway, each with a
-  `RestartingWithoutPersistence` Warning; the operator removes the
-  annotation once no pod is left on an old template:
+  rollout holds it instead, and goes on with the masters it can restart.
+  Once only held masters are left, `RolloutProgressing` turns `False`,
+  reason `WouldLoseData`, with a `RolloutHeld` Warning Event. Give the
+  cluster a replica, turn the file on (`appendonly yes` in the
+  `KividbConfig`, and `CONFIG SET appendonly yes` on the running master),
+  or annotate the cluster to restart such masters anyway, each with a
+  `RestartingWithoutPersistence` Warning:
 
   ```bash
   kubectl annotate kividbcluster my-cluster kividb.io/allow-restart-without-persistence=true
   ```
 
-  A pod that has been unready for 30 s on an old template is replaced
+  Set it after the hold appears: the operator removes it whenever no pod
+  is on an old template, so set before the change it does nothing. A pod
+  that has been unready for 30 s on an old template is replaced
   straight away.
   - **A force-killed master that is back within the node timeout** (5 s
     by default) keeps its slots: the engine never marked it failed, so no

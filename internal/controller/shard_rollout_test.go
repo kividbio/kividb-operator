@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -394,5 +395,125 @@ func TestShardedRolloutWarnsBeforeRestartingAMasterInPlace(t *testing.T) {
 	}
 	if ev := events(h.r); strings.Count(ev, "RestartingInPlace") != 2 {
 		t.Fatalf("events:\n%s\nwant a RestartingInPlace per master", ev)
+	}
+}
+
+// The file is on or off per master (CONFIG SET appendonly yes reaches one
+// engine at a time), so a held master does not keep the others back: the
+// rollout restarts those it can, and reports the hold once only held ones
+// are left.
+func TestShardedRolloutReplacesTheMastersItDoesNotHold(t *testing.T) {
+	h := formedForRollout(t, 2, 0)
+	// s-1-0 comes first by name: with its file off, it must not hold s-0-0.
+	h.node(shardPodName(h.c, 1, 0)).aofOff = true
+	_ = events(h.r)
+	var order []string
+	for i := 0; i < 5; i++ {
+		order = append(order, h.rolloutPass()...)
+	}
+	if fmt.Sprint(order) != "[s-0-0]" || fmt.Sprint(h.outdated()) != "[s-1-0]" {
+		t.Fatalf("replaced %v, outdated %v; want s-0-0 replaced and s-1-0 held", order, h.outdated())
+	}
+	cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition)
+	if cond == nil || cond.Reason != "WouldLoseData" || !strings.Contains(cond.Message, "s-1-0") || strings.Contains(cond.Message, "s-0-0") {
+		t.Fatalf("condition %+v, want WouldLoseData naming s-1-0 only", cond)
+	}
+	if ev := events(h.r); strings.Count(ev, "RolloutHeld") != 1 {
+		t.Fatalf("events:\n%s\nwant one RolloutHeld", ev)
+	}
+}
+
+// Every master held: the condition names them all, so that one look says
+// what is left to do.
+func TestShardedRolloutNamesEveryMasterItHolds(t *testing.T) {
+	h := formedForRollout(t, 2, 0)
+	h.kdbConfig = appendOnlyOff()
+	h.rolloutPass()
+	cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition)
+	if cond == nil || cond.Reason != "WouldLoseData" || !strings.Contains(cond.Message, "s-0-0") || !strings.Contains(cond.Message, "s-1-0") {
+		t.Fatalf("condition %+v, want WouldLoseData naming s-0-0 and s-1-0", cond)
+	}
+}
+
+// What the hold says to do lets the rollout go on: the file turned on, or a
+// replica added (each master then hands over). The condition goes once
+// every pod is on the current template.
+func TestShardedRolloutGoesOnOnceTheMasterIsSafe(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		act  func(h *formingHarness)
+	}{
+		{"the file turned on", func(h *formingHarness) {
+			// appendonly yes in the KividbConfig, and CONFIG SET appendonly
+			// yes on each running master.
+			h.kdbConfig.Spec.Directives["appendonly"] = "yes"
+			for s := int32(0); s < 2; s++ {
+				h.node(shardPodName(h.c, s, 0)).aofOff = false
+			}
+		}},
+		{"a replica added", func(h *formingHarness) {
+			h.c.Spec.Replicas = 1
+			for s := int32(0); s < 2; s++ {
+				ip := fmt.Sprintf("10.0.%d.2", s)
+				p := shardedPod(h.c, s, 1, ip)
+				p.Labels[appsv1.StatefulSetRevisionLabel] = "new"
+				if err := h.r.Create(context.Background(), p); err != nil {
+					h.t.Fatal(err)
+				}
+				h.engine.add(nodeID(p.Name), ip)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := formedForRollout(t, 2, 0)
+			h.kdbConfig = appendOnlyOff()
+			for s := int32(0); s < 2; s++ {
+				h.node(shardPodName(h.c, s, 0)).aofOff = true
+			}
+			if deleted := h.rolloutPass(); len(deleted) > 0 {
+				t.Fatalf("replaced %v, want every master held", deleted)
+			}
+			tc.act(h)
+			for i := 0; i < 30 && len(h.outdated()) > 0; i++ {
+				h.rolloutPass()
+			}
+			if left := h.outdated(); len(left) > 0 {
+				t.Fatalf("still outdated: %v; condition %+v", left, findCondition(h.c.Status.Conditions, RolloutProgressingCondition))
+			}
+			h.rolloutPass()
+			if cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition); cond != nil {
+				t.Fatalf("condition %+v left after the rollout", cond)
+			}
+		})
+	}
+}
+
+// A master that has been unready on an old template for stuckPodGrace
+// serves nothing, so the hold does not keep it: it is replaced as any
+// stuck pod is.
+func TestShardedRolloutReplacesAnUnreadyMasterItHolds(t *testing.T) {
+	h := formedForRollout(t, 1, 0)
+	h.kdbConfig = appendOnlyOff()
+	if deleted := h.rolloutPass(); len(deleted) > 0 {
+		t.Fatalf("replaced %v, want the master held", deleted)
+	}
+	ctx := context.Background()
+	var pod corev1.Pod
+	if err := h.r.Get(ctx, client.ObjectKey{Namespace: h.c.Namespace, Name: shardPodName(h.c, 0, 0)}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse,
+		LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * stuckPodGrace))}}
+	if err := h.r.Status().Update(ctx, &pod); err != nil {
+		if err := h.r.Update(ctx, &pod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = events(h.r)
+	if deleted := h.rolloutPass(); fmt.Sprint(deleted) != "[s-0-0]" {
+		t.Fatalf("replaced %v, want the unready master s-0-0", deleted)
+	}
+	if ev := events(h.r); !strings.Contains(ev, "StuckPodReplaced") {
+		t.Fatalf("events:\n%s\nwant StuckPodReplaced", ev)
 	}
 }

@@ -255,8 +255,9 @@ after 2 minutes a `RolloutWaiting` Warning Event says the same:
 A sharded cluster with `replicas: 0` and the append-only file off: a
 shard master has no replica to hand over to, so the rollout would restart
 it in place, and it would keep only what its save at shutdown writes in
-time. The rollout holds it instead, and the `RolloutProgressing`
-condition says why. To go on:
+time. The rollout holds it instead and goes on with the other masters;
+once only held ones are left, the `RolloutProgressing` condition says
+why. To go on:
 
 - give the cluster a replica (`spec.replicas: 1`): once it is in sync,
   the master hands over and nothing is lost;
@@ -269,8 +270,9 @@ condition says why. To go on:
   kubectl annotate kividbcluster my-cluster kividb.io/allow-restart-without-persistence=true
   ```
 
-  Each restart raises a `RestartingWithoutPersistence` Warning, and the
-  operator removes the annotation once the rollout is done.
+  Set it after the hold appears: the operator removes it whenever no pod
+  is on an old template, so set before the change it does nothing. Each
+  restart raises a `RestartingWithoutPersistence` Warning.
 
 ## ACL / authentication errors (`NOAUTH`, `WRONGPASS`)
 
