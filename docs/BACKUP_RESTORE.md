@@ -202,11 +202,20 @@ kubectl get kdbs my-cluster-backups-20260721t000004z -o yaml
 ```
 
 `status.phase` is `Pending` → `InProgress` → `Succeeded`/`Failed`.
-`status.error` is populated only when `phase: Failed` — check it first,
-then `kubectl get jobs -l kividb.io/cluster=my-cluster` and `kubectl logs`
-on the most recent Job pod for the underlying cause (auth failure, wrong
-bucket, network egress blocked, etc.) if `status.error` alone isn't
-enough.
+`status.error` is the error of the Job's latest attempt: a Job retries a
+failed pod up to twice, so an `InProgress` record can show the error of
+the attempt before, and a retry that succeeds clears it. On a `Failed`
+record check it first, then `kubectl get jobs -l
+kividb.io/cluster=my-cluster` and `kubectl logs` on the most recent Job
+pod for the underlying cause (auth failure, wrong bucket, network egress
+blocked, etc.) if `status.error` alone isn't enough. A record whose Job
+is deleted before it finishes, by hand or with the CronJob when
+`snapshotConfigRef` is removed, is marked `Failed` with `status.error`
+saying so.
+
+Each record's `spec.snapshotConfigRef` names the `KividbSnapshotConfig`
+its Job backed up to. That stays so after the cluster moves to another
+config, so restoring from an older record reads the bucket its backup is in.
 
 ## Restoring a backup
 

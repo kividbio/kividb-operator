@@ -33,6 +33,21 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 
 ### Fixed
 
+- **`KividbSnapshot` records could name a config their backup did not go
+  to, keep a retried backup's old error, or stay `InProgress` for good**
+  (#104).
+  - Every reconcile wrote the cluster's current `snapshotConfigRef` over
+    the records of the Jobs still in the CronJob's history. After a
+    switch to a config with another bucket, a `bootstrapFromSnapshot` of
+    an older record looked for its object in the new bucket, and the
+    restore Job failed. A record now takes the config from its Job's
+    `kividb.io/snapshot-config` label, and the records written wrongly
+    before are corrected while their Jobs are there.
+  - A backup that succeeded on a retry kept the failed attempt's
+    `status.error`. The error is now that of the latest attempt.
+  - A record whose Job was deleted before it finished, by hand or with
+    the CronJob when `snapshotConfigRef` was removed, stayed
+    `InProgress`. It is now marked `Failed`.
 - **Two releases of the chart could not share a cluster** (#97): both
   claimed the ClusterRole `kividb-operator-manager-role`, so the second
   failed to install. The manager's role is now named after the release

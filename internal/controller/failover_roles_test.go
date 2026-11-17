@@ -1126,7 +1126,7 @@ func newFailoverCase(t *testing.T, edit func(*kividbv1alpha1.KividbCluster), ref
 	}
 	objs = append(objs, c, pod("c1-0", "10.0.0.1", "master", false), pod("c1-1", "10.0.0.2", "replica", true))
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
-		WithStatusSubresource(&kividbv1alpha1.KividbCluster{}).
+		WithStatusSubresource(&kividbv1alpha1.KividbCluster{}, &kividbv1alpha1.KividbSnapshot{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if err := refused(obj); err != nil {
