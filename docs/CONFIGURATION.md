@@ -1069,12 +1069,18 @@ spec:
   `port` and `aclfile` are pinned so the operator's own probes/mounts stay
   correct).
 
+  **Each directive is one line** of the config file, its name, a space
+  and its value, and the engine reads the line back word by word: a name
+  that is not one plain word (empty, or with whitespace or a quote), or a
+  value with a line break, is refused (`InvalidSpec`).
+
   **`dir`** must stay on the pod's volume, `/data`: the engine keeps its
-  snapshot and append-only file in it, and the backups read them there. A
-  relative `dir`, or an absolute one under `/data`, is passed through; one
-  that resolves outside it (`/data/../tmp` included) is refused, `Ready`
-  `False` with reason `InvalidSpec`, and the cluster's objects are left as
-  they are (see
+  snapshot and append-only file in it. A relative `dir`, or an absolute
+  one under `/data`, is passed through, though the backups and restores
+  see only what is directly in `/data` (#112). One that resolves outside
+  it (`/data/../tmp` included, the value read as the engine reads it), or
+  that is not one value, is refused, `Ready` `False` with reason
+  `InvalidSpec`, and the cluster's objects are left as they are (see
   [TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-kividbconfig-dir-off-the-volume-invalidspec)).
 
   **`bind`**: unless you set `bind` or `protected-mode` yourself, the

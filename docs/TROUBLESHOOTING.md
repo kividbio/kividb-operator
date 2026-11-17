@@ -280,8 +280,9 @@ A `dir` in the `KividbConfig` is where the engine keeps its snapshot and
 append-only file: it changes into it at start. One that resolves outside
 `/data`, the pod's volume (`/data/../tmp` included), is refused: `Ready`
 is `False`, reason `InvalidSpec`, naming the `KividbConfig` and the path.
-None of the cluster's objects change while it shows, so no pod is
-restarted onto it, and failover goes on. Set a `dir` under `/data` (a
+While it shows, nothing of the cluster is applied, not this change nor any
+other (an image, a replica count, a backup schedule), so no pod is
+restarted onto it; failover goes on. Set a `dir` under `/data` (a
 relative one resolves against it), or remove it.
 
 A cluster that already ran with such a `dir` keeps its data in memory and
@@ -290,26 +291,36 @@ restarts for any reason (a drain, an eviction, an out-of-memory kill)
 comes back without it, and backups find nothing to copy. The operator
 restarts nothing for it. To get out:
 
-- **With replicas in sync** (in every shard, in a sharded cluster): fix
-  `dir`. The rollout restarts the replicas first; each comes back on the
-  volume and copies the data from its master, and each master hands over
-  to one of them before its own restart.
-- **With no replicas:** take a copy of each master first. The operator
-  cannot add a replica while the `KividbConfig` is refused
-  (`spec.replicas` waits with everything else), and the engine's image
-  has no shell, so pull the copy from another pod with `redis-cli` (add
-  `--user`/`--pass` if the default user has a password):
+- **With replicas:** wait until every pod is Ready and every replica in
+  sync (in every shard, in a sharded cluster), then fix `dir`. The rollout
+  restarts the replicas first; each comes back on the volume and copies
+  the data from its master, and each master hands over to one of them
+  before its own restart. A pod that has been unready for 30 s on the old
+  template is replaced without that wait, so do not fix `dir` while one
+  is.
+- **With no replicas:** take a copy of each master first, then fix `dir`;
+  if the restart loses the data, restore the copy. The engine's image has
+  no shell, so take it from another pod with `redis-cli --rdb`, adding
+  `--user default --pass <password>` if the default user has one, and
+  `--tls --cacert <CA file>` with the TLS port if the plain port is off
+  (the CA file has to be in the copy pod):
 
   ```bash
-  kubectl run kividb-copy --image=redis:8 --restart=Never -- sleep infinity
-  kubectl exec kividb-copy -- redis-cli -h my-cluster-0.my-cluster-headless -p 6380 --rdb /tmp/dump.kdb
-  kubectl cp kividb-copy:/tmp/dump.kdb ./dump.kdb
-  kubectl delete pod kividb-copy
+  kubectl -n my-namespace run kividb-copy --image=redis:8 --restart=Never -- sleep infinity
+  kubectl -n my-namespace exec kividb-copy -- \
+    redis-cli -h my-cluster-0.my-cluster-headless -p 6380 --rdb /tmp/dump.kdb
+  kubectl -n my-namespace cp kividb-copy:/tmp/dump.kdb dump.kdb
+  kubectl -n my-namespace delete pod kividb-copy
   ```
 
-  The copy is a `dump.kdb`, the file a backup holds: if the restart loses
-  the data, restore it as one (see
-  [BACKUP_RESTORE.md](BACKUP_RESTORE.md#restoring-a-backup)).
+  While it runs, the master counts the copy as a replica, for as long as
+  its full sync takes. In a sharded cluster, take one copy per shard, from
+  the shard's current master: its pods are `<cluster>-<shard>-<n>` under
+  `<cluster>-<shard>-headless`, and the master is the one labelled
+  `kividb.io/role=master` (`kubectl get pods -l
+  kividb.io/cluster=my-cluster,kividb.io/role=master`), not always `-0`.
+  The copy is a `dump.kdb`, the file a backup holds: restore it as one
+  (see [BACKUP_RESTORE.md](BACKUP_RESTORE.md#restoring-a-backup)).
 
 ## ACL / authentication errors (`NOAUTH`, `WRONGPASS`)
 

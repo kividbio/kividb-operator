@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -143,46 +145,129 @@ func persistenceDirectives(directives map[string]string) map[string]string {
 	return out
 }
 
-// dataDirOffVolume returns kdbConfig's `dir` and where it resolves to, when
-// that is off the pod's volume, or "", "" when it stays on it (#109). The
-// engine changes into `dir` at start, from its working directory DataDir,
-// and keeps its snapshot and append-only file there, where the agent's
-// backups and restores look for them too: a `dir` off the volume loses
-// them on every restart. A relative `dir` resolves against DataDir; the
-// path is cleaned first, so /data/../tmp is off it.
-func dataDirOffVolume(kdbConfig *kividbv1alpha1.KividbConfig) (dir, resolved string) {
-	if kdbConfig == nil {
-		return "", ""
+// directivesError says why kdbConfig's directives cannot be written to the
+// config file as they are, or nil (#109). The renderer writes each as one
+// line, its name, a space and its value, and the engine reads that line
+// back with split_config_line (see configWords): a name that is not one
+// plain word (empty, with whitespace, quoted, starting a comment) would be
+// read as another directive, and a value with a line break would add a
+// line of its own. In sorted order, so that the message is the same every
+// time.
+func directivesError(kdbConfig *kividbv1alpha1.KividbConfig) error {
+	for _, k := range directiveNames(kdbConfig) {
+		if words, err := configWords(k); err != nil || len(words) != 1 || words[0] != k {
+			return fmt.Errorf("KividbConfig %s has a directive named %q: a name must be one word, with no whitespace, line break or quote, as the config file reads it", kdbConfig.Name, k)
+		}
+		if v := kdbConfig.Spec.Directives[k]; strings.ContainsAny(v, "\r\n") {
+			return fmt.Errorf("KividbConfig %s sets %s to a value with a line break (%q): each directive is one line of the config file", kdbConfig.Name, k, v)
+		}
 	}
-	for k, v := range kdbConfig.Spec.Directives {
+	return nil
+}
+
+// dataDirError says why kdbConfig's `dir` cannot be used, or nil (#109).
+// The engine changes into `dir` at start, from its working directory
+// DataDir, and keeps its snapshot and append-only file there: a `dir` off
+// the volume loses them on every restart. The value is read as the engine
+// reads it (configWords), must be one word, as the engine takes it, and is
+// cleaned, a relative one against DataDir, so /data/../tmp is off it.
+func dataDirError(kdbConfig *kividbv1alpha1.KividbConfig) error {
+	for _, k := range directiveNames(kdbConfig) {
 		if !strings.EqualFold(k, "dir") {
 			continue
 		}
-		p := configWord(v)
+		v := kdbConfig.Spec.Directives[k]
+		words, err := configWords(v)
+		if err != nil {
+			return fmt.Errorf("KividbConfig %s sets %s %q, which the engine cannot read: %v", kdbConfig.Name, k, v, err)
+		}
+		if len(words) != 1 {
+			return fmt.Errorf("KividbConfig %s sets %s %q: the engine takes one value there, not %d, and would not start", kdbConfig.Name, k, v, len(words))
+		}
+		p := words[0]
 		if !path.IsAbs(p) {
 			p = path.Join(DataDir, p)
 		}
 		if p = path.Clean(p); p != DataDir && !strings.HasPrefix(p, DataDir+"/") {
-			return v, p
+			return fmt.Errorf("KividbConfig %s sets %s %q, which is %s, off the pod's volume at %s: the engine would keep its snapshot and append-only file there and lose them on every restart. Set a dir under %s, or remove it (see TROUBLESHOOTING.md for a cluster already running with it)",
+				kdbConfig.Name, k, v, p, DataDir, DataDir)
 		}
 	}
-	return "", ""
+	return nil
 }
 
-// configWord is a directive value's first word, as the engine's config file
-// reads it: the inside of "..." or '...', else up to the first space (a
-// "#" there starts a comment).
-func configWord(v string) string {
-	v = strings.TrimSpace(v)
-	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') {
-		if end := strings.IndexByte(v[1:], v[0]); end >= 0 {
-			return v[1 : 1+end]
+// directiveNames is kdbConfig's directive names, sorted.
+func directiveNames(kdbConfig *kividbv1alpha1.KividbConfig) []string {
+	if kdbConfig == nil {
+		return nil
+	}
+	names := make([]string, 0, len(kdbConfig.Spec.Directives))
+	for k := range kdbConfig.Spec.Directives {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// configWords splits a config file line into words as the engine does
+// (split_config_line in src/config.rs, the same from 1.2.2 to master):
+// whitespace between words; a "#" where a word would start ends the line;
+// in "..." a backslash takes the next character, \n, \r and \t as the
+// control characters; '...' is literal; a quote left open, or a closing
+// quote followed by anything but whitespace, is an error.
+func configWords(line string) ([]string, error) {
+	var words []string
+	r := []rune(line)
+	i := 0
+	for {
+		for i < len(r) && unicode.IsSpace(r[i]) {
+			i++
 		}
+		if i == len(r) || r[i] == '#' {
+			return words, nil
+		}
+		var w strings.Builder
+		if q := r[i]; q == '"' || q == '\'' {
+			i++
+			closed := false
+			for i < len(r) {
+				c := r[i]
+				i++
+				if c == q {
+					closed = true
+					break
+				}
+				if c == '\\' && q == '"' {
+					if i == len(r) {
+						break
+					}
+					c = r[i]
+					i++
+					switch c {
+					case 'n':
+						c = '\n'
+					case 'r':
+						c = '\r'
+					case 't':
+						c = '\t'
+					}
+				}
+				w.WriteRune(c)
+			}
+			if !closed {
+				return nil, errors.New("unbalanced quotes")
+			}
+			if i < len(r) && !unicode.IsSpace(r[i]) {
+				return nil, errors.New("a closing quote must be followed by a space")
+			}
+		} else {
+			for i < len(r) && !unicode.IsSpace(r[i]) {
+				w.WriteRune(r[i])
+				i++
+			}
+		}
+		words = append(words, w.String())
 	}
-	if words := strings.Fields(v); len(words) > 0 {
-		return words[0]
-	}
-	return ""
 }
 
 // appendOnlyDisabled reports whether kdbConfig turns the append-only file

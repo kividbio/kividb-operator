@@ -922,15 +922,19 @@ func validateKividbConfig(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1al
 	if kdbConfig == nil {
 		return nil
 	}
+	// First that every directive is one line of the config file, as the
+	// engine reads it, so that the checks below judge what the engine gets.
+	if err := directivesError(kdbConfig); err != nil {
+		return err
+	}
 	if err := validateTLSPort(c, kdbConfig); err != nil {
 		return err
 	}
 	// Refused, not dropped: a cluster that runs with such a `dir` has its
 	// files there, and without it would start empty in DataDir. Refused, the
 	// cluster's objects stay as they are, and nothing restarts onto it.
-	if dir, resolved := dataDirOffVolume(kdbConfig); resolved != "" {
-		return fmt.Errorf("KividbConfig %s sets dir %q, which is %s, off the pod's volume at %s: the engine would keep its snapshot and append-only file there and lose them on every restart. Set a dir under %s, or remove it (see TROUBLESHOOTING.md for a cluster already running with it)",
-			kdbConfig.Name, dir, resolved, DataDir, DataDir)
+	if err := dataDirError(kdbConfig); err != nil {
+		return err
 	}
 	if isSharded(c) {
 		var owned []string
