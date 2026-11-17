@@ -31,8 +31,9 @@ func bootstrapJobName(c *kividbv1alpha1.KividbCluster) string {
 // BootstrapCondition says whether pod-0's volume was seeded from
 // spec.bootstrapFromSnapshot and, until it is, what the bootstrap is doing
 // or waiting for: reason WaitingForEarlierCluster, WaitingForVolumeDeletion,
-// ReconcileError (its S3 credentials Secret is missing), Pending, Restoring, RestoreRetrying, RestoreFailed, Refused; True with
-// Restored or Skipped.
+// ReconcileError (its S3 credentials Secret is missing), Pending,
+// Restoring, RestoreRetrying, RestoreFailed, Refused; True with Restored
+// or Skipped.
 const BootstrapCondition = "Bootstrapped"
 
 // errEarlierRestoreJob is returned by ensureBootstrapJob for a restore Job
@@ -198,12 +199,18 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 	// The restore Job reads the S3 credentials as the agent does: a pod
 	// whose Secret or key is missing never starts, and the Job never
 	// fails, so the bootstrap would say "restore Job running" for good.
-	if err := r.checkMountedSecrets(ctx, c, nil, &snapCfg); err != nil {
-		reason = "ReconcileError"
-		c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapPending
-		c.Status.Bootstrap.Message = "restore Job not created: waiting for its S3 credentials"
-		c.Status.Bootstrap.Error = err.Error()
-		return true, &heldBootstrapError{fmt.Errorf("bootstrap: resolving referenced secrets: %w", err)}
+	// Checked only before the Job is made. One that exists read them when
+	// its pod started: a Secret deleted since must not send a restore
+	// under way back to Pending, nor keep a finished one from being
+	// recorded, as a running cluster's pods are left alone too.
+	if !r.bootstrapJobExists(ctx, c) {
+		if err := r.checkMountedSecrets(ctx, c, nil, &snapCfg); err != nil {
+			reason = "ReconcileError"
+			c.Status.Bootstrap.Phase = kividbv1alpha1.BootstrapPending
+			c.Status.Bootstrap.Message = "restore Job not created: waiting for its S3 credentials"
+			c.Status.Bootstrap.Error = err.Error()
+			return true, &heldBootstrapError{fmt.Errorf("bootstrap: resolving referenced secrets: %w", err)}
+		}
 	}
 
 	kept, deleting, err := r.ensureBootstrapPVC(ctx, c)
@@ -490,6 +497,16 @@ func (r *KividbClusterReconciler) ensureBootstrapPVC(ctx context.Context, c *kiv
 	// one would make pod-0's data the only volume garbage-collected with
 	// the KividbCluster.
 	return false, false, r.Create(ctx, &pvc)
+}
+
+// bootstrapJobExists reports whether a restore Job with c's name is
+// there, c's or an earlier cluster's; ensureBootstrapJob tells them apart.
+// A read that fails is taken as there: ensureBootstrapJob then returns
+// the error.
+func (r *KividbClusterReconciler) bootstrapJobExists(ctx context.Context, c *kividbv1alpha1.KividbCluster) bool {
+	var job batchv1.Job
+	err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: bootstrapJobName(c)}, &job)
+	return !apierrors.IsNotFound(err)
 }
 
 func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kividbv1alpha1.KividbCluster, snap *kividbv1alpha1.KividbSnapshot, snapCfg *kividbv1alpha1.KividbSnapshotConfig) (*batchv1.Job, error) {

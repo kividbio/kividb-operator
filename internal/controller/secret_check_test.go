@@ -361,3 +361,64 @@ func TestBootstrapWaitsForItsS3Secret(t *testing.T) {
 		})
 	}
 }
+
+// A restore Job already made read its credentials when its pod started:
+// the S3 Secret deleted while it runs neither sends the bootstrap back to
+// Pending nor keeps its success from being recorded.
+func TestBootstrapUnderWayIsLeftAloneWhenItsS3SecretGoes(t *testing.T) {
+	ctx := context.Background()
+	c, objs := bootstrapFixture("fresh")
+	r := shardedReconciler(t, append(objs, c)...)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)}
+	status := func() *kividbv1alpha1.BootstrapStatus {
+		var got kividbv1alpha1.KividbCluster
+		if err := r.Get(ctx, req.NamespacedName, &got); err != nil {
+			t.Fatal(err)
+		}
+		return got.Status.Bootstrap
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b := status(); b == nil || b.Phase != kividbv1alpha1.BootstrapInProgress {
+		t.Fatalf("bootstrap status %+v; want the restore in progress", b)
+	}
+
+	if err := r.Delete(ctx, s3Credentials("s3")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	var jobs batchv1.JobList
+	if err := r.List(ctx, &jobs); err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs.Items) != 1 {
+		t.Fatalf("%d restore Jobs, want the one under way", len(jobs.Items))
+	}
+	if b := status(); b == nil || b.Phase != kividbv1alpha1.BootstrapInProgress || b.Error != "" {
+		t.Errorf("bootstrap status %+v; want it still in progress, no error", b)
+	}
+
+	job := jobs.Items[0]
+	job.Status.Succeeded = 1
+	if err := r.Status().Update(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if b := status(); b == nil || !b.Completed || b.Phase != kividbv1alpha1.BootstrapCompleted {
+		t.Errorf("bootstrap status %+v; want the restore recorded as done", b)
+	}
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, req.NamespacedName, &sts); err != nil {
+		t.Fatal(err)
+	}
+	if *sts.Spec.Replicas == 0 {
+		t.Error("StatefulSet held at 0 replicas after the restore was done")
+	}
+}
