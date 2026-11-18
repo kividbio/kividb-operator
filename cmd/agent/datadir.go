@@ -54,9 +54,6 @@ func makeDataDir(volume, dir string) ([]string, error) {
 	if err != nil || !filepath.IsLocal(rel) {
 		return nil, fmt.Errorf("%s is not under %s, the pod's volume: not made", dir, volume)
 	}
-	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-		return nil, nil
-	}
 	root, err := os.Stat(volume)
 	if err != nil {
 		return nil, err

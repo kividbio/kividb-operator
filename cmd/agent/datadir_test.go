@@ -137,6 +137,9 @@ func TestMakeDataDir_LeavesADirThatIsThere(t *testing.T) {
 func TestMakeDataDir_MakesNothingOffTheVolume(t *testing.T) {
 	vol, _ := dataDirTestVolume(t)
 	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outside, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(vol, "file"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -150,15 +153,19 @@ func TestMakeDataDir_MakesNothingOffTheVolume(t *testing.T) {
 		{filepath.Join(vol, "..", "x"), "not under " + vol},
 		{outside, "not under " + vol},
 		{filepath.Join(vol, "file", "sub"), "not a directory"},
+		// A link to a directory is not one that is there already: the
+		// restore would extract through it.
+		{filepath.Join(vol, "link"), "not a directory"},
 		{filepath.Join(vol, "link", "sub"), "not a directory"},
+		{filepath.Join(vol, "link", "new"), "not a directory"},
 	} {
 		made, err := makeDataDir(vol, tc.dir)
 		if err == nil || !strings.Contains(err.Error(), tc.want) || len(made) != 0 {
 			t.Errorf("%s: made %v, %v; want nothing made and an error saying %q", tc.dir, made, err, tc.want)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(outside, "sub")); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("%s made through the link: %v", filepath.Join(outside, "sub"), err)
+	if _, err := os.Stat(filepath.Join(outside, "new")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("%s made through the link: %v", filepath.Join(outside, "new"), err)
 	}
 }
 
