@@ -309,23 +309,24 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		return false
 	}
 
-	// A KividbConfig `dir` that moves the engine's files holds a cluster
-	// with no replicas, as in reconcileRollout (#112), the append-only file
-	// on or not, and stuck pod or not. A shard master's replacement would
-	// also lose the nodes.conf kept there, and come back as a new node
-	// that owns no slots. The annotation, which accepts what a restart
-	// loses of a master whose file is off, does not cover it.
-	if c.Spec.Replicas == 0 {
-		var moves []dataDirMove
-		for _, p := range outdated {
-			if m, ok := dataDirMoved(p.pod, templates[p.shard]); ok {
-				moves = append(moves, m)
-			}
+	// A KividbConfig `dir` that moves the engine's files holds the rollout,
+	// replicas or not, the append-only file on or not, and stuck pod or not
+	// (#112). Each node keeps its nodes.conf there too, so a pod whose dir
+	// moves would come back as a new node: with no replica, one that owns
+	// no slots and holds no data; with replicas, one left to the rule for a
+	// lost volume, which a dir change has not been tried with. A dir change
+	// on a running sharded cluster is not supported yet. The annotation,
+	// which accepts what a restart loses of a master whose file is off,
+	// does not cover it.
+	var moves []dataDirMove
+	for _, p := range outdated {
+		if m, ok := dataDirMoved(p.pod, templates[p.shard]); ok {
+			moves = append(moves, m)
 		}
-		if len(moves) > 0 {
-			r.rolloutHeld(c, dataDirHoldMessage(moves))
-			return false
-		}
+	}
+	if len(moves) > 0 {
+		r.rolloutHeld(c, shardedDataDirHoldMessage(moves))
+		return false
 	}
 
 	// A pod serving nothing has nothing to protect. A master the hold below
@@ -341,10 +342,6 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 			continue
 		}
 		if c.Spec.Replicas == 0 && !allowLoss && !engineDead(p.pod) {
-			continue
-		}
-		// Nor one whose dir moves, as in reconcileRollout (#112).
-		if _, moves := dataDirMoved(p.pod, templates[p.shard]); moves {
 			continue
 		}
 		log.Info("rollout: replacing unready pod on an outdated template", "pod", p.pod.Name)

@@ -805,26 +805,32 @@ func TestShardedRolloutHoldsAnUnreadyMasterWhoseDirMoves(t *testing.T) {
 	}
 }
 
-// With a replica each, a dir that moves rolls as any change does: the
-// replicas first, each master once it has handed over.
-func TestShardedRolloutWithReplicasMovesTheDir(t *testing.T) {
+// With replicas too: a pod whose dir moves would come back as a new node,
+// its nodes.conf left behind, and a dir change on a running sharded
+// cluster is not supported yet (#112).
+func TestShardedRolloutHoldsADirMoveWithReplicasToo(t *testing.T) {
 	h := formedForRollout(t, 2, 1)
 	h.moveDataDir("sub")
-	var order []string
-	for i := 0; i < 20 && len(h.outdated()) > 0; i++ {
-		order = append(order, h.rolloutPass()...)
+	for i := 0; i < 3; i++ {
+		if deleted := h.rolloutPass(); len(deleted) > 0 {
+			t.Fatalf("pass %d replaced %v, want the rollout held", i, deleted)
+		}
 	}
-	if left := h.outdated(); len(left) > 0 || len(order) != 4 {
-		t.Fatalf("still outdated: %v (replaced %v)", left, order)
+	cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "WouldLoseData" ||
+		!strings.Contains(cond.Message, "not supported on a running sharded cluster") || !strings.Contains(cond.Message, "Set dir back") ||
+		!strings.Contains(cond.Message, "s-0-0, s-0-1, s-1-0, s-1-1 from /data to /data/sub") {
+		t.Fatalf("condition %+v, want False, WouldLoseData, naming every pod and saying to set dir back", cond)
 	}
-	if cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition); cond != nil && cond.Reason == "WouldLoseData" {
-		t.Fatalf("condition %+v, want no hold", cond)
+	for _, p := range h.pods() {
+		if p.Annotations[StepDownAnnotation] != "" {
+			t.Fatalf("%s was asked to step down", p.Name)
+		}
 	}
 }
 
 // A stuck master whose dir moves is not replaced as a stuck pod, replicas
-// or not: its replacement would start empty, and its replica sync from it.
-// Its replica takes over first (#112).
+// or not: the hold comes first (#112).
 func TestShardedRolloutLeavesAStuckMasterWhoseDirMoves(t *testing.T) {
 	h := formedForRollout(t, 1, 1)
 	h.moveDataDir("sub")

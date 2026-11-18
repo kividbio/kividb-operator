@@ -1102,17 +1102,20 @@ spec:
   crash, out of memory) keeps the `dir` it started with. A pod made
   without a `dir` has no such flag: if its engine restarts after one is
   added, it reads the new `dir`, which is not made yet, and fails to
-  start, its data kept. With a replica, the rollout replaces the replicas
+  start, its data kept. On a sharded cluster a change to `dir` is not
+  supported yet: each node keeps its `nodes.conf` there too, and would
+  come back as a new node. The rollout holds it (`RolloutProgressing`
+  `False`, reason `WouldLoseData`), replicas or not; set `dir` back. On a
+  replicated cluster with a replica, the rollout replaces the replicas
   first, which resync, and the master hands over before its own restart.
-  With no replicas it holds instead (`RolloutProgressing` `False`, reason
-  `WouldLoseData`), since the new pod would start empty: add a replica,
-  or set `dir` back, the only way out while the pod is not Ready (a
-  replica would have nothing to sync from). Either way, a pod whose `dir`
-  moves is not replaced as a stuck pod: one not Ready is replaced only as
-  a replica, once the others are healthy, so that it resyncs. The hold
-  covers the rollout only: a pod deleted outside it (a node drained, an
-  eviction, `kubectl delete`) comes back with the new `dir` and starts
-  empty.
+  With no replicas it holds too, since the new pod would start empty: add
+  a replica, or set `dir` back, the only way out while the pod is not
+  Ready (a replica would have nothing to sync from). Either way, a pod
+  whose `dir` moves is not replaced as a stuck pod: one not Ready is
+  replaced only as a replica, once the others are healthy, so that it
+  resyncs. The hold covers the rollout only: a pod deleted outside it (a
+  node drained, an eviction, `kubectl delete`) comes back with the new
+  `dir` and starts empty.
 
   Backups ask the engine where its files are (`CONFIG GET dir`). If an ACL
   denies `CONFIG` to the default user, which the agent uses, they read

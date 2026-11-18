@@ -148,12 +148,9 @@ func dataDirMoved(pod *corev1.Pod, template *corev1.PodSpec) (dataDirMove, bool)
 	return m, m.from != m.to
 }
 
-// dataDirHoldMessage says why the rollout holds the pods of moves (at
-// least one) of a cluster with no replicas, and how to go on. A replica
-// added syncs from the master only while its engine runs: one that is not
-// Ready (its engine restarted, read the new dir from its config, and
-// cannot start there) has to have dir set back.
-func dataDirHoldMessage(moves []dataDirMove) string {
+// dataDirMovesText names the pods of moves (at least one), sorted, and
+// where their files would move: "c1-0 from /data to /data/sub".
+func dataDirMovesText(moves []dataDirMove) string {
 	sort.Slice(moves, func(i, j int) bool { return moves[i].pod < moves[j].pod })
 	type fromTo struct{ from, to string }
 	var order []fromTo
@@ -169,6 +166,23 @@ func dataDirHoldMessage(moves []dataDirMove) string {
 	for _, k := range order {
 		parts = append(parts, fmt.Sprintf("%s from %s to %s", strings.Join(pods[k], ", "), k.from, k.to))
 	}
+	return strings.Join(parts, "; ")
+}
+
+// shardedDataDirHoldMessage says why the rollout of a sharded cluster
+// holds the pods of moves (at least one), and how to go on.
+func shardedDataDirHoldMessage(moves []dataDirMove) string {
+	return fmt.Sprintf("the KividbConfig's dir moves the engine's files of %s: a dir change is not supported on a running sharded cluster yet, since each node keeps its nodes.conf there too and would come back as a new node. Set dir back",
+		dataDirMovesText(moves))
+}
+
+// dataDirHoldMessage says why the rollout holds the pods of moves (at
+// least one) of a replicated cluster with no replicas, and how to go on.
+// A replica added syncs from the master only while its engine runs: one
+// that is not Ready (its engine restarted, read the new dir from its
+// config, and cannot start there) has to have dir set back.
+func dataDirHoldMessage(moves []dataDirMove) string {
+	text := dataDirMovesText(moves)
 	var unready []string
 	for _, m := range moves {
 		if !m.ready {
@@ -188,7 +202,7 @@ func dataDirHoldMessage(moves []dataDirMove) string {
 		wayOut = fmt.Sprintf("Set dir back: %s are not Ready, so a replica would have nothing to sync from", strings.Join(unready, ", "))
 	}
 	return fmt.Sprintf("the KividbConfig's dir moves the engine's files of %s: with no replica to resync from, %s would start empty, and scheduled backups would upload that. %s; to start empty anyway, delete %s by hand",
-		strings.Join(parts, "; "), replacement, wayOut, which)
+		text, replacement, wayOut, which)
 }
 
 // rolloutProgressed records that the rollout of c replaced a pod (or asked

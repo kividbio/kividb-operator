@@ -66,10 +66,12 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   empty in the new directory, and the scheduled backups would upload that.
   Add a replica, which resyncs first, or set `dir` back, the only way out
   while the pod is not Ready. A pod whose `dir` moves is not replaced as
-  a stuck pod either, replicas or not. The pod spec is
-  what says where the files are, so this holds the upgrade of a cluster
-  with no replicas that ran with a `dir` made by hand under `/data`: if
-  its files are in `dir` already, delete its pod to let it roll.
+  a stuck pod either, replicas or not. On a sharded cluster a change to
+  `dir` is held whatever the replicas, as not supported yet: each node
+  keeps its `nodes.conf` there too. The pod spec is what says where the
+  files are, so this holds the upgrade of a sharded cluster, or one with
+  no replicas, that ran with a `dir` made by hand under `/data`: if its
+  files are in `dir` already, delete its pods to let it roll.
 - **An `INFO keyspace` reply the agent could not read counted as 0 keys.**
   The agent reported a known count of 0 for any reply it found no database
   line in, the empty reply an engine gives for a section it does not have
