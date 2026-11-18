@@ -51,6 +51,27 @@ func SetDefaultAgentImage(image string) {
 	defaultAgentImage = image
 }
 
+// dataDirContainerName is the init container that makes a KividbConfig
+// `dir` under the volume (see podTemplate).
+const dataDirContainerName = "data-dir"
+
+// podDataDir is the directory the engine of a pod with spec keeps its
+// files in, as the spec says (#112): its data-dir init container's
+// --data-dir, or DataDir without one.
+func podDataDir(spec *corev1.PodSpec) string {
+	for _, ic := range spec.InitContainers {
+		if ic.Name != dataDirContainerName {
+			continue
+		}
+		for i, a := range ic.Args {
+			if a == "--data-dir" && i+1 < len(ic.Args) {
+				return ic.Args[i+1]
+			}
+		}
+	}
+	return DataDir
+}
+
 func agentImage(c *kividbv1alpha1.KividbCluster) string {
 	if c.Spec.AgentImage != "" {
 		return c.Spec.AgentImage
@@ -449,7 +470,7 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 	var initContainers []corev1.Container
 	if dir := engineDataDir(kdbConfig); dir != DataDir {
 		initContainers = append(initContainers, corev1.Container{
-			Name:            "data-dir",
+			Name:            dataDirContainerName,
 			Image:           agentImage(c),
 			ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
 			Args:            []string{"make-data-dir", "--volume", DataDir, "--data-dir", dir},

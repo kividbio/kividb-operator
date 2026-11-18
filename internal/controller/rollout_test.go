@@ -231,6 +231,17 @@ type rolloutPod struct {
 	unreadyFor time.Duration
 	synced     bool
 	deleting   bool
+	dir        string // its KividbConfig dir, as its spec says; "": none
+}
+
+// dataDirSpec is the pod spec podTemplate gives a pod whose KividbConfig
+// has dir (#112), "" for none.
+func dataDirSpec(dir string) corev1.PodSpec {
+	var cfg *kividbv1alpha1.KividbConfig
+	if dir != "" {
+		cfg = directivesConfig(map[string]string{"dir": dir})
+	}
+	return podTemplate(testCluster("c1"), cfg, nil, nil).Spec
 }
 
 func TestReconcileRollout(t *testing.T) {
@@ -242,9 +253,12 @@ func TestReconcileRollout(t *testing.T) {
 		name         string
 		master       string // defaults to c1-0
 		pods         []rolloutPod
-		noStatuses   bool // role reconciliation failed this pass
+		noStatuses   bool   // role reconciliation failed this pass
+		newDir       string // the KividbConfig dir of the StatefulSet's template; "": none
+		heldBefore   bool   // a pass before held the rollout (WouldLoseData)
 		wantDeleted  []string
 		wantPromoted string
+		wantHeld     bool // RolloutProgressing False, WouldLoseData
 	}{
 		{
 			name:        "everything outdated and healthy: one replica, highest ordinal first",
@@ -321,6 +335,50 @@ func TestReconcileRollout(t *testing.T) {
 			name: "a broken pod already on the new template is not this code's to delete",
 			pods: []rolloutPod{healthy("c1-0", "old"), healthy("c1-1", "old"), {name: "c1-2", revision: "new", unreadyFor: time.Hour}},
 		},
+		// A KividbConfig dir that moves the engine's files (#112): with no
+		// replica to resync from, the new pod would start empty.
+		{
+			name:     "a single-pod cluster whose dir moves is held",
+			pods:     []rolloutPod{healthy("c1-0", "old")},
+			newDir:   "sub",
+			wantHeld: true,
+		},
+		{
+			name:       "a single-pod cluster whose dir moves is held when its pod is stuck too",
+			pods:       []rolloutPod{{name: "c1-0", revision: "old", unreadyFor: time.Hour}},
+			noStatuses: true,
+			newDir:     "sub",
+			wantHeld:   true,
+		},
+		{
+			name:     "a single-pod cluster whose dir moves back to /data is held",
+			pods:     []rolloutPod{{name: "c1-0", revision: "old", ready: true, synced: true, dir: "sub"}},
+			wantHeld: true,
+		},
+		{
+			name:        "a single-pod cluster whose dir stays where it is rolls",
+			pods:        []rolloutPod{{name: "c1-0", revision: "old", ready: true, synced: true, dir: "sub"}},
+			newDir:      "/data/sub",
+			wantDeleted: []string{"c1-0"},
+		},
+		{
+			name:        "a dir that moves with a replica: the replica is replaced, and resyncs",
+			pods:        []rolloutPod{healthy("c1-0", "old"), healthy("c1-1", "old")},
+			newDir:      "sub",
+			wantDeleted: []string{"c1-1"},
+		},
+		{
+			name:         "a replica added to a held cluster: the master hands over to it",
+			pods:         []rolloutPod{healthy("c1-0", "old"), {name: "c1-1", revision: "new", ready: true, synced: true, dir: "sub"}},
+			newDir:       "sub",
+			heldBefore:   true,
+			wantPromoted: "c1-1",
+		},
+		{
+			name:       "dir set back on a held cluster: nothing is outdated",
+			pods:       []rolloutPod{healthy("c1-0", "new")},
+			heldBefore: true,
+		},
 	}
 
 	scheme := runtime.NewScheme()
@@ -337,8 +395,12 @@ func TestReconcileRollout(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default"},
 				Spec:       kividbv1alpha1.KividbClusterSpec{Replicas: int32(len(tt.pods) - 1)},
 			}
+			if tt.heldBefore {
+				c.Status.Conditions = []metav1.Condition{{Type: RolloutProgressingCondition, Status: metav1.ConditionFalse, Reason: "WouldLoseData"}}
+			}
 			objs := []client.Object{&appsv1.StatefulSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default", Generation: 3},
+				Spec:       appsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{Spec: dataDirSpec(tt.newDir)}},
 				Status:     appsv1.StatefulSetStatus{UpdateRevision: "new", ObservedGeneration: 3},
 			}}
 			master := tt.master
@@ -368,6 +430,7 @@ func TestReconcileRollout(t *testing.T) {
 						Name: p.name, Namespace: "default",
 						Labels: map[string]string{appsv1.StatefulSetRevisionLabel: p.revision},
 					},
+					Spec:   dataDirSpec(p.dir),
 					Status: corev1.PodStatus{PodIP: ip, Conditions: []corev1.PodCondition{cond}},
 				}
 				objs = append(objs, pod.DeepCopy())
@@ -411,6 +474,12 @@ func TestReconcileRollout(t *testing.T) {
 			}
 			if fmt.Sprint(agents.calls) != fmt.Sprint(wantCalls) {
 				t.Errorf("agent calls %v, want %v", agents.calls, wantCalls)
+			}
+			cond := findCondition(c.Status.Conditions, RolloutProgressingCondition)
+			if held := cond != nil && cond.Reason == "WouldLoseData"; held != tt.wantHeld {
+				t.Errorf("RolloutProgressing %+v, want held: %v", cond, tt.wantHeld)
+			} else if held && (cond.Status != metav1.ConditionFalse || !strings.Contains(cond.Message, "c1-0") || !strings.Contains(cond.Message, "/data/sub")) {
+				t.Errorf("RolloutProgressing %+v, want False naming c1-0 and /data/sub", cond)
 			}
 
 			var left corev1.PodList

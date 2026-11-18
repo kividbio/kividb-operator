@@ -1096,6 +1096,18 @@ spec:
   as they are (see
   [TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-kividbconfig-dir-off-the-volume-invalidspec)).
 
+  A change to `dir` moves where the engine looks, not its files. With a
+  replica, the rollout replaces the replicas first, which resync, and the
+  master hands over before its own restart. With no replicas it holds
+  instead (`RolloutProgressing` `False`, reason `WouldLoseData`), since
+  the new pod would start empty: add a replica, or set `dir` back. The
+  hold covers the rollout only. A pod deleted outside it (a node drained,
+  an eviction, `kubectl delete`) comes back with the new `dir` and starts
+  empty. An old pod whose engine restarts in place (a crash, out of
+  memory) reads the new `dir` from its config too: a new directory is not
+  there, so it fails to start, but with `dir` removed it starts in `/data`,
+  on no files or older ones.
+
   **`bind`**: unless you set `bind` or `protected-mode` yourself, the
   operator sets `bind 0.0.0.0`, the address kividb has always listened on.
   kividb v1.1.0 and later enforce protected mode as Redis does: while the

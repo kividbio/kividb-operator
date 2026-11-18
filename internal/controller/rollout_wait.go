@@ -133,6 +133,44 @@ func (r *KividbClusterReconciler) rolloutHeld(c *kividbv1alpha1.KividbCluster, m
 	})
 }
 
+// dataDirMove is a pod whose replacement would have the engine keep its
+// files in another directory than it does: a KividbConfig `dir` added,
+// changed or removed (#112).
+type dataDirMove struct{ pod, from, to string }
+
+// dataDirMoved says whether pod's replacement, on template, would have the
+// engine keep its files elsewhere, and where, as their specs say.
+func dataDirMoved(pod *corev1.Pod, template *corev1.PodSpec) (dataDirMove, bool) {
+	m := dataDirMove{pod: pod.Name, from: podDataDir(&pod.Spec), to: podDataDir(template)}
+	return m, m.from != m.to
+}
+
+// dataDirHoldMessage says why the rollout holds the pods of moves (at
+// least one) of a cluster with no replicas, and how to go on.
+func dataDirHoldMessage(moves []dataDirMove) string {
+	sort.Slice(moves, func(i, j int) bool { return moves[i].pod < moves[j].pod })
+	type fromTo struct{ from, to string }
+	var order []fromTo
+	pods := map[fromTo][]string{}
+	for _, m := range moves {
+		k := fromTo{m.from, m.to}
+		if pods[k] == nil {
+			order = append(order, k)
+		}
+		pods[k] = append(pods[k], m.pod)
+	}
+	parts := make([]string, 0, len(order))
+	for _, k := range order {
+		parts = append(parts, fmt.Sprintf("%s from %s to %s", strings.Join(pods[k], ", "), k.from, k.to))
+	}
+	replacement, which := "its replacement", "pod "+moves[0].pod
+	if len(moves) > 1 {
+		replacement, which = "their replacements", "each pod"
+	}
+	return fmt.Sprintf("the KividbConfig's dir moves the engine's files of %s: with no replica to resync from, %s would start empty, and scheduled backups would upload that. Add a replica (spec.replicas: 1), which syncs before the master hands over, or set dir back; to start empty anyway, delete %s by hand",
+		strings.Join(parts, "; "), replacement, which)
+}
+
 // rolloutProgressed records that the rollout of c replaced a pod (or asked
 // the master to hand over first).
 func (r *KividbClusterReconciler) rolloutProgressed(c *kividbv1alpha1.KividbCluster, message string) {

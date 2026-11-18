@@ -276,6 +276,7 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	log := logf.FromContext(ctx)
 
 	targets := map[int32]string{}
+	templates := map[int32]*corev1.PodSpec{}
 	for s := int32(0); s < shardCount(c); s++ {
 		var sts appsv1.StatefulSet
 		if err := r.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: shardStatefulSetName(c, s)}, &sts); err != nil {
@@ -288,6 +289,7 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 			return false // the StatefulSet controller has not seen the latest template yet
 		}
 		targets[s] = sts.Status.UpdateRevision
+		templates[s] = &sts.Spec.Template.Spec
 	}
 
 	var outdated []*shardPod
@@ -305,6 +307,25 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 			r.clearRestartWithoutPersistence(ctx, c, read)
 		}
 		return false
+	}
+
+	// A KividbConfig `dir` that moves the engine's files holds a cluster
+	// with no replicas, as in reconcileRollout (#112), the append-only file
+	// on or not, and stuck pod or not. A shard master's replacement would
+	// also lose the nodes.conf kept there, and come back as a new node
+	// that owns no slots. The annotation, which accepts what a restart
+	// loses of a master whose file is off, does not cover it.
+	if c.Spec.Replicas == 0 {
+		var moves []dataDirMove
+		for _, p := range outdated {
+			if m, ok := dataDirMoved(p.pod, templates[p.shard]); ok {
+				moves = append(moves, m)
+			}
+		}
+		if len(moves) > 0 {
+			r.rolloutHeld(c, dataDirHoldMessage(moves))
+			return false
+		}
 	}
 
 	// A pod serving nothing has nothing to protect. A master the hold below

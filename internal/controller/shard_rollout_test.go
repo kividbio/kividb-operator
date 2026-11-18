@@ -734,3 +734,90 @@ func TestShardedRolloutHoldsAMasterUntilItsAgentAnswers(t *testing.T) {
 		t.Fatalf("events:\n%s\nwant RestartingInPlace", ev)
 	}
 }
+
+// moveDataDir gives every shard's StatefulSet the template of a
+// KividbConfig with dir (#112), as a change to it would.
+func (h *formingHarness) moveDataDir(dir string) {
+	h.t.Helper()
+	ctx := context.Background()
+	for s := int32(0); s < shardCount(h.c); s++ {
+		var sts appsv1.StatefulSet
+		if err := h.r.Get(ctx, client.ObjectKey{Namespace: h.c.Namespace, Name: shardStatefulSetName(h.c, s)}, &sts); err != nil {
+			h.t.Fatal(err)
+		}
+		sts.Spec.Template.Spec = dataDirSpec(dir)
+		if err := h.r.Update(ctx, &sts); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+}
+
+// A KividbConfig dir that moves the engine's files holds a master with no
+// replica to resync from, its append-only file on or not: its replacement
+// would start empty, and without the nodes.conf it keeps there, as a new
+// node, owning no slots (#112). The annotation, which accepts what a
+// restart loses of a master whose file is off, does not cover it.
+func TestShardedRolloutHoldsAMasterWhoseDirMoves(t *testing.T) {
+	h := formedForRollout(t, 2, 0)
+	h.moveDataDir("sub")
+	h.allowRestartWithoutPersistence()
+	_ = events(h.r)
+	for i := 0; i < 3; i++ {
+		if deleted := h.rolloutPass(); len(deleted) > 0 {
+			t.Fatalf("pass %d replaced %v, want every master held", i, deleted)
+		}
+	}
+	cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "WouldLoseData" ||
+		!strings.Contains(cond.Message, "s-0-0") || !strings.Contains(cond.Message, "s-1-0") || !strings.Contains(cond.Message, "/data/sub") {
+		t.Fatalf("condition %+v, want False, WouldLoseData, naming s-0-0, s-1-0 and /data/sub", cond)
+	}
+	if ev := events(h.r); strings.Count(ev, "RolloutHeld") != 1 {
+		t.Fatalf("events:\n%s\nwant one RolloutHeld", ev)
+	}
+}
+
+// Its files are on the volume, so a master whose dir moves stays held when
+// its engine is dead too, unlike one held for its file off (#113).
+func TestShardedRolloutHoldsAnUnreadyMasterWhoseDirMoves(t *testing.T) {
+	h := formedForRollout(t, 1, 0)
+	h.moveDataDir("sub")
+	ctx := context.Background()
+	var pod corev1.Pod
+	if err := h.r.Get(ctx, client.ObjectKey{Namespace: h.c.Namespace, Name: shardPodName(h.c, 0, 0)}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse,
+		LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * stuckPodGrace))}}
+	if err := h.r.Status().Update(ctx, &pod); err != nil {
+		if err := h.r.Update(ctx, &pod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !engineDead(&pod) {
+		t.Fatal("want a pod whose engine is dead")
+	}
+	if deleted := h.rolloutPass(); len(deleted) > 0 {
+		t.Fatalf("replaced %v, want s-0-0 held", deleted)
+	}
+	if cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition); cond == nil || cond.Reason != "WouldLoseData" || !strings.Contains(cond.Message, "s-0-0") {
+		t.Fatalf("condition %+v, want WouldLoseData naming s-0-0", cond)
+	}
+}
+
+// With a replica each, a dir that moves rolls as any change does: the
+// replicas first, each master once it has handed over.
+func TestShardedRolloutWithReplicasMovesTheDir(t *testing.T) {
+	h := formedForRollout(t, 2, 1)
+	h.moveDataDir("sub")
+	var order []string
+	for i := 0; i < 20 && len(h.outdated()) > 0; i++ {
+		order = append(order, h.rolloutPass()...)
+	}
+	if left := h.outdated(); len(left) > 0 || len(order) != 4 {
+		t.Fatalf("still outdated: %v (replaced %v)", left, order)
+	}
+	if cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition); cond != nil && cond.Reason == "WouldLoseData" {
+		t.Fatalf("condition %+v, want no hold", cond)
+	}
+}

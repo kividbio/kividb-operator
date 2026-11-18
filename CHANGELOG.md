@@ -59,7 +59,13 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   engine starts, with the volume's group and mode; one that is there is
   left as it is. Only a cluster whose `dir` is a strict subdirectory of
   `/data` gets the init container: its pods roll once on upgrade, and no
-  other cluster's do.
+  other cluster's do. A change to `dir` on a cluster with no replicas is
+  held (`RolloutProgressing` False, `WouldLoseData`): its pod would start
+  empty in the new directory, and the scheduled backups would upload that.
+  Add a replica, which resyncs first, or set `dir` back. The pod spec is
+  what says where the files are, so this holds the upgrade of a cluster
+  with no replicas that ran with a `dir` made by hand under `/data`: if
+  its files are in `dir` already, delete its pod to let it roll.
 - **An `INFO keyspace` reply the agent could not read counted as 0 keys.**
   The agent reported a known count of 0 for any reply it found no database
   line in, the empty reply an engine gives for a section it does not have

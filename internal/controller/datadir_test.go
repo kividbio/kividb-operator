@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"strings"
 	"testing"
@@ -323,6 +324,10 @@ func TestPodTemplateMakesTheDataDirOnlyForASubdirectory(t *testing.T) {
 				tmpl = shardPodTemplate(c, 0, cfg, nil, nil)
 			}
 			inits := tmpl.Spec.InitContainers
+			// What the rollout reads back from a pod (see dataDirMoves).
+			if want := cmp.Or(tc.want, DataDir); podDataDir(&tmpl.Spec) != want {
+				t.Errorf("%s, dir %q: podDataDir %q, want %q", c.Name, tc.dir, podDataDir(&tmpl.Spec), want)
+			}
 			if tc.want == "" {
 				if len(inits) != 0 {
 					t.Errorf("%s, dir %q: init containers %+v, want none", c.Name, tc.dir, inits)

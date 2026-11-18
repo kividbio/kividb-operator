@@ -259,6 +259,26 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 		return
 	}
 
+	// A KividbConfig `dir` that moves the engine's files, with no replica
+	// to resync from: the new pod would start empty where the engine now
+	// looks, the files left where it looked before, and the scheduled
+	// backups would upload the empty dataset, and in time prune the good
+	// ones (#112). Held whether or not the pod is stuck: its files are on
+	// its volume either way. With a replica, the replica is replaced first
+	// and resyncs, and the master hands over before its own replacement.
+	if c.Spec.Replicas == 0 {
+		var moves []dataDirMove
+		for _, p := range outdated {
+			if m, ok := dataDirMoved(p, &sts.Spec.Template.Spec); ok {
+				moves = append(moves, m)
+			}
+		}
+		if len(moves) > 0 {
+			r.rolloutHeld(c, dataDirHoldMessage(moves))
+			return
+		}
+	}
+
 	replaced := false
 	for _, p := range outdated {
 		if isPodReady(p) || time.Since(unreadySince(p)) < stuckPodGrace {
