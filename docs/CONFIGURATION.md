@@ -1100,7 +1100,11 @@ spec:
   replica, the rollout replaces the replicas first, which resync, and the
   master hands over before its own restart. With no replicas it holds
   instead (`RolloutProgressing` `False`, reason `WouldLoseData`), since
-  the new pod would start empty: add a replica, or set `dir` back. The
+  the new pod would start empty: add a replica, or set `dir` back, the
+  only way out while the pod is not Ready (a replica would have nothing
+  to sync from). Either way, a pod whose `dir` moves is not replaced as a
+  stuck pod: one not Ready is replaced only as a replica, once the others
+  are healthy, so that it resyncs. The
   hold covers the rollout only. A pod deleted outside it (a node drained,
   an eviction, `kubectl delete`) comes back with the new `dir` and starts
   empty. An old pod whose engine restarts in place (a crash, out of

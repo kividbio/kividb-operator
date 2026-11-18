@@ -343,6 +343,10 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		if c.Spec.Replicas == 0 && !allowLoss && !engineDead(p.pod) {
 			continue
 		}
+		// Nor one whose dir moves, as in reconcileRollout (#112).
+		if _, moves := dataDirMoved(p.pod, templates[p.shard]); moves {
+			continue
+		}
 		log.Info("rollout: replacing unready pod on an outdated template", "pod", p.pod.Name)
 		if err := r.Delete(ctx, p.pod); err != nil && !apierrors.IsNotFound(err) {
 			log.Error(err, "rollout: deleting pod", "pod", p.pod.Name)

@@ -821,3 +821,26 @@ func TestShardedRolloutWithReplicasMovesTheDir(t *testing.T) {
 		t.Fatalf("condition %+v, want no hold", cond)
 	}
 }
+
+// A stuck master whose dir moves is not replaced as a stuck pod, replicas
+// or not: its replacement would start empty, and its replica sync from it.
+// Its replica takes over first (#112).
+func TestShardedRolloutLeavesAStuckMasterWhoseDirMoves(t *testing.T) {
+	h := formedForRollout(t, 1, 1)
+	h.moveDataDir("sub")
+	ctx := context.Background()
+	var pod corev1.Pod
+	if err := h.r.Get(ctx, client.ObjectKey{Namespace: h.c.Namespace, Name: shardPodName(h.c, 0, 0)}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse,
+		LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * stuckPodGrace))}}
+	if err := h.r.Status().Update(ctx, &pod); err != nil {
+		if err := h.r.Update(ctx, &pod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if deleted := h.rolloutPass(); slices.Contains(deleted, "s-0-0") {
+		t.Fatalf("replaced %v, want the stuck master s-0-0 left", deleted)
+	}
+}

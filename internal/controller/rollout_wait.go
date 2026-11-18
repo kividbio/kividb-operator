@@ -136,17 +136,23 @@ func (r *KividbClusterReconciler) rolloutHeld(c *kividbv1alpha1.KividbCluster, m
 // dataDirMove is a pod whose replacement would have the engine keep its
 // files in another directory than it does: a KividbConfig `dir` added,
 // changed or removed (#112).
-type dataDirMove struct{ pod, from, to string }
+type dataDirMove struct {
+	pod, from, to string
+	ready         bool
+}
 
 // dataDirMoved says whether pod's replacement, on template, would have the
 // engine keep its files elsewhere, and where, as their specs say.
 func dataDirMoved(pod *corev1.Pod, template *corev1.PodSpec) (dataDirMove, bool) {
-	m := dataDirMove{pod: pod.Name, from: podDataDir(&pod.Spec), to: podDataDir(template)}
+	m := dataDirMove{pod: pod.Name, from: podDataDir(&pod.Spec), to: podDataDir(template), ready: isPodReady(pod)}
 	return m, m.from != m.to
 }
 
 // dataDirHoldMessage says why the rollout holds the pods of moves (at
-// least one) of a cluster with no replicas, and how to go on.
+// least one) of a cluster with no replicas, and how to go on. A replica
+// added syncs from the master only while its engine runs: one that is not
+// Ready (its engine restarted, read the new dir from its config, and
+// cannot start there) has to have dir set back.
 func dataDirHoldMessage(moves []dataDirMove) string {
 	sort.Slice(moves, func(i, j int) bool { return moves[i].pod < moves[j].pod })
 	type fromTo struct{ from, to string }
@@ -163,12 +169,26 @@ func dataDirHoldMessage(moves []dataDirMove) string {
 	for _, k := range order {
 		parts = append(parts, fmt.Sprintf("%s from %s to %s", strings.Join(pods[k], ", "), k.from, k.to))
 	}
+	var unready []string
+	for _, m := range moves {
+		if !m.ready {
+			unready = append(unready, m.pod)
+		}
+	}
 	replacement, which := "its replacement", "pod "+moves[0].pod
 	if len(moves) > 1 {
 		replacement, which = "their replacements", "each pod"
 	}
-	return fmt.Sprintf("the KividbConfig's dir moves the engine's files of %s: with no replica to resync from, %s would start empty, and scheduled backups would upload that. Add a replica (spec.replicas: 1), which syncs before the master hands over, or set dir back; to start empty anyway, delete %s by hand",
-		strings.Join(parts, "; "), replacement, which)
+	wayOut := "Add a replica (spec.replicas: 1), which syncs before the master hands over, or set dir back"
+	switch len(unready) {
+	case 0:
+	case 1:
+		wayOut = fmt.Sprintf("Set dir back: %s is not Ready, so a replica would have nothing to sync from", unready[0])
+	default:
+		wayOut = fmt.Sprintf("Set dir back: %s are not Ready, so a replica would have nothing to sync from", strings.Join(unready, ", "))
+	}
+	return fmt.Sprintf("the KividbConfig's dir moves the engine's files of %s: with no replica to resync from, %s would start empty, and scheduled backups would upload that. %s; to start empty anyway, delete %s by hand",
+		strings.Join(parts, "; "), replacement, wayOut, which)
 }
 
 // rolloutProgressed records that the rollout of c replaced a pod (or asked

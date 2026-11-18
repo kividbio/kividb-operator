@@ -284,6 +284,13 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 		if isPodReady(p) || time.Since(unreadySince(p)) < stuckPodGrace {
 			continue
 		}
+		// Not one whose dir moves, replicas or not: its files are on its
+		// volume, where its replacement would not look, and a master's
+		// replicas would sync from that. Below, it is replaced as a
+		// replica, once the others are healthy, and resyncs (#112).
+		if _, moves := dataDirMoved(p, &sts.Spec.Template.Spec); moves {
+			continue
+		}
 		log.Info("rollout: replacing unready pod on an outdated template", "pod", p.Name)
 		if err := r.Delete(ctx, p); err != nil && !apierrors.IsNotFound(err) {
 			log.Error(err, "rollout: deleting pod", "pod", p.Name)

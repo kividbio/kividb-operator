@@ -375,6 +375,24 @@ func TestReconcileRollout(t *testing.T) {
 			wantPromoted: "c1-1",
 		},
 		{
+			// Its engine restarted in place and read the new dir, which is
+			// not there: a replacement would start empty, and the replica
+			// sync from it.
+			name: "a replica added to a held cluster whose master is stuck: nothing is replaced",
+			pods: []rolloutPod{
+				{name: "c1-0", revision: "old", unreadyFor: time.Hour},
+				{name: "c1-1", revision: "new", ready: true, dir: "sub"},
+			},
+			newDir:     "sub",
+			heldBefore: true,
+		},
+		{
+			name:        "a stuck replica whose dir moves is replaced once the others are healthy",
+			pods:        []rolloutPod{healthy("c1-0", "old"), {name: "c1-1", revision: "old", unreadyFor: time.Hour}},
+			newDir:      "sub",
+			wantDeleted: []string{"c1-1"},
+		},
+		{
 			name:       "dir set back on a held cluster: nothing is outdated",
 			pods:       []rolloutPod{healthy("c1-0", "new")},
 			heldBefore: true,

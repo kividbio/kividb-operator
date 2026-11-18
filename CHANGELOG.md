@@ -62,7 +62,9 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   other cluster's do. A change to `dir` on a cluster with no replicas is
   held (`RolloutProgressing` False, `WouldLoseData`): its pod would start
   empty in the new directory, and the scheduled backups would upload that.
-  Add a replica, which resyncs first, or set `dir` back. The pod spec is
+  Add a replica, which resyncs first, or set `dir` back, the only way out
+  while the pod is not Ready. A pod whose `dir` moves is not replaced as
+  a stuck pod either, replicas or not. The pod spec is
   what says where the files are, so this holds the upgrade of a cluster
   with no replicas that ran with a `dir` made by hand under `/data`: if
   its files are in `dir` already, delete its pod to let it roll.

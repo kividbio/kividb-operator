@@ -219,3 +219,20 @@ func TestShardedRolloutReportsAReplicaNotInSync(t *testing.T) {
 		t.Fatalf("stall event: %q", got)
 	}
 }
+
+// A held pod that is not Ready has no data a new replica could sync from:
+// the way out is to set dir back (#112).
+func TestDataDirHoldMessage(t *testing.T) {
+	ready := dataDirHoldMessage([]dataDirMove{{pod: "c1-0", from: "/data", to: "/data/sub", ready: true}})
+	if !strings.Contains(ready, "Add a replica") || !strings.Contains(ready, "delete pod c1-0 by hand") {
+		t.Errorf("ready: %q, want it to offer a replica and deleting the pod", ready)
+	}
+	stuck := dataDirHoldMessage([]dataDirMove{{pod: "c1-0", from: "/data", to: "/data/sub"}})
+	if strings.Contains(stuck, "Add a replica") || !strings.Contains(stuck, "Set dir back") || !strings.Contains(stuck, "c1-0 is not Ready") {
+		t.Errorf("not Ready: %q, want it to say to set dir back, and why", stuck)
+	}
+	two := dataDirHoldMessage([]dataDirMove{{pod: "s-1-0", from: "/data", to: "/data/sub"}, {pod: "s-0-0", from: "/data", to: "/data/sub", ready: true}})
+	if !strings.Contains(two, "s-0-0, s-1-0 from /data to /data/sub") || !strings.Contains(two, "s-1-0 is not Ready") || !strings.Contains(two, "each pod") {
+		t.Errorf("two: %q", two)
+	}
+}
