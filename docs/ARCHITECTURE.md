@@ -61,7 +61,8 @@ files kividb writes without any network hop. When a `KividbConfig`'s
 `dir` is a directory under `/data`, the pod also gets an init container,
 `data-dir` (the agent image, `agent make-data-dir`), which makes that
 directory before kividb starts: kividb changes into it and does not
-create it. `redis-exporter` talks to
+create it. kividb gets it as `--dir` too, so a restart in the pod keeps
+it. `redis-exporter` talks to
 kividb purely over the network (`127.0.0.1:<port>`, same as any Redis
 client) and mounts nothing.
 

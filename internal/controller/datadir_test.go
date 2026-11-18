@@ -324,9 +324,23 @@ func TestPodTemplateMakesTheDataDirOnlyForASubdirectory(t *testing.T) {
 				tmpl = shardPodTemplate(c, 0, cfg, nil, nil)
 			}
 			inits := tmpl.Spec.InitContainers
-			// What the rollout reads back from a pod (see dataDirMoves).
+			// What the rollout reads back from a pod (see dataDirMoved).
 			if want := cmp.Or(tc.want, DataDir); podDataDir(&tmpl.Spec) != want {
 				t.Errorf("%s, dir %q: podDataDir %q, want %q", c.Name, tc.dir, podDataDir(&tmpl.Spec), want)
+			}
+			// The engine gets the same dir on its command line, which wins
+			// over its config file: an engine that restarts in its pod keeps
+			// it whatever the KividbConfig says by then.
+			var args string
+			for _, ct := range tmpl.Spec.Containers {
+				if ct.Name == kividbContainerName {
+					args = " " + strings.Join(ct.Args, " ") + " "
+				}
+			}
+			if wantDir := " --dir " + tc.want + " "; tc.want != "" && !strings.Contains(args, wantDir) {
+				t.Errorf("%s, dir %q: engine args %q, want %q", c.Name, tc.dir, args, wantDir)
+			} else if tc.want == "" && strings.Contains(args, " --dir ") {
+				t.Errorf("%s, dir %q: engine args %q, want no --dir", c.Name, tc.dir, args)
 			}
 			if tc.want == "" {
 				if len(inits) != 0 {

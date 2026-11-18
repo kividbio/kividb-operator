@@ -1096,21 +1096,23 @@ spec:
   as they are (see
   [TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-kividbconfig-dir-off-the-volume-invalidspec)).
 
-  A change to `dir` moves where the engine looks, not its files. With a
-  replica, the rollout replaces the replicas first, which resync, and the
-  master hands over before its own restart. With no replicas it holds
-  instead (`RolloutProgressing` `False`, reason `WouldLoseData`), since
-  the new pod would start empty: add a replica, or set `dir` back, the
-  only way out while the pod is not Ready (a replica would have nothing
-  to sync from). Either way, a pod whose `dir` moves is not replaced as a
-  stuck pod: one not Ready is replaced only as a replica, once the others
-  are healthy, so that it resyncs. The
-  hold covers the rollout only. A pod deleted outside it (a node drained,
-  an eviction, `kubectl delete`) comes back with the new `dir` and starts
-  empty. An old pod whose engine restarts in place (a crash, out of
-  memory) reads the new `dir` from its config too: a new directory is not
-  there, so it fails to start, but with `dir` removed it starts in `/data`,
-  on no files or older ones.
+  A change to `dir` moves where the engine looks, not its files, and
+  takes effect when a pod is replaced: the engine gets a `dir` under
+  `/data` on its command line too, so one that restarts in its pod (a
+  crash, out of memory) keeps the `dir` it started with. A pod made
+  without a `dir` has no such flag: if its engine restarts after one is
+  added, it reads the new `dir`, which is not made yet, and fails to
+  start, its data kept. With a replica, the rollout replaces the replicas
+  first, which resync, and the master hands over before its own restart.
+  With no replicas it holds instead (`RolloutProgressing` `False`, reason
+  `WouldLoseData`), since the new pod would start empty: add a replica,
+  or set `dir` back, the only way out while the pod is not Ready (a
+  replica would have nothing to sync from). Either way, a pod whose `dir`
+  moves is not replaced as a stuck pod: one not Ready is replaced only as
+  a replica, once the others are healthy, so that it resyncs. The hold
+  covers the rollout only: a pod deleted outside it (a node drained, an
+  eviction, `kubectl delete`) comes back with the new `dir` and starts
+  empty.
 
   Backups ask the engine where its files are (`CONFIG GET dir`). If an ACL
   denies `CONFIG` to the default user, which the agent uses, they read

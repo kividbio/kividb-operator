@@ -57,7 +57,9 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   engine reports (`CONFIG GET dir`), a restore extracts into `dir`, and an
   init container, `data-dir` (the agent image), makes `dir` before the
   engine starts, with the volume's group and mode; one that is there is
-  left as it is. Only a cluster whose `dir` is a strict subdirectory of
+  left as it is. The engine also gets `dir` on its command line, which it
+  takes over the config file, so one that restarts in its pod keeps its
+  `dir` until the pod is replaced. Only a cluster whose `dir` is a strict subdirectory of
   `/data` gets the init container: its pods roll once on upgrade, and no
   other cluster's do. A change to `dir` on a cluster with no replicas is
   held (`RolloutProgressing` False, `WouldLoseData`): its pod would start

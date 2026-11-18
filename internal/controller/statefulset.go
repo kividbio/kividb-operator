@@ -401,6 +401,18 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 		kividbPorts = append(kividbPorts, corev1.ContainerPort{Name: "tls", ContainerPort: tlsPort})
 	}
 
+	// A `dir` under the volume goes on the command line too, which the
+	// engine takes over its config file. The mounted config file changes
+	// with the KividbConfig, and an engine that restarts in its pod (a
+	// crash, out of memory) reads it again: with the flag, it keeps the
+	// `dir` its pod was made for until the pod is replaced (#112). Only a
+	// strict subdirectory gets it, as only it gets the init container
+	// below, so no other pod template changes.
+	dataDir := engineDataDir(kdbConfig)
+	if dataDir != DataDir {
+		kividbArgs = append(kividbArgs, "--dir", dataDir)
+	}
+
 	kividbContainer := corev1.Container{
 		Name:            "kividb",
 		Image:           resolveImage(c),
@@ -468,12 +480,12 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 	// every other pod template is as before, so an operator upgrade
 	// restarts no other cluster.
 	var initContainers []corev1.Container
-	if dir := engineDataDir(kdbConfig); dir != DataDir {
+	if dataDir != DataDir {
 		initContainers = append(initContainers, corev1.Container{
 			Name:            dataDirContainerName,
 			Image:           agentImage(c),
 			ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
-			Args:            []string{"make-data-dir", "--volume", DataDir, "--data-dir", dir},
+			Args:            []string{"make-data-dir", "--volume", DataDir, "--data-dir", dataDir},
 			Resources:       c.Spec.AgentResources,
 			// Why it failed is its termination message, in the pod's status.
 			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
