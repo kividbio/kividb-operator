@@ -260,5 +260,7 @@ kubectl delete pod -n "${E2E_KIVIDB_NS}" "${CHECK}" --wait=true >/dev/null
 [[ "${phase}" == "Succeeded" ]] || die "${PVC}: the engine's files are not where they should be"
 
 cleanup_cluster "${E2E_KIVIDB_NS}" "${NAME}"
-kubectl delete job -n "${E2E_KIVIDB_NS}" -l "app.kubernetes.io/name=kividb-backup" --ignore-not-found || true
+if [[ -n "${BACKUP_JOB:-}" ]]; then
+  kubectl delete job -n "${E2E_KIVIDB_NS}" "${BACKUP_JOB}" --ignore-not-found || true
+fi
 log "dir-under-data suite PASS"

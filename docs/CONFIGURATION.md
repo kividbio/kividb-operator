@@ -1108,6 +1108,11 @@ spec:
   there, so it fails to start, but with `dir` removed it starts in `/data`,
   on no files or older ones.
 
+  Backups ask the engine where its files are (`CONFIG GET dir`). If an ACL
+  denies `CONFIG` to the default user, which the agent uses, they read
+  `/data`: with a `dir` set, that holds no files or older ones, so allow
+  it `CONFIG GET`.
+
   **`bind`**: unless you set `bind` or `protected-mode` yourself, the
   operator sets `bind 0.0.0.0`, the address kividb has always listened on.
   kividb v1.1.0 and later enforce protected mode as Redis does: while the
