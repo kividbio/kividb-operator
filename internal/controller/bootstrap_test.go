@@ -43,7 +43,7 @@ func TestBootstrapFromAShardedBackupIsRefused(t *testing.T) {
 	r := shardedReconciler(t, c, snap, cfg)
 
 	for i := 0; i < 2; i++ {
-		block, err := r.reconcileBootstrap(ctx, c)
+		block, err := r.reconcileBootstrap(ctx, c, nil)
 		if !block || err == nil {
 			t.Fatalf("pass %d: block %v, err %v", i, block, err)
 		}
@@ -154,7 +154,7 @@ func TestBootstrapIsSkippedOnARunningCluster(t *testing.T) {
 	r := shardedReconciler(t, append(objs, c, sts)...)
 
 	for i := 0; i < 2; i++ {
-		block, err := r.reconcileBootstrap(ctx, c)
+		block, err := r.reconcileBootstrap(ctx, c, nil)
 		if block || err != nil {
 			t.Fatalf("pass %d: block %v, err %v; want the bootstrap skipped", i, block, err)
 		}
@@ -379,7 +379,7 @@ func TestBootstrapRestoresAnOldLayoutSnapshotByItsStoredKey(t *testing.T) {
 	cfg.Spec.S3.PathPrefix = "prod"
 	c := testCluster("cache")
 	c.Spec.Storage = kividbv1alpha1.StorageSpec{Size: "1Gi"}
-	job, err := shardedReconciler(t, c).ensureBootstrapJob(ctx, c, snap, cfg)
+	job, err := shardedReconciler(t, c).ensureBootstrapJob(ctx, c, nil, snap, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,7 +558,7 @@ func TestBootstrapIsNotSkippedForItsOwnStatefulSetAtZero(t *testing.T) {
 				Spec: appsv1.StatefulSetSpec{Replicas: &zero}}
 			r := shardedReconciler(t, append(objs, c, sts)...)
 
-			block, err := r.reconcileBootstrap(ctx, c)
+			block, err := r.reconcileBootstrap(ctx, c, nil)
 			if !block || err != nil {
 				t.Fatalf("block %v, err %v; want the restore going on", block, err)
 			}
@@ -639,7 +639,7 @@ func TestBootstrapJobOfAnotherClusterIsNotUsed(t *testing.T) {
 	c.Status.Bootstrap = &kividbv1alpha1.BootstrapStatus{Phase: kividbv1alpha1.BootstrapPending, SnapshotName: "old-backup", Message: "bootstrap requested"}
 	r := shardedReconciler(t, append(objs, c, earlierBootstrapJob(c))...)
 
-	block, err := r.reconcileBootstrap(ctx, c)
+	block, err := r.reconcileBootstrap(ctx, c, nil)
 	if !block || err != nil || c.Status.Bootstrap.Completed || !bootstrapWaiting(c) {
 		t.Fatalf("block %v, err %v, status %+v; want blocked, waiting for the earlier cluster's Job", block, err, c.Status.Bootstrap)
 	}
@@ -761,7 +761,7 @@ func TestBootstrapIsNotSkippedWhenItsOwnRestoreJobExists(t *testing.T) {
 			sts, job := ownBootstrapObjects(c)
 			r := shardedReconciler(t, append(objs, c, sts, job)...)
 
-			if _, err := r.reconcileBootstrap(ctx, c); err != nil {
+			if _, err := r.reconcileBootstrap(ctx, c, nil); err != nil {
 				t.Fatal(err)
 			}
 			if b := c.Status.Bootstrap; b == nil || !b.Completed || strings.Contains(b.Message, "skipped") {

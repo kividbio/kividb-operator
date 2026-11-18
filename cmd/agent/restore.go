@@ -33,6 +33,7 @@ func runRestoreFromS3(args []string) error {
 	region := fs.String("region", "", "S3 region")
 	objectKey := fs.String("object-key", "", "object key of the snapshot tar.gz")
 	dataDir := fs.String("data-dir", "/data", "directory to extract persistence files into")
+	volume := fs.String("volume", "", "the pod's data volume, when --data-dir is a directory under it: that directory is made as make-data-dir makes it")
 	forcePathStyle := fs.String("force-path-style", "false", "use path-style addressing")
 	insecureTLS := fs.String("insecure-skip-tls-verify", "false", "skip TLS verify")
 	if err := fs.Parse(args); err != nil {
@@ -87,7 +88,7 @@ func runRestoreFromS3(args []string) error {
 	}
 	defer obj.Close()
 
-	if err := os.MkdirAll(*dataDir, 0o750); err != nil {
+	if err := prepareRestoreDir(*volume, *dataDir); err != nil {
 		return err
 	}
 	if err := extractSnapshotTarGz(obj, *dataDir); err != nil {
@@ -95,6 +96,22 @@ func runRestoreFromS3(args []string) error {
 	}
 	log.Printf("restored snapshot into %s", *dataDir)
 	return nil
+}
+
+// prepareRestoreDir makes dataDir for the restore. With volume, for a
+// cluster whose KividbConfig `dir` is a directory under the pod's volume
+// (#112), it is made as the pods' init container makes it (makeDataDir),
+// with the volume's group and mode, for the engine to write in. Without,
+// as before: dataDir is the volume itself.
+func prepareRestoreDir(volume, dataDir string) error {
+	if volume == "" {
+		return os.MkdirAll(dataDir, 0o750)
+	}
+	made, err := makeDataDir(volume, dataDir)
+	for _, p := range made {
+		log.Printf("made %s", p)
+	}
+	return err
 }
 
 // restoredFileMode is group-read/writable on purpose. This process runs as

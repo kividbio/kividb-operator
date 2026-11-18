@@ -9,6 +9,7 @@
 //
 //	agent serve                                    # run the HTTP sidecar (default)
 //	agent backup-trigger --url <master-svc-url>    # one-shot CronJob client
+//	agent make-data-dir --data-dir <dir>           # init container: make the engine's dir
 package main
 
 import (
@@ -33,8 +34,10 @@ func main() {
 		err = runBackupTrigger(args)
 	case "restore-from-s3":
 		err = runRestoreFromS3(args)
+	case "make-data-dir":
+		err = runMakeDataDir(args)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected \"serve\", \"backup-trigger\", or \"restore-from-s3\")\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (expected \"serve\", \"backup-trigger\", \"restore-from-s3\" or \"make-data-dir\")\n", cmd)
 		os.Exit(2)
 	}
 	if err != nil {

@@ -263,3 +263,120 @@ func TestReconcile_NewClusterWithADirOffTheVolumeCreatesNothing(t *testing.T) {
 		t.Errorf("Ready condition %+v, want InvalidSpec naming KividbConfig conf and /tmp", ready)
 	}
 }
+
+// Where the engine keeps its snapshot and append-only file (#112): the
+// KividbConfig's `dir`, read and resolved as dataDirError reads it, or
+// /data without one. Of two spellings of `dir` the engine takes the one
+// written last, and the config file is written in sorted order. Backups,
+// restores and the directory made before the engine starts all use it.
+func TestEngineDataDir(t *testing.T) {
+	for _, tc := range []struct {
+		directives map[string]string
+		want       string
+	}{
+		{nil, "/data"},
+		{map[string]string{"loglevel": "verbose"}, "/data"},
+		{map[string]string{"dir": "sub"}, "/data/sub"},
+		{map[string]string{"dir": "./a/../b/"}, "/data/b"},
+		{map[string]string{"dir": "/data/sub"}, "/data/sub"},
+		{map[string]string{"dir": "/data/a/b"}, "/data/a/b"},
+		{map[string]string{"dir": `"/data/my dir" # kept here`}, "/data/my dir"},
+		{map[string]string{"dir": "."}, "/data"},
+		{map[string]string{"dir": "/data/"}, "/data"},
+		{map[string]string{"dir": `""`}, "/data"},
+		{map[string]string{"DIR": "a", "dir": "b"}, "/data/b"},
+	} {
+		if got := engineDataDir(directivesConfig(tc.directives)); got != tc.want {
+			t.Errorf("directives %v: engine data dir %q, want %q", tc.directives, got, tc.want)
+		}
+	}
+	if got := engineDataDir(nil); got != DataDir {
+		t.Errorf("no KividbConfig: engine data dir %q, want %q", got, DataDir)
+	}
+}
+
+// The engine does not create `dir` (#112): on a new volume `dir sub` exits
+// at once ("Can't chdir to 'sub'"). A cluster whose `dir` is a strict
+// subdirectory of /data gets an init container, from the agent image, that
+// makes it before the engine starts, in a sharded cluster as in a
+// replicated one. Every other cluster's pod template is as before, so an
+// operator upgrade restarts none of them.
+func TestPodTemplateMakesTheDataDirOnlyForASubdirectory(t *testing.T) {
+	for _, tc := range []struct {
+		dir  string // "" for no KividbConfig
+		want string // the directory made; "" for no init container
+	}{
+		{"", ""},
+		{".", ""},
+		{"/data", ""},
+		{`""`, ""},
+		{"sub", "/data/sub"},
+		{"/data/a/b", "/data/a/b"},
+	} {
+		for _, c := range []*kividbv1alpha1.KividbCluster{testCluster("r"), shardedCluster("s", 2, 0)} {
+			var cfg *kividbv1alpha1.KividbConfig
+			if tc.dir != "" {
+				cfg = directivesConfig(map[string]string{"dir": tc.dir})
+			}
+			tmpl := podTemplate(c, cfg, nil, nil)
+			if isSharded(c) {
+				tmpl = shardPodTemplate(c, 0, cfg, nil, nil)
+			}
+			inits := tmpl.Spec.InitContainers
+			if tc.want == "" {
+				if len(inits) != 0 {
+					t.Errorf("%s, dir %q: init containers %+v, want none", c.Name, tc.dir, inits)
+				}
+				continue
+			}
+			if len(inits) != 1 {
+				t.Fatalf("%s, dir %q: %d init containers, want 1", c.Name, tc.dir, len(inits))
+			}
+			ic := inits[0]
+			wantArgs := "make-data-dir --volume /data --data-dir " + tc.want
+			if got := strings.Join(ic.Args, " "); got != wantArgs || ic.Image != agentImage(c) {
+				t.Errorf("%s, dir %q: init container %s %q, want %s %q", c.Name, tc.dir, ic.Image, got, agentImage(c), wantArgs)
+			}
+			if len(ic.VolumeMounts) != 1 || ic.VolumeMounts[0].Name != "data" || ic.VolumeMounts[0].MountPath != DataDir {
+				t.Errorf("%s, dir %q: init container mounts %+v, want only the data volume at %s", c.Name, tc.dir, ic.VolumeMounts, DataDir)
+			}
+		}
+	}
+}
+
+// A cluster bootstrapped from a snapshot with `dir` a subdirectory of /data
+// gets the snapshot's files there, where the engine looks (#112): the
+// restore Job makes the directory, as the init container would, and
+// extracts into it. Without such a `dir` the Job's arguments are as before,
+// so an agent image pinned to an older release still restores.
+func TestBootstrapRestoresIntoTheEnginesDir(t *testing.T) {
+	ctx := context.Background()
+	snap := &kividbv1alpha1.KividbSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "default"},
+		Status:     kividbv1alpha1.KividbSnapshotStatus{Phase: kividbv1alpha1.SnapshotSucceeded, ObjectKey: "default.cache/cache-0.tar.gz"},
+	}
+	cfg := &kividbv1alpha1.KividbSnapshotConfig{ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: "default"}}
+	for _, tc := range []struct {
+		dir  string // "" for no KividbConfig
+		want string // the restore's directory arguments
+	}{
+		{"", "--data-dir /data --force-path-style"},
+		{".", "--data-dir /data --force-path-style"},
+		{"sub", "--data-dir /data/sub --volume /data --force-path-style"},
+		{`"/data/my dir"`, "--data-dir /data/my dir --volume /data --force-path-style"},
+	} {
+		var kdbConfig *kividbv1alpha1.KividbConfig
+		if tc.dir != "" {
+			kdbConfig = directivesConfig(map[string]string{"dir": tc.dir})
+		}
+		c := testCluster("cache")
+		c.Spec.Storage = kividbv1alpha1.StorageSpec{Size: "1Gi"}
+		job, err := shardedReconciler(t, c).ensureBootstrapJob(ctx, c, kdbConfig, snap, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " "); !strings.Contains(args, " "+tc.want+" ") {
+			t.Errorf("dir %q: restore args %q, want %q", tc.dir, args, tc.want)
+		}
+	}
+}

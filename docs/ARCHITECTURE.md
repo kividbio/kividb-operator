@@ -37,9 +37,9 @@ kividb speaks only the RESP protocol on a single TCP port. It has:
 
 - no HTTP health or metrics endpoint,
 - no built-in object-storage upload for snapshots,
-- and no `dir`/`dbfilename` config directive — `dump.kdb` and
-  `appendonly.aof` are always written relative to the process's *current
-  working directory*.
+- and fixed persistence file names — `dump.kdb` and `appendonly.aof`, in
+  the directory it changes into at start (`dir`, by default its working
+  directory, `/data`); it ignores `dbfilename` and `appendfilename`.
 
 A Kubernetes controller cannot cheaply speak RESP itself for routine probe
 traffic, cannot easily run `tar`+S3-upload logic inside the kividb
@@ -57,7 +57,11 @@ requested:
 
 The `kividb` and `agent` containers mount the same `data`
 PersistentVolumeClaim at `/data`, so the agent can read/tar the snapshot
-files kividb writes without any network hop. `redis-exporter` talks to
+files kividb writes without any network hop. When a `KividbConfig`'s
+`dir` is a directory under `/data`, the pod also gets an init container,
+`data-dir` (the agent image, `agent make-data-dir`), which makes that
+directory before kividb starts: kividb changes into it and does not
+create it. `redis-exporter` talks to
 kividb purely over the network (`127.0.0.1:<port>`, same as any Redis
 client) and mounts nothing.
 

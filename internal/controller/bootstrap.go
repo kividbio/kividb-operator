@@ -71,7 +71,7 @@ func (r *KividbClusterReconciler) bootstrapSnapshotConfig(ctx context.Context, c
 // before the StatefulSet is allowed to run. Returns shouldBlock=true while
 // bootstrap is incomplete so the caller can skip role reconciliation / keep
 // the STS at 0 replicas.
-func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kividbv1alpha1.KividbCluster) (shouldBlock bool, err error) {
+func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig) (shouldBlock bool, err error) {
 	log := logf.FromContext(ctx)
 
 	if c.Status.Bootstrap != nil && c.Status.Bootstrap.Completed {
@@ -226,7 +226,7 @@ func (r *KividbClusterReconciler) reconcileBootstrap(ctx context.Context, c *kiv
 		return true, nil
 	}
 
-	job, err := r.ensureBootstrapJob(ctx, c, &snap, &snapCfg)
+	job, err := r.ensureBootstrapJob(ctx, c, kdbConfig, &snap, &snapCfg)
 	if errors.Is(err, errEarlierRestoreJob) {
 		reason = "WaitingForEarlierCluster"
 		r.waitForEarlierCluster(c, snapName)
@@ -509,7 +509,7 @@ func (r *KividbClusterReconciler) bootstrapJobExists(ctx context.Context, c *kiv
 	return !apierrors.IsNotFound(err)
 }
 
-func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kividbv1alpha1.KividbCluster, snap *kividbv1alpha1.KividbSnapshot, snapCfg *kividbv1alpha1.KividbSnapshotConfig) (*batchv1.Job, error) {
+func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, snap *kividbv1alpha1.KividbSnapshot, snapCfg *kividbv1alpha1.KividbSnapshotConfig) (*batchv1.Job, error) {
 	name := bootstrapJobName(c)
 	var existing batchv1.Job
 	err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: name}, &existing)
@@ -526,6 +526,28 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 	}
 
 	accessKeyKey, secretKeyKey := s3CredentialKeys(snapCfg.Spec.S3.CredentialsSecretRef)
+
+	// The files go where the engine will look for them: its `dir`, when the
+	// KividbConfig puts it under the volume (#112). The restore then makes
+	// that directory as the pods' init container does. Without such a
+	// `dir` the arguments are as before, so an agent image pinned to an
+	// earlier release, which has no --volume, still restores.
+	args := []string{
+		"restore-from-s3",
+		"--endpoint", snapCfg.Spec.S3.Endpoint,
+		"--bucket", snapCfg.Spec.S3.Bucket,
+		"--region", snapCfg.Spec.S3.Region,
+		"--object-key", snap.Status.ObjectKey,
+	}
+	if dir := engineDataDir(kdbConfig); dir != DataDir {
+		args = append(args, "--data-dir", dir, "--volume", DataDir)
+	} else {
+		args = append(args, "--data-dir", DataDir)
+	}
+	args = append(args,
+		"--force-path-style", fmt.Sprintf("%t", snapCfg.Spec.S3.ForcePathStyle),
+		"--insecure-skip-tls-verify", fmt.Sprintf("%t", snapCfg.Spec.S3.InsecureSkipTLSVerify),
+	)
 
 	backoff := int32(1)
 	ttl := int32(86400)
@@ -552,16 +574,7 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 						// The end of the log of a failed restore is its
 						// termination message, which status.bootstrap quotes.
 						TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
-						Args: []string{
-							"restore-from-s3",
-							"--endpoint", snapCfg.Spec.S3.Endpoint,
-							"--bucket", snapCfg.Spec.S3.Bucket,
-							"--region", snapCfg.Spec.S3.Region,
-							"--object-key", snap.Status.ObjectKey,
-							"--data-dir", DataDir,
-							"--force-path-style", fmt.Sprintf("%t", snapCfg.Spec.S3.ForcePathStyle),
-							"--insecure-skip-tls-verify", fmt.Sprintf("%t", snapCfg.Spec.S3.InsecureSkipTLSVerify),
-						},
+						Args:                     args,
 						Env: []corev1.EnvVar{
 							{
 								Name: "S3_ACCESS_KEY_ID",

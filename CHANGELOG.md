@@ -46,6 +46,20 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 
 ### Fixed
 
+- **A `KividbConfig` `dir` under `/data` was missed by backups and
+  restores, and a new cluster with one did not start** (#112). The engine
+  keeps its snapshot and append-only file in `dir`, but a backup packed
+  what was directly in `/data` (an older snapshot, or nothing: "no
+  persistence files found"), and a restore or `bootstrapFromSnapshot`
+  wrote there, where the engine does not look: the cluster started empty.
+  The engine does not create `dir` either: on a new volume it exited at
+  once ("Can't chdir to 'sub'"). A backup now reads the directory the
+  engine reports (`CONFIG GET dir`), a restore extracts into `dir`, and an
+  init container, `data-dir` (the agent image), makes `dir` before the
+  engine starts, with the volume's group and mode; one that is there is
+  left as it is. Only a cluster whose `dir` is a strict subdirectory of
+  `/data` gets the init container: its pods roll once on upgrade, and no
+  other cluster's do.
 - **An `INFO keyspace` reply the agent could not read counted as 0 keys.**
   The agent reported a known count of 0 for any reply it found no database
   line in, the empty reply an engine gives for a section it does not have
@@ -59,11 +73,12 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   append-only file's included, and backups found nothing. A `dir` that
   resolves outside `/data` is now refused (`Ready` False, reason
   `InvalidSpec`, naming the `KividbConfig` and the path), and the
-  cluster's objects are left as they are. A `dir` inside `/data` works as
-  before. A cluster already running with one gets the condition and is
-  not restarted: see TROUBLESHOOTING.md for the way out. A directive name
-  that is not one plain word, or a value with a line break, is refused the
-  same way: the engine would read another directive than the one checked.
+  cluster's objects are left as they are. A `dir` inside `/data` is passed
+  through (see #112 above). A cluster already running with one off it
+  gets the condition and is not restarted: see TROUBLESHOOTING.md for the
+  way out. A directive name that is not one plain word, or a value with a
+  line break, is refused the same way: the engine would read another
+  directive than the one checked.
 - **A missing TLS or S3 credentials Secret, or a key it lacks, left the
   pods stuck instead of holding back** (#106). The pods take these two
   Secrets straight from the API server, and nothing checked them. A pod

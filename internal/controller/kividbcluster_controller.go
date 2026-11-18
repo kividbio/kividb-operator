@@ -223,7 +223,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	steps.run("reconciling config", func() error { return r.reconcileConfig(ctx, &c, kdbConfig, clusterSecrets{}) })
 	steps.run("reconciling services", func() error { return r.reconcileServices(ctx, &c, kdbConfig) })
 
-	blockSTS, bootErr := r.reconcileBootstrap(ctx, &c)
+	blockSTS, bootErr := r.reconcileBootstrap(ctx, &c, kdbConfig)
 	var heldBoot *heldBootstrapError
 	if bootErr != nil && !errors.As(bootErr, &heldBoot) {
 		log.Error(bootErr, "bootstrap reconciliation failed")

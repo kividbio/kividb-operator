@@ -439,6 +439,27 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 	// pod network namespace, so it is equivalent to probing kividb
 	// directly.
 
+	// The engine changes into its `dir` at start and does not create it: on
+	// a new volume a `dir` under it exits at once ("Can't chdir to 'sub'").
+	// An init container from the agent image makes it first, with the
+	// volume's group and mode, and does nothing once it is there (#112).
+	// Only a `dir` that is a strict subdirectory of the volume gets one:
+	// every other pod template is as before, so an operator upgrade
+	// restarts no other cluster.
+	var initContainers []corev1.Container
+	if dir := engineDataDir(kdbConfig); dir != DataDir {
+		initContainers = append(initContainers, corev1.Container{
+			Name:            "data-dir",
+			Image:           agentImage(c),
+			ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
+			Args:            []string{"make-data-dir", "--volume", DataDir, "--data-dir", dir},
+			Resources:       c.Spec.AgentResources,
+			// Why it failed is its termination message, in the pod's status.
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+			VolumeMounts:             []corev1.VolumeMount{{Name: "data", MountPath: DataDir}},
+		})
+	}
+
 	containers := []corev1.Container{kividbContainer, agentContainer}
 	if c.Spec.Monitoring.Enabled {
 		containers = append(containers, corev1.Container{
@@ -464,6 +485,7 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 			Annotations: c.Spec.PodAnnotations,
 		},
 		Spec: corev1.PodSpec{
+			InitContainers:   initContainers,
 			Containers:       containers,
 			Volumes:          volumes,
 			Tolerations:      c.Spec.Tolerations,

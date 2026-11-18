@@ -1086,11 +1086,14 @@ spec:
 
   **`dir`** must stay on the pod's volume, `/data`: the engine keeps its
   snapshot and append-only file in it. A relative `dir`, or an absolute
-  one under `/data`, is passed through, though the backups and restores
-  see only what is directly in `/data` (#112). One that resolves outside
-  it (`/data/../tmp` included, the value read as the engine reads it), or
-  that is not one value, is refused, `Ready` `False` with reason
-  `InvalidSpec`, and the cluster's objects are left as they are (see
+  one under `/data`, is passed through, and backups and restores use it.
+  The engine does not create it, so the pods get an init container,
+  `data-dir`, that makes it before the engine starts, with the volume's
+  group and mode, and leaves one that is there as it is. One that
+  resolves outside `/data` (`/data/../tmp` included, the value read as
+  the engine reads it), or that is not one value, is refused, `Ready`
+  `False` with reason `InvalidSpec`, and the cluster's objects are left
+  as they are (see
   [TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-kividbconfig-dir-off-the-volume-invalidspec)).
 
   **`bind`**: unless you set `bind` or `protected-mode` yourself, the

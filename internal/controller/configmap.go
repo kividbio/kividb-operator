@@ -168,32 +168,69 @@ func directivesError(kdbConfig *kividbv1alpha1.KividbConfig) error {
 // dataDirError says why kdbConfig's `dir` cannot be used, or nil (#109).
 // The engine changes into `dir` at start, from its working directory
 // DataDir, and keeps its snapshot and append-only file there: a `dir` off
-// the volume loses them on every restart. The value is read as the engine
-// reads it (configWords), must be one word, as the engine takes it, and is
-// cleaned, a relative one against DataDir, so /data/../tmp is off it.
+// the volume loses them on every restart. The value is read as dirValue
+// reads it, so /data/../tmp is off it.
 func dataDirError(kdbConfig *kividbv1alpha1.KividbConfig) error {
 	for _, k := range directiveNames(kdbConfig) {
 		if !strings.EqualFold(k, "dir") {
 			continue
 		}
 		v := kdbConfig.Spec.Directives[k]
-		words, err := configWords(v)
+		p, words, err := dirValue(v)
 		if err != nil {
 			return fmt.Errorf("KividbConfig %s sets %s %q, which the engine cannot read: %v", kdbConfig.Name, k, v, err)
 		}
-		if len(words) != 1 {
-			return fmt.Errorf("KividbConfig %s sets %s %q: the engine takes one value there, not %d, and would not start", kdbConfig.Name, k, v, len(words))
+		if words != 1 {
+			return fmt.Errorf("KividbConfig %s sets %s %q: the engine takes one value there, not %d, and would not start", kdbConfig.Name, k, v, words)
 		}
-		p := words[0]
-		if !path.IsAbs(p) {
-			p = path.Join(DataDir, p)
-		}
-		if p = path.Clean(p); p != DataDir && !strings.HasPrefix(p, DataDir+"/") {
+		if !onDataVolume(p) {
 			return fmt.Errorf("KividbConfig %s sets %s %q, which is %s, off the pod's volume at %s: the engine would keep its snapshot and append-only file there and lose them on every restart. Set a dir under %s, or remove it (see TROUBLESHOOTING.md for a cluster already running with it)",
 				kdbConfig.Name, k, v, p, DataDir, DataDir)
 		}
 	}
 	return nil
+}
+
+// dirValue is the directory a `dir` value names, and the number of words
+// the engine reads in it (configWords), of which it takes exactly one: that
+// word, cleaned, and a relative one against DataDir, where the engine
+// starts. err is why the engine cannot read the value.
+func dirValue(v string) (dir string, words int, err error) {
+	w, err := configWords(v)
+	if err != nil || len(w) != 1 {
+		return "", len(w), err
+	}
+	dir = w[0]
+	if !path.IsAbs(dir) {
+		dir = path.Join(DataDir, dir)
+	}
+	return path.Clean(dir), 1, nil
+}
+
+// onDataVolume reports whether dir, cleaned, is DataDir or under it.
+func onDataVolume(dir string) bool {
+	return dir == DataDir || strings.HasPrefix(dir, DataDir+"/")
+}
+
+// engineDataDir is the directory the engine keeps its snapshot and
+// append-only file in (#112): kdbConfig's `dir` as dirValue reads it, or
+// DataDir without one. Of two spellings (dir, DIR) the engine takes the
+// one written last, and the config file is written in sorted order, as
+// directiveNames gives them. A `dir` dataDirError refuses gives DataDir:
+// nothing is applied with it.
+func engineDataDir(kdbConfig *kividbv1alpha1.KividbConfig) string {
+	dir := DataDir
+	for _, k := range directiveNames(kdbConfig) {
+		if !strings.EqualFold(k, "dir") {
+			continue
+		}
+		p, words, err := dirValue(kdbConfig.Spec.Directives[k])
+		if err != nil || words != 1 || !onDataVolume(p) {
+			return DataDir
+		}
+		dir = p
+	}
+	return dir
 }
 
 // directiveNames is kdbConfig's directive names, sorted.
