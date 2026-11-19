@@ -18,11 +18,15 @@ type agentConfig struct {
 	AuthPassword string // KIVIDB_AUTH_PASSWORD
 	AgentPort    int    // AGENT_PORT
 	DataDir      string // DATA_DIR
-	ClusterName  string // CLUSTER_NAME
-	Namespace    string // POD_NAMESPACE
-	PodName      string // POD_NAME
-	PodIP        string // POD_IP
-	AclFile      string // ACL_FILE
+	// EngineDir (ENGINE_DIR) is the engine's --dir, on pod templates whose
+	// KividbConfig `dir` is a directory under DataDir (#112): where a
+	// backup looks when the engine will not say (CONFIG GET dir refused).
+	EngineDir   string
+	ClusterName string // CLUSTER_NAME
+	Namespace   string // POD_NAMESPACE
+	PodName     string // POD_NAME
+	PodIP       string // POD_IP
+	AclFile     string // ACL_FILE
 	// AgentToken (AGENT_TOKEN, from the cluster's auth Secret) is required
 	// as a bearer token on every endpoint but the probes and /metrics.
 	AgentToken string
@@ -49,6 +53,7 @@ func loadConfig() agentConfig {
 		AuthPassword: os.Getenv("KIVIDB_AUTH_PASSWORD"),
 		AgentPort:    getEnvInt("AGENT_PORT", 8081),
 		DataDir:      getEnv("DATA_DIR", "/data"),
+		EngineDir:    os.Getenv("ENGINE_DIR"),
 		ClusterName:  os.Getenv("CLUSTER_NAME"),
 		Namespace:    os.Getenv("POD_NAMESPACE"),
 		PodName:      os.Getenv("POD_NAME"),

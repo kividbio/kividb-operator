@@ -173,7 +173,9 @@ func (s *server) backupPrefix() string {
 // only on the volume, DataDir: an engine whose files are off it (a `dir`
 // the operator now refuses, on a cluster that ran with it before) has
 // nothing on the volume to back up. An engine that answers but will not
-// say (an ACL that denies CONFIG to the default user) is taken to be in
+// say (an ACL that denies CONFIG to the default user) is taken to be where
+// its pod's command line puts it, the --dir the operator also gives the
+// agent (EngineDir) on a pod whose `dir` is under the volume, or else in
 // DataDir, as before #112, and the log says so. One that does not answer
 // at all fails the backup: DataDir may hold an older snapshot.
 func (s *server) backupDir() (string, error) {
@@ -187,10 +189,20 @@ func (s *server) backupDir() (string, error) {
 		return "", fmt.Errorf("CONFIG GET dir: %w", err)
 	}
 	if err != nil || len(v.Array) != 2 || v.Array[1].Str == "" {
-		log.Printf("CONFIG GET dir did not say where the engine keeps its files (%v): backing up %s", err, s.cfg.DataDir)
-		return s.cfg.DataDir, nil
+		dir, from := s.cfg.DataDir, "the volume"
+		if s.cfg.EngineDir != "" {
+			dir, from = s.cfg.EngineDir, "the engine's --dir"
+		}
+		log.Printf("CONFIG GET dir did not say where the engine keeps its files (%v): backing up %s, %s", err, dir, from)
+		return s.onVolume(dir)
 	}
-	dir := filepath.Clean(v.Array[1].Str)
+	return s.onVolume(v.Array[1].Str)
+}
+
+// onVolume is dir, cleaned, if it is on this pod's volume, DataDir, or
+// why there is nothing to back up there.
+func (s *server) onVolume(dir string) (string, error) {
+	dir = filepath.Clean(dir)
 	if rel, err := filepath.Rel(filepath.Clean(s.cfg.DataDir), dir); err != nil || !filepath.IsLocal(rel) {
 		return "", fmt.Errorf("the engine keeps its files in %s, off this pod's volume at %s: there is nothing on the volume to back up (see TROUBLESHOOTING.md, \"A KividbConfig dir off the volume\")", dir, s.cfg.DataDir)
 	}

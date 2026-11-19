@@ -483,3 +483,35 @@ func TestBackupDir_OffTheVolumeOrRefused(t *testing.T) {
 		})
 	}
 }
+
+// When the engine will not say where its files are (CONFIG GET dir refused
+// by an ACL), the backup packs the directory its pod's command line put it
+// in, which the operator also gives the agent (ENGINE_DIR) on a pod whose
+// `dir` is under the volume, not the volume root, which may hold an older
+// snapshot (#112). One off the volume is still refused.
+func TestBackupDir_RefusedFallsBackToTheEnginesDir(t *testing.T) {
+	vol := t.TempDir()
+	sub := filepath.Join(vol, "sub")
+	refused := "-NOPERM User default has no permissions to run the 'config|get' command\r\n"
+	for _, tc := range []struct {
+		name, engineDir, reply, want, err string
+	}{
+		{"refused, with ENGINE_DIR", sub, refused, sub, ""},
+		{"no such parameter, with ENGINE_DIR", sub, "*0\r\n", sub, ""},
+		{"refused, without ENGINE_DIR", "", refused, vol, ""},
+		{"answered: the engine's word wins", sub, "*2\r\n" + bulk("dir") + bulk(vol), vol, ""},
+		{"refused, ENGINE_DIR off the volume", "/elsewhere", refused, "", "keeps its files in /elsewhere"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := newRespRecorder(t, func([]string) string { return tc.reply })
+			s := &server{cfg: agentConfig{KividbAddr: rr.ln.Addr().String(), DataDir: vol, EngineDir: tc.engineDir}}
+			got, err := s.backupDir()
+			switch {
+			case tc.err != "" && (err == nil || !strings.Contains(err.Error(), tc.err)):
+				t.Fatalf("backup dir %q, %v; want an error saying %q", got, err, tc.err)
+			case tc.err == "" && (err != nil || got != tc.want):
+				t.Fatalf("backup dir %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
