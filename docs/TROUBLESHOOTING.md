@@ -339,6 +339,56 @@ restarts nothing for it. To get out:
   The copy is a `dump.kdb`, the file a backup holds: restore it as one
   (see [BACKUP_RESTORE.md](BACKUP_RESTORE.md#restoring-a-backup)).
 
+## A `dir` change is held (`RolloutHeld`, `WouldLoseData`)
+
+A change to a `KividbConfig`'s `dir` moves where the engine looks for its
+snapshot, append-only file and, in a sharded cluster, `nodes.conf`, not
+the files. On a sharded cluster, and on a replicated one with no
+replicas, a change that would move a running pod's files is held:
+`RolloutProgressing` is `False`, reason `WouldLoseData`, with a
+`RolloutHeld` Warning naming each pod and where its files are and would
+go. Until it ends, the StatefulSet keeps its current pod template, so a
+pod recreated meanwhile (a drain, an eviction, `kubectl delete pod`, a
+`KividbDbOps` restart) comes back as it was, and other changes to the pod
+template wait too. To go on:
+
+- Set `dir` back. The hold ends on the next pass, and the changes that
+  waited are applied.
+- On a replicated cluster whose pod is Ready, or add a replica
+  (`spec.replicas: 1`): it syncs from the master, and the rollout then
+  moves the pods one at a time, the replica first.
+- On a sharded cluster, a `dir` change on a running cluster is not
+  supported yet.
+
+Deleting a held pod is no way out: it comes back as it was.
+
+### Where a pod keeps its files
+
+A pod made by operator 0.7.1 or earlier has no `data-dir` init container
+and takes `dir` from its config file, so the operator asks its engine
+(`CONFIG GET dir`, through the agent). When the message says where a
+pod's files are "is not known", the engine could not say: it is not
+running, or an ACL denies `CONFIG` to the default user. Ask it yourself
+as a user allowed `CONFIG`. The engine's image has no shell or
+`redis-cli`, so ask from another pod, adding `--user <user> --pass
+<password>`, and `--tls --cacert <CA file>` with the TLS port if the
+plain port is off:
+
+```bash
+kubectl -n my-namespace run kividb-ask --image=redis:8 --restart=Never -- sleep infinity
+kubectl -n my-namespace exec kividb-ask -- \
+  redis-cli -h my-cluster-0.my-cluster-headless -p 6380 --user admin --pass <password> CONFIG GET dir
+kubectl -n my-namespace delete pod kividb-ask
+```
+
+The answer is the directory the engine changed into at start, its files
+in it. Set the `KividbConfig`'s `dir` to it: once the engine says it is
+where the pod template puts it, the hold ends. Grant the default user
+`CONFIG GET` (`+config|get`) and the operator asks it itself on its next
+pass. An engine that is not running answers nothing: set the
+`KividbConfig` back to what it was when the pod last started, and once the
+engine runs, the operator asks it again.
+
 ## ACL / authentication errors (`NOAUTH`, `WRONGPASS`)
 
 The operator renders the referenced `KividbAclConfig` into the

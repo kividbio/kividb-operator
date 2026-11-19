@@ -61,17 +61,30 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   takes over the config file, so one that restarts in its pod keeps its
   `dir` until the pod is replaced. Only a cluster whose `dir` is a strict subdirectory of
   `/data` gets the init container: its pods roll once on upgrade, and no
-  other cluster's do. A change to `dir` on a cluster with no replicas is
-  held (`RolloutProgressing` False, `WouldLoseData`): its pod would start
-  empty in the new directory, and the scheduled backups would upload that.
-  Add a replica, which resyncs first, or set `dir` back, the only way out
-  while the pod is not Ready. A pod whose `dir` moves is not replaced as
-  a stuck pod either, replicas or not. On a sharded cluster a change to
-  `dir` is held whatever the replicas, as not supported yet: each node
-  keeps its `nodes.conf` there too. The pod spec is what says where the
-  files are, so this holds the upgrade of a sharded cluster, or one with
-  no replicas, that ran with a `dir` made by hand under `/data`: if its
-  files are in `dir` already, delete its pods to let it roll.
+  other cluster's do. A change to `dir` that would move a running pod's
+  files is held where nothing could resync them: on a cluster with no
+  replicas, whose pod would start empty in the new directory and the
+  scheduled backups upload that, and on every sharded cluster, as not
+  supported yet (each node keeps its `nodes.conf` there too). The rollout
+  says so (`RolloutProgressing` False, `WouldLoseData`), and until the
+  hold ends the StatefulSet keeps its current pod template, all of it: a
+  pod recreated meanwhile (a node drain, an eviction, `kubectl delete
+  pod`, a `KividbDbOps` restart) comes back as it was, on its own files,
+  and other changes to the pod template, an image say, wait too. Set
+  `dir` back, or, on a replicated cluster whose pod is Ready, add a
+  replica, which syncs first. A pod whose `dir` moves is not replaced as
+  a stuck pod either, replicas or not. A pod made by an earlier operator
+  takes `dir` from its config file, and may run in one made by hand: its
+  engine is asked where its files are (`CONFIG GET dir`, through the
+  agent), and while it cannot say (not running, or `CONFIG` denied to the
+  default user) such a cluster is held the same way, and the message
+  says so. To see where a pod's files are, ask its engine with
+  `redis-cli ... CONFIG GET dir` from another pod, as a user allowed
+  `CONFIG` (TROUBLESHOOTING.md, "Where a pod keeps its files"). When
+  `CONFIG` is denied, a backup reads the directory the pod's own `--dir`
+  names, not `/data`. A `dir` with `$(` in it is refused (`InvalidSpec`):
+  Kubernetes would expand it on the engine's command line but not where
+  the directory is made.
 - **An `INFO keyspace` reply the agent could not read counted as 0 keys.**
   The agent reported a known count of 0 for any reply it found no database
   line in, the empty reply an engine gives for a section it does not have
