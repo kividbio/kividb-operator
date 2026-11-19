@@ -110,6 +110,10 @@ type fakeAgents struct {
 	// recorded in calls: asking does nothing.
 	dirs          map[string]string
 	configRefused map[string]bool
+	// dirErr: CONFIG GET dir on an address fails in the agent with this
+	// error; dirAsks counts the CONFIG GET dirs asked.
+	dirErr  map[string]string
+	dirAsks int
 }
 
 // waitDone waits, with the lock released, for ctx to end.
@@ -283,6 +287,13 @@ func (f *fakeAgents) RoundTrip(req *http.Request) (*http.Response, error) {
 		var r agentapi.ExecRequest
 		if err := json.NewDecoder(req.Body).Decode(&r); err != nil {
 			return nil, err
+		}
+		if strings.EqualFold(strings.Join(r.Args, " "), "CONFIG GET dir") {
+			f.dirAsks++
+			if e := f.dirErr[ip]; e != "" {
+				b, _ := json.Marshal(agentapi.ErrorResponse{Error: e})
+				return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
+			}
 		}
 		if strings.HasPrefix(strings.ToUpper(strings.Join(r.Args, " ")), "CLIENT PAUSE") {
 			f.pauseTimeoutMs = append(f.pauseTimeoutMs, r.TimeoutMs)

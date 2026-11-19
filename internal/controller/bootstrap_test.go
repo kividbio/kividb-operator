@@ -159,7 +159,7 @@ func TestBootstrapIsSkippedOnARunningCluster(t *testing.T) {
 			t.Fatalf("pass %d: block %v, err %v; want the bootstrap skipped", i, block, err)
 		}
 	}
-	if err := r.reconcileStatefulSet(ctx, c, nil, nil, nil, map[string]string{}); err != nil {
+	if err := r.reconcileStatefulSet(ctx, c, nil, nil, nil, map[string]string{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	var got appsv1.StatefulSet
@@ -497,7 +497,7 @@ func TestStatefulSetStepLeavesAnEarlierClustersStatefulSetWhileBootstrapping(t *
 					t.Fatal(err)
 				}
 				rv := old.ResourceVersion
-				err := r.reconcileStatefulSet(ctx, c, nil, nil, nil, map[string]string{})
+				err := r.reconcileStatefulSet(ctx, c, nil, nil, nil, map[string]string{}, nil)
 				var got appsv1.StatefulSet
 				if gerr := r.Get(ctx, client.ObjectKeyFromObject(old), &got); gerr != nil {
 					t.Fatal(gerr)
@@ -523,7 +523,7 @@ func TestStatefulSetStepLeavesAnEarlierClustersStatefulSetWhileBootstrapping(t *
 		old := earlierStatefulSet(c)
 		old.OwnerReferences = nil
 		r := shardedReconciler(t, c, old)
-		if err := r.reconcileStatefulSet(ctx, c, nil, nil, nil, map[string]string{}); err != nil {
+		if err := r.reconcileStatefulSet(ctx, c, nil, nil, nil, map[string]string{}, nil); err != nil {
 			t.Fatal(err)
 		}
 		var got appsv1.StatefulSet

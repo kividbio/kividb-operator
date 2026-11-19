@@ -229,7 +229,7 @@ func TestDataDirHoldMessage(t *testing.T) {
 	if !strings.Contains(ready, "Add a replica") || strings.Contains(ready, "delete") {
 		t.Errorf("ready: %q, want it to offer a replica, and not deleting the pod", ready)
 	}
-	if !strings.Contains(ready, "the StatefulSet keeps its current pod template, so other changes to it wait too") || !strings.Contains(ready, "comes back as it was") {
+	if !strings.Contains(ready, "the StatefulSet keeps its current pod template and the config file its dir, so other changes to the pod template wait too") || !strings.Contains(ready, "starts in the directory its files are in") {
 		t.Errorf("kept: %q, want it to say the template is kept, and what that means", ready)
 	}
 	stuck := dataDirHoldMessage(c, []dataDirMove{{Pod: "c1-0", From: "/data", To: "/data/sub"}}, false)
@@ -243,8 +243,8 @@ func TestDataDirHoldMessage(t *testing.T) {
 	// A pod made before the init container, whose engine could not be
 	// asked: where its files are is not known, and the message says how to
 	// see where (#112).
-	unknown := dataDirHoldMessage(c, []dataDirMove{{Pod: "c1-0", To: "/data", Why: "CONFIG GET dir: NOPERM", Ready: true}}, true)
-	for _, want := range []string{"c1-0 to /data, from where is not known (CONFIG GET dir: NOPERM)", "Where the files of c1-0 are is not known", "CONFIG GET dir as a user allowed CONFIG", "Where a pod keeps its files", "set dir to that"} {
+	unknown := dataDirHoldMessage(c, []dataDirMove{{Pod: "c1-0", To: "/data", Why: whyDenied, Ready: true}}, true)
+	for _, want := range []string{"c1-0 to /data, from where is not known (" + whyDenied + ")", "The operator could not ask where the files of c1-0 are", "CONFIG GET dir as a user allowed CONFIG", "Where a pod keeps its files", "set dir to that"} {
 		if !strings.Contains(unknown, want) {
 			t.Errorf("unknown: %q, want %q in it", unknown, want)
 		}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
 	"github.com/kividbio/kividb-operator/internal/agentapi"
@@ -31,12 +32,14 @@ func dirConfig(dir string) *kividbv1alpha1.KividbConfig {
 
 // holdHarness is a reconciler over a fake client, whose agents answer
 // CONFIG GET dir as agents says, for the tests of a held `dir` change
-// (#112).
+// (#112). Its passes run what a reconcile pass runs for it, in its order:
+// planDataDir, the config file, the StatefulSets.
 type holdHarness struct {
 	t      *testing.T
 	c      *kividbv1alpha1.KividbCluster
 	r      *KividbClusterReconciler
 	agents *fakeAgents
+	ips    int
 }
 
 func newHoldHarness(t *testing.T, c *kividbv1alpha1.KividbCluster) *holdHarness {
@@ -49,7 +52,8 @@ func newHoldHarness(t *testing.T, c *kividbv1alpha1.KividbCluster) *holdHarness 
 	if err := kividbv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	agents := &fakeAgents{status: map[string]*agentapi.StatusResponse{}, dirs: map[string]string{}, configRefused: map[string]bool{}}
+	agents := &fakeAgents{status: map[string]*agentapi.StatusResponse{}, dirs: map[string]string{}, configRefused: map[string]bool{},
+		dirErr: map[string]string{}, hang: map[string]bool{}}
 	r := &KividbClusterReconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(c).
 			WithStatusSubresource(&kividbv1alpha1.KividbCluster{}, &kividbv1alpha1.KividbDbOps{}).Build(),
@@ -57,33 +61,57 @@ func newHoldHarness(t *testing.T, c *kividbv1alpha1.KividbCluster) *holdHarness 
 		Agent:    &AgentClient{http: &http.Client{Transport: agents}},
 		Recorder: record.NewFakeRecorder(100),
 	}
+	t.Cleanup(r.engineDirs.wait)
 	return &holdHarness{t: t, c: c, r: r, agents: agents}
 }
 
-// rollout is the rollout annotations of the pod template for cfg; hash,
-// if set, is its config hash instead (as an older operator rendered it).
-func (h *holdHarness) rollout(cfg *kividbv1alpha1.KividbConfig, hash string) map[string]string {
-	if hash == "" {
-		hash = configHash(renderKividbConf(h.c, cfg))[:16]
+func (h *holdHarness) desired(cfg *kividbv1alpha1.KividbConfig) []*appsv1.StatefulSet {
+	if !isSharded(h.c) {
+		return []*appsv1.StatefulSet{desiredStatefulSet(h.c, cfg, nil, nil)}
 	}
-	return map[string]string{ConfigHashAnnotation: hash, AuthGenerationAnnotation: "1"}
+	var out []*appsv1.StatefulSet
+	for s := int32(0); s < shardCount(h.c); s++ {
+		out = append(out, desiredShardStatefulSet(h.c, s, cfg, nil, nil))
+	}
+	return out
 }
 
-// apply applies the StatefulSets of cfg, as a reconcile pass does.
-func (h *holdHarness) apply(cfg *kividbv1alpha1.KividbConfig, hash string) {
+// passOnce is one pass for the KividbConfig cfg: what to hold, the config
+// file, the StatefulSets, and the hold reported. It does not wait for the
+// engines it asks.
+func (h *holdHarness) passOnce(cfg *kividbv1alpha1.KividbConfig) *dataDirPlan {
 	h.t.Helper()
 	ctx := context.Background()
-	if !isSharded(h.c) {
-		if err := h.r.applyStatefulSet(ctx, h.c, desiredStatefulSet(h.c, cfg, nil, nil), h.rollout(cfg, hash)); err != nil {
+	var targets []stsTarget
+	for _, sts := range h.desired(cfg) {
+		targets = append(targets, targetOf(sts))
+	}
+	plan, err := h.r.planDataDir(ctx, h.c, cfg, targets)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if err := h.r.reconcileConfig(ctx, h.c, plan.config, clusterSecrets{}); err != nil {
+		h.t.Fatal(err)
+	}
+	rollout := map[string]string{ConfigHashAnnotation: configHash(renderKividbConf(h.c, plan.config))[:16], AuthGenerationAnnotation: "1"}
+	for _, sts := range h.desired(plan.config) {
+		if err := h.r.applyStatefulSet(ctx, h.c, sts, rollout, plan); err != nil {
 			h.t.Fatal(err)
 		}
-		return
 	}
-	for s := int32(0); s < shardCount(h.c); s++ {
-		if err := h.r.applyStatefulSet(ctx, h.c, desiredShardStatefulSet(h.c, s, cfg, nil, nil), h.rollout(cfg, hash)); err != nil {
-			h.t.Fatal(err)
-		}
+	if plan.held() {
+		h.r.rolloutHeld(h.c, dataDirHoldMessage(h.c, plan.moves, true))
 	}
+	return plan
+}
+
+// pass is two passes, the second once the engines the first asked have
+// answered.
+func (h *holdHarness) pass(cfg *kividbv1alpha1.KividbConfig) *dataDirPlan {
+	h.t.Helper()
+	h.passOnce(cfg)
+	h.r.engineDirs.wait()
+	return h.passOnce(cfg)
 }
 
 func (h *holdHarness) sts(name string) *appsv1.StatefulSet {
@@ -97,27 +125,24 @@ func (h *holdHarness) sts(name string) *appsv1.StatefulSet {
 
 // stsNames is the names of the cluster's StatefulSets.
 func (h *holdHarness) stsNames() []string {
-	if !isSharded(h.c) {
-		return []string{statefulSetName(h.c)}
-	}
 	var names []string
-	for s := int32(0); s < shardCount(h.c); s++ {
-		names = append(names, shardStatefulSetName(h.c, s))
+	for _, sts := range h.desired(nil) {
+		names = append(names, sts.Name)
 	}
 	return names
 }
 
 // makePods makes every pod of every StatefulSet from its template, as the
-// StatefulSet controller does, Ready, at an address whose agent answers.
+// StatefulSet controller does, Ready, at an address whose agent answers,
+// with its volume.
 func (h *holdHarness) makePods() []corev1.Pod {
 	h.t.Helper()
 	var pods []corev1.Pod
-	n := 0
 	for _, name := range h.stsNames() {
 		sts := h.sts(name)
 		for i := int32(0); i < *sts.Spec.Replicas; i++ {
-			n++
-			ip := fmt.Sprintf("10.0.0.%d", n)
+			h.ips++
+			ip := fmt.Sprintf("10.0.0.%d", h.ips)
 			h.agents.status[ip] = &agentapi.StatusResponse{Role: agentapi.RoleMaster}
 			pods = append(pods, *h.recreate(sts, fmt.Sprintf("%s-%d", name, i), ip))
 		}
@@ -127,12 +152,12 @@ func (h *holdHarness) makePods() []corev1.Pod {
 
 // recreate makes pod name from sts's template, as the StatefulSet
 // controller does when a pod is gone: a drain, an eviction, `kubectl
-// delete pod` or a KividbDbOps restart.
+// delete pod` or a KividbDbOps restart. Its volume is made if it is not
+// there.
 func (h *holdHarness) recreate(sts *appsv1.StatefulSet, name, ip string) *corev1.Pod {
 	h.t.Helper()
 	ctx := context.Background()
-	old := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: h.c.Namespace}}
-	_ = h.r.Delete(ctx, old)
+	_ = h.r.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: h.c.Namespace}})
 	t := sts.Spec.Template.DeepCopy()
 	labels := map[string]string{appsv1.StatefulSetRevisionLabel: "rev"}
 	for k, v := range t.Labels {
@@ -146,6 +171,8 @@ func (h *holdHarness) recreate(sts *appsv1.StatefulSet, name, ip string) *corev1
 	if err := h.r.Create(ctx, p); err != nil {
 		h.t.Fatal(err)
 	}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-" + name, Namespace: h.c.Namespace}}
+	_ = h.r.Create(ctx, pvc)
 	return p
 }
 
@@ -159,20 +186,62 @@ func (h *holdHarness) writePodStatus(pod *corev1.Pod) {
 			h.t.Fatal(err)
 		}
 	}
-	var got corev1.Pod
-	if err := h.r.Get(ctx, client.ObjectKeyFromObject(pod), &got); err != nil {
+}
+
+// startDir is the directory pod's engine changes into when it starts (in
+// a new pod or restarting in its pod): its --dir, or else the `dir` of the
+// config file it reads, as that file is stored now.
+func (h *holdHarness) startDir(pod *corev1.Pod) string {
+	h.t.Helper()
+	for _, ct := range pod.Spec.Containers {
+		if ct.Name == kividbContainerName {
+			if v, ok := argValue(ct.Args, "--dir"); ok {
+				return v
+			}
+		}
+	}
+	lines, ok, err := h.r.storedDirLines(context.Background(), h.c)
+	if err != nil || !ok {
+		h.t.Fatalf("config file: %v, there: %v", err, ok)
+	}
+	return engineDataDir(dirLinesConfig(lines))
+}
+
+// legacy makes the cluster as operator 0.7.1 left it, with the KividbConfig
+// dir: the pod template has no init container and no --dir, the config
+// file has `dir dir`, made by hand, and the StatefulSet no record of its
+// dir. Its pods' engines say they are in it.
+func (h *holdHarness) legacy(dir string) []corev1.Pod {
+	h.t.Helper()
+	ctx := context.Background()
+	h.pass(nil)
+	for _, name := range h.stsNames() {
+		sts := h.sts(name)
+		delete(sts.Annotations, DataDirAnnotation)
+		if err := h.r.Update(ctx, sts); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	if err := h.r.reconcileConfig(ctx, h.c, dirConfig(dir), clusterSecrets{}); err != nil {
 		h.t.Fatal(err)
 	}
-	if !apiequality.Semantic.DeepEqual(got.Status, pod.Status) {
-		h.t.Fatalf("pod status not written: %+v", got.Status)
+	pods := h.makePods()
+	for _, p := range pods {
+		h.agents.dirs[p.Status.PodIP] = engineDataDir(dirConfig(dir))
 	}
+	return pods
+}
+
+func (h *holdHarness) rolloutCondition() *metav1.Condition {
+	return findCondition(h.c.Status.Conditions, RolloutProgressingCondition)
 }
 
 // A `dir` change held on a cluster with no replica keeps the StatefulSet's
-// pod template as it is (#112): a pod recreated while it is held (a drain,
-// an eviction, `kubectl delete pod`) comes back on its own `dir`, not on
-// an empty new one, and the rollout says why it holds. Set back, the
-// template is applied again and the hold is gone.
+// pod template and the config file's `dir` as they are (#112): a pod
+// recreated while it is held (a drain, an eviction, `kubectl delete pod`),
+// or one whose engine restarts in its pod, starts in the directory its
+// files are in, not an empty new one, and the rollout says why it holds.
+// Set back, the template is applied again and the hold is gone.
 func TestHeldDirChangeKeepsThePodTemplate(t *testing.T) {
 	for _, tc := range []struct{ name, from, to string }{
 		{"dir changed", "sub", "other"},
@@ -183,11 +252,15 @@ func TestHeldDirChangeKeepsThePodTemplate(t *testing.T) {
 			ctx := context.Background()
 			c := testCluster("c1")
 			h := newHoldHarness(t, c)
-			h.apply(dirConfig(tc.from), "")
+			h.pass(dirConfig(tc.from))
 			before := h.sts("c1").Spec.Template.DeepCopy()
 			pods := h.makePods()
+			from := engineDataDir(dirConfig(tc.from))
+			if got := h.startDir(&pods[0]); got != from {
+				t.Fatalf("pod starts in %s, want %s", got, from)
+			}
 
-			h.apply(dirConfig(tc.to), "")
+			h.pass(dirConfig(tc.to))
 			sts := h.sts("c1")
 			if !apiequality.Semantic.DeepEqual(sts.Spec.Template, *before) {
 				t.Fatalf("template changed while held:\n%+v\nwant\n%+v", sts.Spec.Template, *before)
@@ -195,64 +268,314 @@ func TestHeldDirChangeKeepsThePodTemplate(t *testing.T) {
 			if hold := sts.Annotations[DataDirHoldAnnotation]; !strings.Contains(hold, `"c1-0"`) {
 				t.Fatalf("hold annotation %q, want c1-0 in it", hold)
 			}
-
-			// Recreated meanwhile, it is as it was: its engine takes the dir
-			// it had, as one restarting in place does.
-			recreated := h.recreate(sts, "c1-0", "10.0.0.1")
-			if got, want := podDataDir(&recreated.Spec), engineDataDir(dirConfig(tc.from)); got != want {
-				t.Fatalf("recreated pod's dir %s, want %s, the one it had", got, want)
+			if rec := sts.Annotations[DataDirAnnotation]; rec != from {
+				t.Fatalf("record %q, want %q, the dir still applied", rec, from)
+			}
+			// The engine restarting in its pod reads the config file: its dir
+			// is kept too.
+			if got := h.startDir(&pods[0]); got != from {
+				t.Fatalf("held: the pod's engine would start in %s, want %s, where its files are", got, from)
+			}
+			// Recreated meanwhile, it starts where its files are.
+			recreated := h.recreate(sts, "c1-0", pods[0].Status.PodIP)
+			if got := h.startDir(recreated); got != from {
+				t.Fatalf("recreated pod starts in %s, want %s, where its files are", got, from)
 			}
 
 			h.r.reconcileRollout(ctx, c, []corev1.Pod{*recreated}, []kividbv1alpha1.KividbPodStatus{{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true}}, "c1-0")
-			cond := findCondition(c.Status.Conditions, RolloutProgressingCondition)
+			cond := h.rolloutCondition()
 			if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "WouldLoseData" ||
-				!strings.Contains(cond.Message, "c1-0") || !strings.Contains(cond.Message, "keeps its current pod template") || strings.Contains(cond.Message, "delete") {
-				t.Fatalf("RolloutProgressing %+v, want WouldLoseData, naming c1-0, saying the template is kept, and not offering to delete the pod", cond)
-			}
-			if _, ok := pods[0].Annotations[ConfigHashAnnotation]; !ok {
-				t.Fatal("pod without a config hash")
+				!strings.Contains(cond.Message, "c1-0 from "+from) || !strings.Contains(cond.Message, "keeps its current pod template and the config file its dir") || strings.Contains(cond.Message, "delete") {
+				t.Fatalf("RolloutProgressing %+v, want WouldLoseData, naming c1-0 and %s, saying what is kept, and not offering to delete the pod", cond, from)
 			}
 
-			h.apply(dirConfig(tc.from), "")
+			h.pass(dirConfig(tc.from))
 			sts = h.sts("c1")
 			if _, held := sts.Annotations[DataDirHoldAnnotation]; held {
 				t.Fatalf("dir set back: still held: %q", sts.Annotations[DataDirHoldAnnotation])
 			}
-			if got, want := podDataDir(&sts.Spec.Template.Spec), engineDataDir(dirConfig(tc.from)); got != want {
-				t.Fatalf("dir set back: template dir %s, want %s", got, want)
+			if got := podDataDir(&sts.Spec.Template.Spec); got != from {
+				t.Fatalf("dir set back: template dir %s, want %s", got, from)
 			}
 		})
 	}
 }
 
-// With a replica, a `dir` change is not held: the replica is replaced
-// first and resyncs, and the master hands over before its own turn.
-func TestDirChangeWithAReplicaIsApplied(t *testing.T) {
-	c := testCluster("c1")
-	c.Spec.Replicas = 1
-	h := newHoldHarness(t, c)
-	h.apply(nil, "")
-	h.makePods()
-	h.apply(dirConfig("sub"), "")
+// Sequence A: a cluster from operator 0.7.1 with no replica whose engine
+// runs in a `dir` made by hand. With `dir` removed, the move is held, and
+// the config file keeps `dir sub`: an engine that starts again, in a new
+// pod or in its own, starts in /data/sub, its files there, not in an
+// empty /data that the hold would then take for where they are.
+func TestHeldDirRemovedFromAHandMadeDir(t *testing.T) {
+	h := newHoldHarness(t, testCluster("c1"))
+	pods := h.legacy("sub")
+	before := h.sts("c1").Spec.Template.DeepCopy()
+	for i := 0; i < 3; i++ {
+		plan := h.pass(nil)
+		if !plan.held() {
+			t.Fatalf("pass %d: dir removed from a pod in /data/sub: not held", i)
+		}
+	}
 	sts := h.sts("c1")
-	if _, held := sts.Annotations[DataDirHoldAnnotation]; held || podDataDir(&sts.Spec.Template.Spec) != "/data/sub" {
-		t.Fatalf("template dir %s, hold %q; want /data/sub applied, no hold", podDataDir(&sts.Spec.Template.Spec), sts.Annotations[DataDirHoldAnnotation])
+	if !apiequality.Semantic.DeepEqual(sts.Spec.Template, *before) {
+		t.Fatal("template applied: the pod would be rolled into /data, where its files are not")
+	}
+	if got := h.startDir(&pods[0]); got != "/data/sub" {
+		t.Fatalf("held: an engine restarting in its pod starts in %s, want /data/sub", got)
+	}
+	recreated := h.recreate(sts, "c1-0", pods[0].Status.PodIP)
+	if got := h.startDir(recreated); got != "/data/sub" {
+		t.Fatalf("held: a recreated pod starts in %s, want /data/sub", got)
+	}
+	if cond := h.rolloutCondition(); cond == nil || !strings.Contains(cond.Message, "c1-0 from /data/sub to /data") {
+		t.Fatalf("condition %+v, want it to say c1-0's files are in /data/sub", cond)
+	}
+	// The other directives still go into the config file.
+	h.pass(directivesConfig(map[string]string{"maxmemory": "1gb"}))
+	var s corev1.Secret
+	if err := h.r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: configSecretName(h.c)}, &s); err != nil {
+		t.Fatal(err)
+	}
+	conf := string(s.Data[ConfigFileName]) + s.StringData[ConfigFileName]
+	if !strings.Contains(conf, "maxmemory 1gb\n") || !strings.Contains(conf, "dir sub\n") {
+		t.Fatalf("config file:\n%s\nwant maxmemory 1gb, and dir sub kept", conf)
 	}
 }
 
+// Sequence B: a cluster with no `dir` and no replica; `dir: sub` added and
+// held. The config file keeps no `dir`, so an engine that starts again
+// starts in /data, where its files are: it neither fails on a /data/sub
+// that is not there, nor, where /data/sub is left over from an earlier
+// use, starts Ready on the files left there (after which the hold would
+// take it for moved).
+func TestHeldDirAddedKeepsTheConfigWithoutIt(t *testing.T) {
+	for _, leftover := range []bool{false, true} {
+		t.Run(fmt.Sprintf("leftover %v", leftover), func(t *testing.T) {
+			h := newHoldHarness(t, testCluster("c1"))
+			h.pass(nil)
+			pods := h.makePods()
+			if leftover {
+				// Whatever /data/sub holds, an engine that starts there says so.
+				h.agents.dirs[pods[0].Status.PodIP] = "/data/sub"
+			}
+			if plan := h.pass(dirConfig("sub")); !plan.held() {
+				t.Fatal("dir added: not held")
+			}
+			sts := h.sts("c1")
+			for _, p := range []*corev1.Pod{&pods[0], h.recreate(sts, "c1-0", pods[0].Status.PodIP)} {
+				if got := h.startDir(p); got != "/data" {
+					t.Fatalf("held: the engine starts in %s, want /data, where its files are", got)
+				}
+			}
+			if plan := h.pass(dirConfig("sub")); !plan.held() {
+				t.Fatal("held once, then released")
+			}
+		})
+	}
+}
+
+// A cluster with no `dir` is never held for a change to another directive
+// (#112): its pods are in /data by the StatefulSet's record, and no engine
+// is asked, even one that refuses CONFIG or a pod that has no IP yet. A
+// cluster an earlier operator made is the same: its config file has no
+// `dir` either.
+func TestNoDirClusterIsNotHeldForAChangeElsewhere(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		for _, sharded := range []bool{false, true} {
+			t.Run(fmt.Sprintf("legacy %v sharded %v", legacy, sharded), func(t *testing.T) {
+				c := testCluster("c1")
+				if sharded {
+					c = shardedCluster("s", 2, 1)
+				}
+				h := newHoldHarness(t, c)
+				var pods []corev1.Pod
+				if legacy {
+					pods = h.legacy("")
+				} else {
+					h.pass(nil)
+					pods = h.makePods()
+				}
+				h.agents.configRefused[pods[0].Status.PodIP] = true
+				pods[1%len(pods)].Status.PodIP = ""
+				h.writePodStatus(&pods[1%len(pods)])
+
+				cfg := directivesConfig(map[string]string{"maxmemory": "1gb"})
+				h.c.Spec.Image = "kividb:new"
+				if plan := h.pass(cfg); plan.held() {
+					t.Fatalf("held: %+v", plan.moves)
+				}
+				sts := h.sts(h.stsNames()[0])
+				if _, held := sts.Annotations[DataDirHoldAnnotation]; held {
+					t.Fatalf("held: %q", sts.Annotations[DataDirHoldAnnotation])
+				}
+				if sts.Spec.Template.Spec.Containers[0].Image != "kividb:new" || sts.Spec.Template.Annotations[ConfigHashAnnotation] != configHash(renderKividbConf(h.c, cfg))[:16] {
+					t.Fatal("template not applied")
+				}
+				if h.agents.dirAsks != 0 {
+					t.Fatalf("%d engines asked, want none", h.agents.dirAsks)
+				}
+			})
+		}
+	}
+}
+
+// A replica added to go on is made from the template kept, in the
+// master's directory, and the hold ends only once it is Ready and in sync:
+// until then the master's pod could be recreated from the new template
+// (#112).
+func TestHeldDirChangeWaitsForAReplicaInSync(t *testing.T) {
+	c := testCluster("c1")
+	h := newHoldHarness(t, c)
+	h.pass(dirConfig("sub"))
+	h.makePods()
+	before := h.sts("c1").Spec.Template.DeepCopy()
+	if plan := h.pass(nil); !plan.held() {
+		t.Fatal("not held")
+	}
+
+	c.Spec.Replicas = 1
+	if plan := h.pass(nil); !plan.held() {
+		t.Fatal("replica asked for, none in sync yet: not held")
+	}
+	sts := h.sts("c1")
+	if *sts.Spec.Replicas != 2 || !apiequality.Semantic.DeepEqual(sts.Spec.Template, *before) {
+		t.Fatalf("replicas %d, template kept %v; want 2 and kept", *sts.Spec.Replicas, apiequality.Semantic.DeepEqual(sts.Spec.Template, *before))
+	}
+	replica := h.recreate(sts, "c1-1", "10.0.0.9")
+	h.agents.status["10.0.0.9"] = &agentapi.StatusResponse{Role: agentapi.RoleReplica}
+	if got := h.startDir(replica); got != "/data/sub" {
+		t.Fatalf("replica starts in %s, want /data/sub, the master's", got)
+	}
+	cond := h.rolloutCondition()
+	if cond == nil || !strings.Contains(cond.Message, "once a replica is Ready and in sync") {
+		t.Fatalf("condition %+v", cond)
+	}
+
+	c.Status.Pods = []kividbv1alpha1.KividbPodStatus{
+		{Name: "c1-0", Role: kividbv1alpha1.RoleMaster, Ready: true, Synced: true},
+		{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: false},
+	}
+	if plan := h.pass(nil); !plan.held() {
+		t.Fatal("replica not in sync: not held")
+	}
+	c.Status.Pods[1].Synced = true
+	if plan := h.pass(nil); plan.held() {
+		t.Fatalf("replica in sync: still held: %+v", plan.moves)
+	}
+	if got := podDataDir(&h.sts("c1").Spec.Template.Spec); got != "/data" {
+		t.Fatalf("template dir %s, want /data applied", got)
+	}
+}
+
+// A StatefulSet that is not there, its pods orphaned (`kubectl delete sts
+// --cascade=orphan`) or only its volumes left, is not made while a move is
+// held: made then, it would be made from the new template. One scaled to 0
+// is held for the pods it would make again (#112).
+func TestHeldDirChangeWithTheStatefulSetGoneOrScaledDown(t *testing.T) {
+	setup := func(t *testing.T) *holdHarness {
+		h := newHoldHarness(t, testCluster("c1"))
+		h.pass(dirConfig("sub"))
+		h.makePods()
+		return h
+	}
+	ctx := context.Background()
+	t.Run("orphaned pods", func(t *testing.T) {
+		h := setup(t)
+		if err := h.r.Delete(ctx, h.sts("c1")); err != nil {
+			t.Fatal(err)
+		}
+		if plan := h.pass(nil); !plan.held() {
+			t.Fatal("not held")
+		}
+		var sts appsv1.StatefulSet
+		if err := h.r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "c1"}, &sts); err == nil {
+			t.Fatalf("StatefulSet made while held, template dir %s", podDataDir(&sts.Spec.Template.Spec))
+		}
+		if cond := h.rolloutCondition(); cond == nil || cond.Reason != "WouldLoseData" {
+			t.Fatalf("condition %+v", cond)
+		}
+		h.pass(dirConfig("sub"))
+		if got := podDataDir(&h.sts("c1").Spec.Template.Spec); got != "/data/sub" {
+			t.Fatalf("dir set back: made with %s", got)
+		}
+	})
+	t.Run("only the volume left", func(t *testing.T) {
+		h := setup(t)
+		if err := h.r.Delete(ctx, h.sts("c1")); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.r.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "c1-0", Namespace: "default"}}); err != nil {
+			t.Fatal(err)
+		}
+		plan := h.pass(nil)
+		if !plan.held() || plan.moves[0].Why != whyNoPod {
+			t.Fatalf("plan %+v, want c1-0 held for its volume", plan.moves)
+		}
+	})
+	t.Run("scaled to 0", func(t *testing.T) {
+		h := setup(t)
+		sts := h.sts("c1")
+		zero := int32(0)
+		sts.Spec.Replicas = &zero
+		if err := h.r.Update(ctx, sts); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.r.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "c1-0", Namespace: "default"}}); err != nil {
+			t.Fatal(err)
+		}
+		before := sts.Spec.Template.DeepCopy()
+		if plan := h.pass(nil); !plan.held() {
+			t.Fatal("scaled to 0, its volume there: not held")
+		}
+		if !apiequality.Semantic.DeepEqual(h.sts("c1").Spec.Template, *before) {
+			t.Fatal("template applied")
+		}
+	})
+	t.Run("more pods there than asked for", func(t *testing.T) {
+		// The StatefulSet has 2 pods, c1-1 gone with its volume left, and
+		// the spec asks for fewer: c1-1 counts until the StatefulSet has
+		// fewer too.
+		h := newHoldHarness(t, testCluster("c1"))
+		h.c.Spec.Replicas = 1
+		h.c.Status.Pods = []kividbv1alpha1.KividbPodStatus{{Name: "c1-1", Role: kividbv1alpha1.RoleReplica, Ready: true, Synced: true}}
+		h.pass(dirConfig("sub"))
+		h.makePods()
+		if err := h.r.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "c1-1", Namespace: "default"}}); err != nil {
+			t.Fatal(err)
+		}
+		h.c.Spec.Replicas = 0
+		h.c.Status.Pods = nil
+		plan := h.passOnce(nil) // the StatefulSet still has 2
+		var gone bool
+		for _, m := range plan.moves {
+			gone = gone || (m.Pod == "c1-1" && m.Why == whyNoPod)
+		}
+		if !gone {
+			t.Fatalf("plan %+v, want c1-1 held for its volume", plan.moves)
+		}
+	})
+	t.Run("a new cluster is made", func(t *testing.T) {
+		h := newHoldHarness(t, testCluster("c1"))
+		if plan := h.pass(dirConfig("sub")); plan.held() {
+			t.Fatalf("held: %+v", plan.moves)
+		}
+		h.sts("c1")
+	})
+}
+
 // A sharded cluster holds a `dir` change with replicas or not: every
-// shard's StatefulSet keeps its template, and a pod recreated meanwhile is
-// on its own dir, its nodes.conf with it (#112).
+// shard's StatefulSet keeps its template, and a pod recreated meanwhile
+// starts on its own dir, its nodes.conf with it (#112).
 func TestHeldDirChangeKeepsTheShardTemplates(t *testing.T) {
 	c := shardedCluster("s", 2, 1)
 	h := newHoldHarness(t, c)
-	h.apply(dirConfig("sub"), "")
+	h.pass(dirConfig("sub"))
 	before := map[string]*corev1.PodTemplateSpec{}
 	for _, name := range h.stsNames() {
 		before[name] = h.sts(name).Spec.Template.DeepCopy()
 	}
 	h.makePods()
-	h.apply(nil, "")
+	h.pass(nil)
 	for _, name := range h.stsNames() {
 		sts := h.sts(name)
 		if !apiequality.Semantic.DeepEqual(sts.Spec.Template, *before[name]) {
@@ -261,11 +584,11 @@ func TestHeldDirChangeKeepsTheShardTemplates(t *testing.T) {
 		if hold := sts.Annotations[DataDirHoldAnnotation]; !strings.Contains(hold, `"`+name+`-0"`) || !strings.Contains(hold, `"`+name+`-1"`) {
 			t.Fatalf("%s: hold annotation %q, want both its pods", name, hold)
 		}
-		if p := h.recreate(sts, name+"-0", "10.0.9.1"); podDataDir(&p.Spec) != "/data/sub" {
-			t.Fatalf("%s-0 recreated on %s, want /data/sub", name, podDataDir(&p.Spec))
+		if p := h.recreate(sts, name+"-0", "10.0.9.1"); h.startDir(p) != "/data/sub" {
+			t.Fatalf("%s-0 recreated on %s, want /data/sub", name, h.startDir(p))
 		}
 	}
-	h.apply(dirConfig("sub"), "")
+	h.pass(dirConfig("sub"))
 	for _, name := range h.stsNames() {
 		if hold, held := h.sts(name).Annotations[DataDirHoldAnnotation]; held {
 			t.Fatalf("%s: dir set back, still held: %q", name, hold)
@@ -301,131 +624,131 @@ func TestShardedRolloutReportsAHeldDirChange(t *testing.T) {
 	}
 }
 
-// A pod made by operator 0.7.1, whose engine runs in a `dir` made by hand
-// (set through the KividbConfig, the directory created manually), has no
-// data-dir init container: its spec does not say where its files are
-// (#112). The engine does, and is asked.
-func TestAPodWithoutTheInitContainerIsAskedWhereItsFilesAre(t *testing.T) {
-	// The 0.7.1 template: no init container, no --dir, the engine takes
-	// `dir sub` from its config file. Its config hash is 0.7.1's.
-	setup := func(t *testing.T) (*holdHarness, *corev1.Pod) {
-		h := newHoldHarness(t, testCluster("c1"))
-		h.apply(nil, "0-7-1-hash")
-		pods := h.makePods()
-		if _, ok := specDataDir(&pods[0].Spec); ok {
-			t.Fatal("want a pod whose spec does not say")
-		}
-		h.agents.dirs[pods[0].Status.PodIP] = "/data/sub"
-		return h, &pods[0]
-	}
-
-	t.Run("dir set back: not rolled into an empty /data", func(t *testing.T) {
-		h, pod := setup(t)
-		before := h.sts("c1").Spec.Template.DeepCopy()
-		h.apply(nil, "")
-		sts := h.sts("c1")
-		if !apiequality.Semantic.DeepEqual(sts.Spec.Template, *before) {
-			t.Fatal("template applied: the pod would be rolled into /data, where its files are not")
-		}
-		moves, _ := heldDataDirMoves(sts)
-		if len(moves) != 1 || moves[0].From != "/data/sub" || moves[0].To != "/data" {
-			t.Fatalf("held %+v, want c1-0 from /data/sub to /data", moves)
-		}
-		h.r.reconcileRollout(context.Background(), h.c, []corev1.Pod{*pod}, nil, "c1-0")
-		if cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition); cond == nil || !strings.Contains(cond.Message, "c1-0 from /data/sub to /data") {
-			t.Fatalf("condition %+v, want it to say c1-0's files are in /data/sub", cond)
-		}
-	})
-
+// A pod made by operator 0.7.1 has no data-dir init container: where its
+// files are is asked of its engine (#112). One whose engine says it is
+// where the KividbConfig puts it is rolled onto the template that says so;
+// one whose engine cannot be asked is held, and the message says the
+// operator could not ask, and what to do.
+func TestALegacyPodIsAskedWhereItsFilesAre(t *testing.T) {
 	t.Run("dir kept: the template takes it over", func(t *testing.T) {
-		h, pod := setup(t)
-		h.apply(dirConfig("sub"), "")
-		sts := h.sts("c1")
-		if _, held := sts.Annotations[DataDirHoldAnnotation]; held || podDataDir(&sts.Spec.Template.Spec) != "/data/sub" {
-			t.Fatalf("template dir %s, hold %q; want /data/sub applied", podDataDir(&sts.Spec.Template.Spec), sts.Annotations[DataDirHoldAnnotation])
+		h := newHoldHarness(t, testCluster("c1"))
+		pods := h.legacy("sub")
+		if plan := h.pass(dirConfig("sub")); plan.held() {
+			t.Fatalf("held: %+v", plan.moves)
 		}
-		// And the rollout, replacing it, finds it where its replacement looks.
-		if m, moved := h.r.dataDirMoved(context.Background(), pod, sts); moved {
+		sts := h.sts("c1")
+		if podDataDir(&sts.Spec.Template.Spec) != "/data/sub" || sts.Annotations[DataDirAnnotation] != "/data/sub" {
+			t.Fatalf("template dir %s, record %q; want /data/sub", podDataDir(&sts.Spec.Template.Spec), sts.Annotations[DataDirAnnotation])
+		}
+		// The rollout, replacing it, finds it where its replacement looks.
+		h.r.dataDirMoved(context.Background(), &pods[0], sts)
+		h.r.engineDirs.wait()
+		if m, moved := h.r.dataDirMoved(context.Background(), &pods[0], sts); moved {
 			t.Fatalf("rollout sees a move %+v, want none", m)
 		}
 	})
-
-	t.Run("dir unknown: CONFIG refused", func(t *testing.T) {
-		h, pod := setup(t)
-		h.agents.configRefused[pod.Status.PodIP] = true
-		before := h.sts("c1").Spec.Template.DeepCopy()
-		h.apply(nil, "")
-		sts := h.sts("c1")
-		if !apiequality.Semantic.DeepEqual(sts.Spec.Template, *before) {
-			t.Fatal("template applied with the pod's dir unknown")
-		}
-		h.r.reconcileRollout(context.Background(), h.c, []corev1.Pod{*pod}, nil, "c1-0")
-		cond := findCondition(h.c.Status.Conditions, RolloutProgressingCondition)
-		for _, want := range []string{"c1-0 to /data, from where is not known (CONFIG GET dir: ", "NOPERM", "Where the files of c1-0 are is not known", "CONFIG GET dir as a user allowed CONFIG", "set dir to that"} {
-			if cond == nil || !strings.Contains(cond.Message, want) {
-				t.Fatalf("condition %+v, want %q in its message", cond, want)
+	for _, tc := range []struct{ name, why string }{
+		{"CONFIG denied", whyDenied},
+		{"no answer", whyNoAnswer},
+		{"no pod IP", whyNoIP},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHoldHarness(t, testCluster("c1"))
+			pods := h.legacy("sub")
+			ip := pods[0].Status.PodIP
+			switch tc.why {
+			case whyDenied:
+				h.agents.configRefused[ip] = true
+			case whyNoAnswer:
+				h.agents.dirErr[ip] = "dial tcp: connection refused"
+			case whyNoIP:
+				pods[0].Status.PodIP = ""
+				h.writePodStatus(&pods[0])
 			}
-		}
-		// Even with the KividbConfig's own dir: the engine might be anywhere.
-		h.apply(dirConfig("sub"), "")
-		if _, held := h.sts("c1").Annotations[DataDirHoldAnnotation]; !held {
-			t.Fatal("dir sub with the pod's dir unknown: not held")
-		}
-	})
-
-	t.Run("dir unknown: no pod IP", func(t *testing.T) {
-		h, pod := setup(t)
-		pod.Status.PodIP = ""
-		h.writePodStatus(pod)
-		h.apply(nil, "")
-		moves, held := heldDataDirMoves(h.sts("c1"))
-		if !held || len(moves) != 1 || moves[0].Why == "" {
-			t.Fatalf("held %v %+v, want c1-0 held, its dir not known", held, moves)
-		}
-	})
-}
-
-// A cluster with no `dir` at all is not held for want of asking its
-// engine: a pod made with the config it is to run with is in /data,
-// without a question (the engine refuses CONFIG here, and is not asked).
-func TestNoDirClusterIsNotHeldForAChangeElsewhere(t *testing.T) {
-	h := newHoldHarness(t, testCluster("c1"))
-	h.apply(nil, "")
-	pods := h.makePods()
-	h.agents.configRefused[pods[0].Status.PodIP] = true
-	h.c.Spec.Image = "kividb:new"
-	h.apply(nil, "")
-	sts := h.sts("c1")
-	if _, held := sts.Annotations[DataDirHoldAnnotation]; held {
-		t.Fatalf("held: %q", sts.Annotations[DataDirHoldAnnotation])
-	}
-	if sts.Spec.Template.Spec.Containers[0].Image != "kividb:new" {
-		t.Fatalf("image %s, want the new one applied", sts.Spec.Template.Spec.Containers[0].Image)
+			before := h.sts("c1").Spec.Template.DeepCopy()
+			plan := h.pass(nil)
+			if !plan.held() || plan.moves[0].Why != tc.why {
+				t.Fatalf("plan %+v, want c1-0 held: %s", plan.moves, tc.why)
+			}
+			if !apiequality.Semantic.DeepEqual(h.sts("c1").Spec.Template, *before) {
+				t.Fatal("template applied with the pod's dir unknown")
+			}
+			cond := h.rolloutCondition()
+			for _, want := range []string{"c1-0 to /data, from where is not known (" + tc.why + ")", "The operator could not ask where the files of c1-0 are", "CONFIG GET dir as a user allowed CONFIG", "Where a pod keeps its files", "set dir to that"} {
+				if cond == nil || !strings.Contains(cond.Message, want) {
+					t.Fatalf("condition %+v, want %q in its message", cond, want)
+				}
+			}
+		})
 	}
 }
 
-// An engine that restarted in its pod read the config file as it was
-// then: one that ran on a `dir` since set back is asked, and its word
-// wins over the config hash its pod was made with (#112).
-func TestARestartedEngineIsAskedWhereItsFilesAre(t *testing.T) {
-	h := newHoldHarness(t, testCluster("c1"))
-	h.apply(nil, "")
-	pods := h.makePods()
-	pod := &pods[0]
-	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: kividbContainerName, RestartCount: 1}}
-	h.writePodStatus(pod)
-	h.agents.dirs[pod.Status.PodIP] = "/data/old"
-	h.c.Spec.Image = "kividb:new"
-	h.apply(nil, "")
-	moves, held := heldDataDirMoves(h.sts("c1"))
-	if !held || len(moves) != 1 || moves[0].From != "/data/old" {
-		t.Fatalf("held %v %+v, want c1-0 held, its files in /data/old", held, moves)
+// Engines are asked in the background, all at once (#112): a pass does not
+// wait for one that hangs, so failover, later in the same pass, is not
+// held up, and the answer, once there, is used without asking again.
+func TestEnginesAreAskedWithoutWaiting(t *testing.T) {
+	h := newHoldHarness(t, shardedCluster("s", 2, 1))
+	pods := h.legacy("sub")
+	for _, p := range pods {
+		h.agents.hang[p.Status.PodIP] = true
 	}
-	// Asked and not answering, the config hash stands.
-	h.agents.configRefused[pod.Status.PodIP] = true
-	h.apply(nil, "")
-	if _, held := h.sts("c1").Annotations[DataDirHoldAnnotation]; held {
-		t.Fatal("held with the engine not answering and the pod made with this config")
+	for i := 0; i < 2; i++ {
+		start := time.Now()
+		plan := h.passOnce(nil)
+		if took := time.Since(start); took > time.Second {
+			t.Fatalf("pass %d took %s with every engine hanging, want no wait", i, took)
+		}
+		if !plan.held() || plan.moves[0].Why != whyAsking {
+			t.Fatalf("pass %d: plan %+v, want held while asking", i, plan.moves)
+		}
+	}
+	h.r.engineDirs.wait()
+	if n := len(h.r.engineDirs.answers); n != len(pods) {
+		t.Fatalf("%d asks, want one per pod: %d", n, len(pods))
+	}
+	for _, p := range pods {
+		h.agents.hang[p.Status.PodIP] = false
+	}
+	engineDirRetry = 0
+	t.Cleanup(func() { engineDirRetry = 15 * time.Second })
+	h.pass(nil) // asks again: the hanging ones gave no answer
+	plan := h.pass(nil)
+	if !plan.held() || plan.moves[0].Why != "" || plan.moves[0].From != "/data/sub" {
+		t.Fatalf("plan %+v, want held, from /data/sub", plan.moves)
+	}
+	asked := h.agents.dirAsks
+	h.passOnce(nil)
+	h.r.engineDirs.wait()
+	if h.agents.dirAsks != asked {
+		t.Fatalf("asked again (%d, was %d) with the answers there", h.agents.dirAsks, asked)
+	}
+}
+
+// What the hold says, and its annotation, stay as they are while the error
+// behind a pod's unknown dir changes from pass to pass: no new Event, no
+// write of the StatefulSet (#112).
+func TestHeldDirChangeIsStableWhileTheErrorChanges(t *testing.T) {
+	engineDirRetry = 0
+	t.Cleanup(func() { engineDirRetry = 15 * time.Second })
+	h := newHoldHarness(t, testCluster("c1"))
+	pods := h.legacy("sub")
+	ip := pods[0].Status.PodIP
+	h.agents.dirErr[ip] = "read tcp: i/o timeout"
+	h.pass(nil)
+	_ = events(h.r)
+	rv := h.sts("c1").ResourceVersion
+	for i, e := range []string{"connection reset by peer", "dial tcp: connection refused", "read tcp: i/o timeout"} {
+		h.r.engineDirs.wait()
+		h.agents.mu.Lock()
+		h.agents.dirErr[ip] = e
+		h.agents.mu.Unlock()
+		h.pass(nil)
+		if got := h.sts("c1").ResourceVersion; got != rv {
+			t.Fatalf("pass %d: StatefulSet written again (%s, was %s)", i, got, rv)
+		}
+	}
+	if ev := events(h.r); strings.Contains(ev, "RolloutHeld") {
+		t.Fatalf("events while only the error changed:\n%s", ev)
 	}
 }
 
@@ -441,10 +764,9 @@ func TestDbOpsRestartWhileADirChangeIsHeld(t *testing.T) {
 	if err := h.r.Status().Update(ctx, c); err != nil {
 		t.Fatal(err)
 	}
-	h.apply(dirConfig("sub"), "")
+	h.pass(dirConfig("sub"))
 	pods := h.makePods()
-	h.apply(nil, "") // dir removed: held
-	if _, held := h.sts("c1").Annotations[DataDirHoldAnnotation]; !held {
+	if plan := h.pass(nil); !plan.held() {
 		t.Fatal("not held")
 	}
 
@@ -471,11 +793,10 @@ func TestDbOpsRestartWhileADirChangeIsHeld(t *testing.T) {
 	}
 
 	recreated := h.recreate(h.sts("c1"), "c1-0", pods[0].Status.PodIP)
-	if got := podDataDir(&recreated.Spec); got != "/data/sub" {
-		t.Fatalf("restarted pod on %s, want /data/sub, where its files are", got)
+	if got := h.startDir(recreated); got != "/data/sub" {
+		t.Fatalf("restarted pod starts in %s, want /data/sub, where its files are", got)
 	}
-	h.apply(nil, "")
-	if _, held := h.sts("c1").Annotations[DataDirHoldAnnotation]; !held {
+	if plan := h.pass(nil); !plan.held() {
 		t.Fatal("hold gone after the restart")
 	}
 }

@@ -117,9 +117,8 @@ func argValue(args []string, flag string) (string, bool) {
 // it before the engine starts (the engine does not, and exits at once on
 // a new volume: "Can't chdir to 'sub'"), and the agent's ENGINE_DIR.
 // podTemplate calls it only for a `dir` that is a strict subdirectory of
-// the volume, so every other pod template is as before; a StatefulSet
-// held on a dir change gets it with the pods' own dir, DataDir included
-// (see dataDirHold).
+// the volume, so every other pod template is as before. (A StatefulSet
+// held on a `dir` change keeps its template whole: see planDataDir.)
 func setPodDataDir(c *kividbv1alpha1.KividbCluster, spec *corev1.PodSpec, dir string) {
 	inits := spec.InitContainers[:0:0]
 	for _, ic := range spec.InitContainers {

@@ -202,7 +202,8 @@ func TestReconcile_RunningClusterIsNotRolledOntoADirOffTheVolume(t *testing.T) {
 		t.Errorf("Ready condition %+v, want False, InvalidSpec, naming KividbConfig conf and /var/lib/kividb", ready)
 	}
 
-	setDir("kividb")
+	// Back on the volume, and where the files are: no move to hold.
+	setDir(".")
 	f.reconcile(t, reconcileInterval)
 	var after appsv1.StatefulSet
 	if err := f.cl.Get(ctx, key, &after); err != nil {

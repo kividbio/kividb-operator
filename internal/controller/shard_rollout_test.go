@@ -49,6 +49,7 @@ func formedForRollout(t *testing.T, shards, replicas int32) *formingHarness {
 // returns the pods deleted in this pass.
 func (h *formingHarness) rolloutPass() []string {
 	ctx := context.Background()
+	h.r.engineDirs.wait() // the engines asked on the pass before have answered
 	observed := h.r.observeShardedPods(ctx, h.c, h.pods())
 	if _, err := h.r.reconcileClusterTopology(ctx, h.c, observed, h.exposed); err != nil {
 		h.t.Fatal(err)
@@ -750,6 +751,12 @@ func (h *formingHarness) moveDataDir(dir string) {
 			h.t.Fatal(err)
 		}
 	}
+	// Their engines, whose pods' specs do not say, have been asked where
+	// their files are, and have answered.
+	for _, p := range h.pods() {
+		h.r.engineDir(ctx, &p)
+	}
+	h.r.engineDirs.wait()
 }
 
 // A KividbConfig dir that moves the engine's files holds a master with no
