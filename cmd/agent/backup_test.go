@@ -182,11 +182,10 @@ func TestPruneOldBackups_OnlyThisClustersArchives(t *testing.T) {
 	}
 }
 
-// s3Server is cluster "cache" in namespace ns with path prefix "backups",
-// on fs.
-func s3Server(t *testing.T, fs *fakeS3, ns string, retention int) (*server, *minio.Client) {
+// s3Server configures a mock S3 server for cluster "cache" using h.
+func s3Server(t *testing.T, h http.Handler, ns string, retention int) (*server, *minio.Client) {
 	t.Helper()
-	srv := httptest.NewServer(fs)
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	s := &server{cfg: agentConfig{
 		ClusterName: "cache", Namespace: ns, PodName: "cache-0",
