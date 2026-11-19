@@ -434,13 +434,29 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 		secrets = clusterSecrets{busSecret: bus, masterAuth: defaultPassword}
 		return err
 	})
-	steps.run("reconciling config", func() error { return r.reconcileConfig(ctx, c, kdbConfig, secrets) })
+	// First what the KividbConfig's `dir` does (#112): while a move is held,
+	// the config file keeps its `dir` and every shard's StatefulSet its
+	// template.
+	plan := &dataDirPlan{config: kdbConfig}
+	steps.run("checking where the pods keep their files", func() error {
+		var targets []stsTarget
+		for s := int32(0); s < shardCount(c); s++ {
+			targets = append(targets, targetOf(desiredShardStatefulSet(c, s, kdbConfig, aclConfig, snapCfg)))
+		}
+		p, err := r.planDataDir(ctx, c, kdbConfig, targets)
+		if err == nil {
+			plan = p
+		}
+		return err
+	})
+	runConfig := plan.config
+	steps.run("reconciling config", func() error { return r.reconcileConfig(ctx, c, runConfig, secrets) })
 	steps.run("reconciling services", func() error { return r.reconcileShardedServices(ctx, c, kdbConfig) })
 	// "": the error already names the step and the shard.
 	steps.run("", func() error {
 		r.startRebalance(c)
 		rollout := map[string]string{
-			ConfigHashAnnotation:     configHash(renderKividbConfWith(c, kdbConfig, secrets))[:16],
+			ConfigHashAnnotation:     configHash(renderKividbConfWith(c, runConfig, secrets))[:16],
 			AuthGenerationAnnotation: generations.auth,
 		}
 		for s := int32(0); s < shardCount(c); s++ {
@@ -456,12 +472,15 @@ func (r *KividbClusterReconciler) reconcileSharded(ctx context.Context, c *kivid
 					continue
 				}
 			}
-			if err := r.applyStatefulSet(ctx, c, desiredShardStatefulSet(c, s, kdbConfig, aclConfig, snapCfg), rollout); err != nil {
+			if err := r.applyStatefulSet(ctx, c, desiredShardStatefulSet(c, s, runConfig, aclConfig, snapCfg), rollout, plan); err != nil {
 				return fmt.Errorf("reconciling statefulset of shard %d: %w", s, err)
 			}
 			if err := r.applyPDB(ctx, c, desiredShardPDB(c, s)); err != nil {
 				return fmt.Errorf("reconciling disruption budget of shard %d: %w", s, err)
 			}
+		}
+		if plan.held() {
+			r.rolloutHeld(c, dataDirHoldMessage(c, plan.moves, true))
 		}
 		return nil
 	})

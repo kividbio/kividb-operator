@@ -1086,12 +1086,101 @@ spec:
 
   **`dir`** must stay on the pod's volume, `/data`: the engine keeps its
   snapshot and append-only file in it. A relative `dir`, or an absolute
-  one under `/data`, is passed through, though the backups and restores
-  see only what is directly in `/data` (#112). One that resolves outside
-  it (`/data/../tmp` included, the value read as the engine reads it), or
-  that is not one value, is refused, `Ready` `False` with reason
-  `InvalidSpec`, and the cluster's objects are left as they are (see
+  one under `/data`, is passed through, and backups and restores use it.
+  The engine does not create it, so the pods get an init container,
+  `data-dir`, that makes it before the engine starts, with the volume's
+  group and mode, and leaves one that is there as it is. One that
+  resolves outside `/data` (`/data/../tmp` included, the value read as
+  the engine reads it), or that is not one value, is refused, `Ready`
+  `False` with reason `InvalidSpec`, and the cluster's objects are left
+  as they are (see
   [TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-kividbconfig-dir-off-the-volume-invalidspec)).
+
+  A change to `dir` moves where the engine looks, not its files, and
+  takes effect when a pod is replaced. The engine gets a `dir` under
+  `/data` on its command line too, so one that restarts in its pod (a
+  crash, out of memory) keeps the `dir` it started with. A pod made
+  without one (on a cluster with no `dir`, or by operator 0.7.1 or
+  earlier) has no such flag, and its engine reads `dir` from the config
+  file each time it starts. While a change is held (below), the config
+  file keeps the `dir` it has, so such an engine starts where its files
+  are. When a change goes ahead on a cluster with replicas, the config
+  file gets the new `dir` at once: if such an engine restarts in its pod
+  before the rollout replaces it and the new directory is not there, it
+  does not start, and its files stay where they are; if the directory is
+  there, left over from an earlier `dir`, it starts on whatever that holds
+  (older files, or none), comes up Ready, and writes there from then on.
+  The files it ran on until then are left where they were, on the volume
+  but no longer served, and a backup taken then holds what it now runs
+  on.
+
+  A change to `dir` that would move a running pod's files is held where
+  nothing could resync them. On a sharded cluster, replicas or not, it is
+  not supported yet: each node keeps its `nodes.conf` there too, and
+  would come back as a new node. On a replicated cluster with no replica
+  Ready and in sync, the new pod would start empty, and the scheduled
+  backups would upload that. The rollout reports the hold
+  (`RolloutProgressing` `False`, reason `WouldLoseData`, naming each pod
+  and where its files are and would go). Until it ends, the StatefulSet
+  keeps its current pod template, all of it, and the config file keeps
+  its current `dir` line (its other directives are updated): a pod
+  recreated meanwhile, by a node drain, an eviction, node loss, `kubectl
+  delete pod` or a `KividbDbOps` restart, and an engine that restarts in
+  its pod, start in the directory their files are in. Other changes to
+  the pod template (an image, resources) wait too; the replica count does
+  not. A StatefulSet that is gone while its pods or volumes are (deleted
+  with `--cascade=orphan`) is not made again until the hold ends, since it
+  would be made from the new template; one scaled to 0 is held for the
+  pods it would make again. Holding back only the parts of the template
+  that decide where the files are would let the pods roll for the rest,
+  restarting a cluster with no replica for a change that is held.
+
+  The way out is to set `dir` back, or, on a replicated cluster whose
+  master is Ready, to add a replica (`spec.replicas: 1`). The replica is
+  made from the template kept, so it starts in the master's directory and
+  syncs there; once it is Ready and in sync the hold ends, and the rollout
+  moves the pods one at a time, the replica first, the master after
+  handing over to it. While the master is not Ready, setting `dir` back is
+  the only way out, since a replica would have nothing to sync from. There
+  is no way to have a held pod start empty on the new `dir`: deleting it
+  brings it back in the directory its files are in. On a replicated
+  cluster with a replica Ready and in sync, a change to `dir` is not held:
+  the rollout replaces the replicas first, which resync, and the master
+  hands over before its own restart. Either way, a pod whose `dir` moves
+  is not replaced as a stuck pod: one not Ready is replaced only as a
+  replica, once the others are healthy, so that it resyncs.
+
+  Each StatefulSet records the `dir` its pod template and the config file
+  were last applied for (the `kividb.io/data-dir` annotation, on the
+  StatefulSet, not its pods). A pod made by operator 0.7.1 or earlier
+  has no `data-dir` init container and may run in a `dir` made by hand:
+  when a change to `dir` is involved, the operator asks its engine where
+  its files are (`CONFIG GET dir`, through the agent, in the background).
+  While an engine cannot say (it is not running, or an ACL denies
+  `CONFIG` to the default user), the change is held, and the message says
+  the operator could not ask: see
+  [TROUBLESHOOTING.md](TROUBLESHOOTING.md#where-a-pod-keeps-its-files)
+  for how to see where the files are. A change to any other directive is
+  never held for this.
+
+  Backups ask the engine where its files are (`CONFIG GET dir`). If an ACL
+  denies `CONFIG` to the default user, which the agent uses, a pod whose
+  `dir` is under `/data` backs up the directory its own `--dir` names;
+  one with no `--dir` backs up `/data`, which, on a pod made by operator
+  0.7.1 or earlier with a `dir` set, holds no files or older ones, so
+  allow the default user `CONFIG GET` there.
+
+  A `dir` with `$(` in it is refused (`InvalidSpec`): Kubernetes would
+  expand it as a variable (`$(POD_NAME)`) on the engine's command line,
+  but not where the init container makes the directory, so the two would
+  differ. A cluster that already runs with one (operator 0.7.1 passed it
+  to the engine as written, so it runs in a directory of that literal
+  name, made by hand) gets the condition on upgrade, and none of its
+  objects is changed until `dir` is fixed. Fixing it moves the files, so
+  take the way out for a `dir` off the volume
+  ([TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-kividbconfig-dir-off-the-volume-invalidspec)):
+  with replicas, wait until they are in sync, then set a `dir` without
+  `$(`; with none, take a copy first.
 
   **`bind`**: unless you set `bind` or `protected-mode` yourself, the
   operator sets `bind 0.0.0.0`, the address kividb has always listened on.

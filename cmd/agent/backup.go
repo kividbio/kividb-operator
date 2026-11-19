@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -25,10 +26,10 @@ import (
 // passed to `agent backup-trigger`, which also has to cover upload time.
 const backupSaveTimeout = 5 * time.Minute
 
-// dataFiles are kividb's hardcoded persistence file names (see
-// upstream src/main.rs / src/aof.rs; there is no `dir`/`dbfilename`
-// config directive, so these are always relative to the working
-// directory, which the operator pins to DataDir).
+// dataFiles are kividb's persistence file names, in the directory it
+// changed into at start (see backupDir). They are fixed: the engine
+// ignores `dbfilename` and `appendfilename` (CONFIG GET reports these
+// names whatever they are set to).
 var dataFiles = []string{"dump.kdb", "appendonly.aof"}
 
 func (s *server) runBackup(ctx context.Context, req agentapi.BackupRequest) (*agentapi.BackupResponse, error) {
@@ -41,6 +42,10 @@ func (s *server) runBackup(ctx context.Context, req agentapi.BackupRequest) (*ag
 	if err := s.triggerAndWaitForSave(ctx); err != nil {
 		return nil, err
 	}
+	dir, err := s.backupDir()
+	if err != nil {
+		return nil, err
+	}
 
 	client, err := s.s3Client()
 	if err != nil {
@@ -51,7 +56,7 @@ func (s *server) runBackup(ctx context.Context, req agentapi.BackupRequest) (*ag
 	if req.Run != "" {
 		objectKey = s.backupPrefix() + req.Run + "/" + fmt.Sprintf("shard-%d-%s.tar.gz", req.Shard, s.cfg.PodName)
 	}
-	size, err := s.streamUpload(ctx, client, objectKey)
+	size, err := s.streamUpload(ctx, client, objectKey, dir)
 	if err != nil {
 		return nil, fmt.Errorf("upload: %w", err)
 	}
@@ -161,16 +166,59 @@ func (s *server) backupPrefix() string {
 	return dir + "/"
 }
 
-// streamUpload tars+gzips DataDir's persistence files directly into S3
+// backupDir is where the engine keeps its snapshot and append-only file:
+// the directory it changed into at start, which CONFIG GET dir reports. A
+// KividbConfig `dir` puts it under the volume (#112). The agent mounts the
+// volume at the same path as the engine, so the path holds here too, but
+// only on the volume, DataDir: an engine whose files are off it (a `dir`
+// the operator now refuses, on a cluster that ran with it before) has
+// nothing on the volume to back up. An engine that answers but will not
+// say (an ACL that denies CONFIG to the default user) is taken to be where
+// its pod's command line puts it, the --dir the operator also gives the
+// agent (EngineDir) on a pod whose `dir` is under the volume, or else in
+// DataDir, as before #112, and the log says so. One that does not answer
+// at all fails the backup: DataDir may hold an older snapshot.
+func (s *server) backupDir() (string, error) {
+	c, err := s.dial()
+	if err != nil {
+		return "", err
+	}
+	defer c.Close()
+	v, err := c.Do("CONFIG", "GET", "dir")
+	if err != nil && v == nil {
+		return "", fmt.Errorf("CONFIG GET dir: %w", err)
+	}
+	if err != nil || len(v.Array) != 2 || v.Array[1].Str == "" {
+		dir, from := s.cfg.DataDir, "the volume"
+		if s.cfg.EngineDir != "" {
+			dir, from = s.cfg.EngineDir, "the engine's --dir"
+		}
+		log.Printf("CONFIG GET dir did not say where the engine keeps its files (%v): backing up %s, %s", err, dir, from)
+		return s.onVolume(dir)
+	}
+	return s.onVolume(v.Array[1].Str)
+}
+
+// onVolume is dir, cleaned, if it is on this pod's volume, DataDir, or
+// why there is nothing to back up there.
+func (s *server) onVolume(dir string) (string, error) {
+	dir = filepath.Clean(dir)
+	if rel, err := filepath.Rel(filepath.Clean(s.cfg.DataDir), dir); err != nil || !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("the engine keeps its files in %s, off this pod's volume at %s: there is nothing on the volume to back up (see TROUBLESHOOTING.md, \"A KividbConfig dir off the volume\")", dir, s.cfg.DataDir)
+	}
+	return dir, nil
+}
+
+// streamUpload tars+gzips the persistence files in dir directly into S3
 // without buffering the whole archive in memory: a goroutine writes into
 // an io.Pipe while PutObject reads from the other end with an unknown
 // (-1) size, which minio-go handles via chunked multipart upload.
-func (s *server) streamUpload(ctx context.Context, client *minio.Client, objectKey string) (int64, error) {
+func (s *server) streamUpload(ctx context.Context, client *minio.Client, objectKey, dir string) (int64, error) {
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- writeTarGz(pw, s.cfg.DataDir, dataFiles)
+		errCh <- writeTarGz(pw, dir, dataFiles)
 	}()
 
 	info, err := client.PutObject(ctx, s.cfg.S3Bucket, objectKey, pr, -1, minio.PutObjectOptions{

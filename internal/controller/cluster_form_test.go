@@ -48,6 +48,8 @@ type fakeNode struct {
 	// agent cannot report; the others mark it failed. agentDown: only its
 	// agent does not answer; the engine runs, and the others see it as ever.
 	hung, agentDown bool
+	// dir: what CONFIG GET dir answers, "/data" if "" (#112).
+	dir string
 	// keys, uptime (seconds; nil: not reported) and runID, as INFO says.
 	keys    int64
 	uptime  *int64
@@ -161,7 +163,9 @@ func (e *fakeEngine) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Body != nil {
 		_ = json.NewDecoder(req.Body).Decode(&body)
 	}
-	if req.URL.Path != "/cluster/status" && req.URL.Path != "/cluster/migration/status" {
+	// Asking where the engine keeps its files changes nothing (#112).
+	asksDir := req.URL.Path == "/exec" && strings.EqualFold(strings.Join(body.Args, " "), "CONFIG GET dir")
+	if req.URL.Path != "/cluster/status" && req.URL.Path != "/cluster/migration/status" && !asksDir {
 		call := fmt.Sprintf("%s %s %s%s", req.URL.Path, n.id[:6], body.IP, body.NodeID)
 		if body.Mode != "" || len(body.Args) > 0 {
 			call += " " + strings.TrimSpace(body.Mode+" "+strings.Join(body.Args, " "))
@@ -212,6 +216,12 @@ func (e *fakeEngine) RoundTrip(req *http.Request) (*http.Response, error) {
 		n.hostname = body.Hostname
 	case "/exec":
 		switch strings.ToUpper(strings.Join(body.Args, " ")) {
+		case "CONFIG GET DIR":
+			dir := n.dir
+			if dir == "" {
+				dir = "/data"
+			}
+			return reply(http.StatusOK, agentapi.ExecResponse{Type: "array", Array: []agentapi.ExecResponse{{Type: "bulk", Str: "dir"}, {Type: "bulk", Str: dir}}}), nil
 		case "CLIENT UNPAUSE":
 			n.paused = false
 		default:

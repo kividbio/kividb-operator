@@ -46,6 +46,57 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 
 ### Fixed
 
+- **A `KividbConfig` `dir` under `/data` was missed by backups and
+  restores, and a new cluster with one did not start** (#112). The engine
+  keeps its snapshot and append-only file in `dir`, but a backup packed
+  what was directly in `/data` (an older snapshot, or nothing: "no
+  persistence files found"), and a restore or `bootstrapFromSnapshot`
+  wrote there, where the engine does not look: the cluster started empty.
+  The engine does not create `dir` either: on a new volume it exited at
+  once ("Can't chdir to 'sub'"). A backup now reads the directory the
+  engine reports (`CONFIG GET dir`), a restore extracts into `dir`, and an
+  init container, `data-dir` (the agent image), makes `dir` before the
+  engine starts, with the volume's group and mode; one that is there is
+  left as it is. The engine also gets `dir` on its command line, which it
+  takes over the config file, so one that restarts in its pod keeps its
+  `dir` until the pod is replaced. Only a cluster whose `dir` is a strict subdirectory of
+  `/data` gets the init container: its pods roll once on upgrade, and no
+  other cluster's do. A change to `dir` that would move a running pod's
+  files is held where nothing could resync them: on a replicated cluster
+  with no replica Ready and in sync, whose pod would start empty in the
+  new directory and the scheduled backups upload that, and on every
+  sharded cluster, as not supported yet (each node keeps its `nodes.conf`
+  there too). The rollout says so (`RolloutProgressing` False,
+  `WouldLoseData`), and until the hold ends the StatefulSet keeps its
+  current pod template, all of it, and the config file its current `dir`
+  (its other directives are updated): a pod recreated meanwhile (a node
+  drain, an eviction, `kubectl delete pod`, a `KividbDbOps` restart), or
+  an engine restarting in its pod, starts in the directory its files are
+  in. Other changes to the pod template, an image say, wait too. A
+  StatefulSet deleted with its pods orphaned is not made again while the
+  hold lasts, and one scaled to 0 is held for the pods it would make
+  again. Set `dir` back, or, on a replicated cluster whose master is
+  Ready, add a replica: it is made from the template kept, syncs in the
+  master's directory, and once it is in sync the change goes ahead,
+  replica first. A pod whose `dir` moves is not replaced as a stuck pod
+  either, replicas or not. Each StatefulSet records the `dir` it was last
+  applied for (`kividb.io/data-dir`, on the StatefulSet, so no pod rolls
+  for it). A pod made by an earlier operator takes `dir` from its config
+  file and may run in one made by hand: when a `dir` change is involved,
+  its engine is asked where its files are (`CONFIG GET dir`, through the
+  agent, in the background so that failover never waits on it), and while
+  it cannot say (not running, or `CONFIG` denied to the default user) the
+  change is held, and the message says the operator could not ask. A
+  change to any other directive is never held. To see where a pod's files
+  are, ask its engine with `redis-cli ... CONFIG GET dir` from another
+  pod, as a user allowed `CONFIG` (TROUBLESHOOTING.md, "Where a pod keeps
+  its files"). When `CONFIG` is denied, a backup reads the directory the
+  pod's own `--dir` names, not `/data`. A `dir` with `$(` in it is
+  refused (`InvalidSpec`): Kubernetes would expand it on the engine's
+  command line but not where the directory is made. A cluster already
+  running with one gets the condition on upgrade and is left as it is;
+  fixing `dir` moves its files, so follow the way out for a `dir` off the
+  volume in TROUBLESHOOTING.md.
 - **An `INFO keyspace` reply the agent could not read counted as 0 keys.**
   The agent reported a known count of 0 for any reply it found no database
   line in, the empty reply an engine gives for a section it does not have
@@ -59,11 +110,12 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   append-only file's included, and backups found nothing. A `dir` that
   resolves outside `/data` is now refused (`Ready` False, reason
   `InvalidSpec`, naming the `KividbConfig` and the path), and the
-  cluster's objects are left as they are. A `dir` inside `/data` works as
-  before. A cluster already running with one gets the condition and is
-  not restarted: see TROUBLESHOOTING.md for the way out. A directive name
-  that is not one plain word, or a value with a line break, is refused the
-  same way: the engine would read another directive than the one checked.
+  cluster's objects are left as they are. A `dir` inside `/data` is passed
+  through (see #112 above). A cluster already running with one off it
+  gets the condition and is not restarted: see TROUBLESHOOTING.md for the
+  way out. A directive name that is not one plain word, or a value with a
+  line break, is refused the same way: the engine would read another
+  directive than the one checked.
 - **A missing TLS or S3 credentials Secret, or a key it lacks, left the
   pods stuck instead of holding back** (#106). The pods take these two
   Secrets straight from the API server, and nothing checked them. A pod

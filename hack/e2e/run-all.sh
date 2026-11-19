@@ -26,6 +26,7 @@ SUITES=(
   "09-restore-over-aof.sh"
   "10-force-delete-fence.sh"
   "11-unsynced-failover.sh"
+  "12-dir-under-data.sh"
 )
 
 # Map suite → skip env var (empty = never skip via flag; always runs).
@@ -43,6 +44,7 @@ skip_var_for() {
     09-restore-over-aof.sh) echo "SKIP_RESTORE" ;;
     10-force-delete-fence.sh) echo "SKIP_FENCE" ;;
     11-unsynced-failover.sh) echo "SKIP_UNSYNCED" ;;
+    12-dir-under-data.sh) echo "SKIP_DIR" ;;
     *) echo "" ;;
   esac
 }

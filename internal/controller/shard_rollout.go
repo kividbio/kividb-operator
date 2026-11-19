@@ -276,6 +276,8 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	log := logf.FromContext(ctx)
 
 	targets := map[int32]string{}
+	stss := map[int32]*appsv1.StatefulSet{}
+	var heldDirs []dataDirMove
 	for s := int32(0); s < shardCount(c); s++ {
 		var sts appsv1.StatefulSet
 		if err := r.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: shardStatefulSetName(c, s)}, &sts); err != nil {
@@ -288,6 +290,16 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 			return false // the StatefulSet controller has not seen the latest template yet
 		}
 		targets[s] = sts.Status.UpdateRevision
+		stss[s] = &sts
+		if moves, ok := heldDataDirMoves(&sts); ok {
+			heldDirs = append(heldDirs, moves...)
+		}
+	}
+	// A `dir` change held back from the StatefulSets (#112): nothing is
+	// replaced until it is set back.
+	if len(heldDirs) > 0 {
+		r.rolloutHeld(c, dataDirHoldMessage(c, heldDirs, true))
+		return false
 	}
 
 	var outdated []*shardPod
@@ -304,6 +316,26 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 		if c.Annotations[kividbv1alpha1.AllowRestartWithoutPersistenceAnnotation] != "" {
 			r.clearRestartWithoutPersistence(ctx, c, read)
 		}
+		return false
+	}
+
+	// A KividbConfig `dir` that moves the engine's files holds the rollout,
+	// replicas or not, the append-only file on or not, and stuck pod or not
+	// (#112). Each node keeps its nodes.conf there too, so a pod whose dir
+	// moves would come back as a new node: with no replica, one that owns
+	// no slots and holds no data; with replicas, one left to the rule for a
+	// lost volume, which a dir change has not been tried with. A dir change
+	// on a running sharded cluster is not supported yet. The annotation,
+	// which accepts what a restart loses of a master whose file is off,
+	// does not cover it.
+	var moves []dataDirMove
+	for _, p := range outdated {
+		if m, ok := r.dataDirMoved(ctx, p.pod, stss[p.shard]); ok {
+			moves = append(moves, m)
+		}
+	}
+	if len(moves) > 0 {
+		r.rolloutHeld(c, dataDirHoldMessage(c, moves, false))
 		return false
 	}
 

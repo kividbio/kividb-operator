@@ -239,6 +239,12 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 		}
 		return
 	}
+	// A `dir` change held back from the StatefulSet (#112): nothing is
+	// replaced, stuck or not, until it is set back or a replica added.
+	if moves, held := heldDataDirMoves(&sts); held {
+		r.rolloutHeld(c, dataDirHoldMessage(c, moves, true))
+		return
+	}
 	target := sts.Status.UpdateRevision
 	if target == "" || sts.Status.ObservedGeneration < sts.Generation {
 		return // the StatefulSet controller has not seen the latest template yet
@@ -259,9 +265,36 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 		return
 	}
 
+	// A KividbConfig `dir` that moves the engine's files, with no replica
+	// to resync from: the new pod would start empty where the engine now
+	// looks, the files left where it looked before, and the scheduled
+	// backups would upload the empty dataset, and in time prune the good
+	// ones (#112). Held whether or not the pod is stuck: its files are on
+	// its volume either way. With a replica, the replica is replaced first
+	// and resyncs, and the master hands over before its own replacement.
+	if c.Spec.Replicas == 0 {
+		var moves []dataDirMove
+		for _, p := range outdated {
+			if m, ok := r.dataDirMoved(ctx, p, &sts); ok {
+				moves = append(moves, m)
+			}
+		}
+		if len(moves) > 0 {
+			r.rolloutHeld(c, dataDirHoldMessage(c, moves, false))
+			return
+		}
+	}
+
 	replaced := false
 	for _, p := range outdated {
 		if isPodReady(p) || time.Since(unreadySince(p)) < stuckPodGrace {
+			continue
+		}
+		// Not one whose dir moves, replicas or not: its files are on its
+		// volume, where its replacement would not look, and a master's
+		// replicas would sync from that. Below, it is replaced as a
+		// replica, once the others are healthy, and resyncs (#112).
+		if _, moves := r.dataDirMoved(ctx, p, &sts); moves {
 			continue
 		}
 		log.Info("rollout: replacing unready pod on an outdated template", "pod", p.Name)

@@ -51,6 +51,10 @@ type KividbClusterReconciler struct {
 	Agent    *AgentClient
 	Recorder record.EventRecorder
 
+	// engineDirs: what engines said about where they keep their files
+	// (#112), see engineDir.
+	engineDirs engineDirAsks
+
 	// failovers: the handovers under way, by shard
 	// ("<ns>/<cluster>/<shard>" -> *shardHandover).
 	failovers sync.Map
@@ -220,10 +224,21 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// port clash) skips the steps after it, but not failover: the error is
 	// reported on the Ready condition once the roles are reconciled.
 	var steps applySteps
-	steps.run("reconciling config", func() error { return r.reconcileConfig(ctx, &c, kdbConfig, clusterSecrets{}) })
+	// First what the KividbConfig's `dir` does (#112): while a move is held,
+	// the config file keeps its `dir` and the StatefulSet its template.
+	plan := &dataDirPlan{config: kdbConfig}
+	steps.run("checking where the pods keep their files", func() error {
+		p, err := r.planDataDir(ctx, &c, kdbConfig, []stsTarget{targetOf(desiredStatefulSet(&c, kdbConfig, aclConfig, snapCfg))})
+		if err == nil {
+			plan = p
+		}
+		return err
+	})
+	runConfig := plan.config
+	steps.run("reconciling config", func() error { return r.reconcileConfig(ctx, &c, runConfig, clusterSecrets{}) })
 	steps.run("reconciling services", func() error { return r.reconcileServices(ctx, &c, kdbConfig) })
 
-	blockSTS, bootErr := r.reconcileBootstrap(ctx, &c)
+	blockSTS, bootErr := r.reconcileBootstrap(ctx, &c, kdbConfig)
 	var heldBoot *heldBootstrapError
 	if bootErr != nil && !errors.As(bootErr, &heldBoot) {
 		log.Error(bootErr, "bootstrap reconciliation failed")
@@ -240,8 +255,11 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	rollout := map[string]string{
-		ConfigHashAnnotation:     configHash(renderKividbConf(&c, kdbConfig))[:16],
+		ConfigHashAnnotation:     configHash(renderKividbConf(&c, runConfig))[:16],
 		AuthGenerationAnnotation: generations.auth,
+	}
+	if plan.held() {
+		r.rolloutHeld(&c, dataDirHoldMessage(&c, plan.moves, true))
 	}
 	// While the bootstrap waits, the StatefulSet with this name is not
 	// ours. Updating it would take it over (SetControllerReference matches
@@ -250,7 +268,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if bootstrapWaiting(&c) {
 			return nil
 		}
-		return r.reconcileStatefulSet(ctx, &c, kdbConfig, aclConfig, snapCfg, rollout)
+		return r.reconcileStatefulSet(ctx, &c, runConfig, aclConfig, snapCfg, rollout, plan)
 	})
 	steps.run("reconciling disruption budget", func() error { return r.applyPDB(ctx, &c, desiredPDB(&c)) })
 	steps.run("reconciling backup cronjob", func() error { return r.reconcileBackupCronJob(ctx, &c, snapCfg) })
@@ -693,14 +711,46 @@ func (r *KividbClusterReconciler) reconcileServices(ctx context.Context, c *kivi
 
 // rollout holds pod-template annotations whose only job is to change when
 // something the pods read once at startup changes (see ConfigHashAnnotation
-// and AuthGenerationAnnotation), so the StatefulSet rolls them.
-func (r *KividbClusterReconciler) reconcileStatefulSet(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig, rollout map[string]string) error {
-	return r.applyStatefulSet(ctx, c, desiredStatefulSet(c, kdbConfig, aclConfig, snapCfg), rollout)
+// and AuthGenerationAnnotation), so the StatefulSet rolls them. plan is
+// what the pass decided about the KividbConfig's `dir` (planDataDir); nil
+// holds nothing.
+func (r *KividbClusterReconciler) reconcileStatefulSet(ctx context.Context, c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig, rollout map[string]string, plan *dataDirPlan) error {
+	return r.applyStatefulSet(ctx, c, desiredStatefulSet(c, kdbConfig, aclConfig, snapCfg), rollout, plan)
 }
 
 // applyStatefulSet creates or updates the StatefulSet desired, with the
-// rollout annotations on its pod template.
-func (r *KividbClusterReconciler) applyStatefulSet(ctx context.Context, c *kividbv1alpha1.KividbCluster, desired *appsv1.StatefulSet, rollout map[string]string) error {
+// rollout annotations on its pod template, and records the `dir` they are
+// for (DataDirAnnotation). While plan holds a `dir` change (#112), a
+// StatefulSet there keeps its pod template and lists its pods held
+// (DataDirHoldAnnotation), and one not there whose pods or volumes are is
+// not made: made now, it would be made from the new template.
+func (r *KividbClusterReconciler) applyStatefulSet(ctx context.Context, c *kividbv1alpha1.KividbCluster, desired *appsv1.StatefulSet, rollout map[string]string, plan *dataDirPlan) error {
+	template := *desired.Spec.Template.DeepCopy()
+	// A fresh map: the one on desired is c.Spec.PodAnnotations itself.
+	annotations := make(map[string]string, len(template.Annotations)+len(rollout))
+	for k, v := range template.Annotations {
+		annotations[k] = v
+	}
+	for k, v := range rollout {
+		annotations[k] = v
+	}
+	template.Annotations = annotations
+
+	held := plan.held()
+	var moves []dataDirMove
+	if held {
+		moves = plan.movesOf(desired.Name)
+		var current appsv1.StatefulSet
+		switch err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: desired.Name}, &current); {
+		case apierrors.IsNotFound(err):
+			if len(moves) > 0 {
+				return nil // made once the hold ends
+			}
+		case err != nil:
+			return err
+		}
+	}
+
 	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: c.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
 		creating := sts.CreationTimestamp.IsZero()
@@ -713,16 +763,24 @@ func (r *KividbClusterReconciler) applyStatefulSet(ctx context.Context, c *kivid
 		}
 		sts.Labels = desired.Labels
 		sts.Spec.Replicas = desired.Spec.Replicas
-		sts.Spec.Template = desired.Spec.Template
-		// A fresh map: the one on desired is c.Spec.PodAnnotations itself.
-		annotations := make(map[string]string, len(desired.Spec.Template.Annotations)+len(rollout))
-		for k, v := range desired.Spec.Template.Annotations {
-			annotations[k] = v
+		if sts.Annotations == nil {
+			sts.Annotations = map[string]string{}
 		}
-		for k, v := range rollout {
-			annotations[k] = v
+		// Held only on a StatefulSet there is, whose template is kept.
+		if held && sts.ResourceVersion != "" {
+			if len(moves) > 0 {
+				sts.Annotations[DataDirHoldAnnotation] = encodeDataDirHold(moves)
+			} else {
+				delete(sts.Annotations, DataDirHoldAnnotation)
+			}
+		} else {
+			delete(sts.Annotations, DataDirHoldAnnotation)
+			sts.Spec.Template = template
+			sts.Annotations[DataDirAnnotation] = podDataDir(&template.Spec)
 		}
-		sts.Spec.Template.Annotations = annotations
+		if len(sts.Annotations) == 0 {
+			sts.Annotations = nil
+		}
 		sts.Spec.UpdateStrategy = desired.Spec.UpdateStrategy
 		if creating {
 			// Selector, ServiceName and VolumeClaimTemplates are immutable

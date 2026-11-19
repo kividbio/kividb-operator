@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -373,5 +374,144 @@ func TestBackupKeys_OutOfReachOfOldAgents(t *testing.T) {
 		if _, ok := fs.objects[k]; !ok {
 			t.Errorf("a 0.6.x agent pruned %s", k)
 		}
+	}
+}
+
+// The engine keeps its files in the directory it changed into at start, a
+// KividbConfig `dir` under the volume (#112): the backup asks it (CONFIG
+// GET dir) and packs the files from there, not from the volume root, which
+// may still hold an older snapshot.
+func TestBackupDir_IsWhereTheEngineKeepsItsFiles(t *testing.T) {
+	vol := t.TempDir()
+	dir := filepath.Join(vol, "sub")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for p, body := range map[string]string{filepath.Join(vol, "dump.kdb"): "stale", filepath.Join(dir, "dump.kdb"): "current"} {
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rr := newRespRecorder(t, func(cmd []string) string {
+		if strings.EqualFold(strings.Join(cmd, " "), "CONFIG GET dir") {
+			return "*2\r\n" + bulk("dir") + bulk(dir)
+		}
+		return "-ERR unknown\r\n"
+	})
+	s := &server{cfg: agentConfig{KividbAddr: rr.ln.Addr().String(), DataDir: vol}}
+	got, err := s.backupDir()
+	if err != nil || got != dir {
+		t.Fatalf("backup dir %q, %v; want %q", got, err, dir)
+	}
+
+	pr, pw := io.Pipe()
+	errCh := make(chan error, 1)
+	go func() { errCh <- writeTarGz(pw, got, dataFiles) }()
+	gz, err := gzip.NewReader(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(gz)
+	hdr, err := tr.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(tr)
+	if err != nil || hdr.Name != "dump.kdb" || string(body) != "current" {
+		t.Fatalf("archive has %s %q (%v), want dump.kdb %q", hdr.Name, body, err, "current")
+	}
+	_, _ = io.Copy(io.Discard, pr)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A connection that drops before the engine answers says nothing about
+// where its files are: the backup fails, rather than pack what is in the
+// volume root, which for a `dir` under it is an older snapshot (#112).
+func TestBackupDir_NoAnswerFailsTheBackup(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	s := &server{cfg: agentConfig{KividbAddr: ln.Addr().String(), DataDir: t.TempDir()}}
+	if got, err := s.backupDir(); err == nil {
+		t.Fatalf("backup dir %q, want an error: the engine never answered", got)
+	}
+}
+
+// An engine whose files are off this pod's volume (a `dir` the operator now
+// refuses, on a cluster that already ran with it) has nothing on the volume
+// to back up: the backup fails and says where they are. An engine that
+// answers but will not say (an ACL that denies CONFIG to the default user,
+// or no such parameter) is taken to be in the volume root, as before #112.
+func TestBackupDir_OffTheVolumeOrRefused(t *testing.T) {
+	vol := t.TempDir()
+	outside := t.TempDir()
+	for _, tc := range []struct {
+		name  string
+		reply string
+		want  string // the dir; "" when the backup fails
+		err   string
+	}{
+		{"off the volume", "*2\r\n" + bulk("dir") + bulk(outside), "", "keeps its files in " + outside},
+		{"next to the volume", "*2\r\n" + bulk("dir") + bulk(vol+"2"), "", "keeps its files in " + vol + "2"},
+		{"the volume root", "*2\r\n" + bulk("dir") + bulk(vol), vol, ""},
+		{"CONFIG refused", "-NOPERM User default has no permissions to run the 'config|get' command\r\n", vol, ""},
+		{"no such parameter", "*0\r\n", vol, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := newRespRecorder(t, func([]string) string { return tc.reply })
+			s := &server{cfg: agentConfig{KividbAddr: rr.ln.Addr().String(), DataDir: vol}}
+			got, err := s.backupDir()
+			switch {
+			case tc.err != "" && (err == nil || !strings.Contains(err.Error(), tc.err) || !strings.Contains(err.Error(), vol)):
+				t.Fatalf("backup dir %q, %v; want an error saying %q and naming the volume %s", got, err, tc.err, vol)
+			case tc.err == "" && (err != nil || got != tc.want):
+				t.Fatalf("backup dir %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// When the engine will not say where its files are (CONFIG GET dir refused
+// by an ACL), the backup packs the directory its pod's command line put it
+// in, which the operator also gives the agent (ENGINE_DIR) on a pod whose
+// `dir` is under the volume, not the volume root, which may hold an older
+// snapshot (#112). One off the volume is still refused.
+func TestBackupDir_RefusedFallsBackToTheEnginesDir(t *testing.T) {
+	vol := t.TempDir()
+	sub := filepath.Join(vol, "sub")
+	refused := "-NOPERM User default has no permissions to run the 'config|get' command\r\n"
+	for _, tc := range []struct {
+		name, engineDir, reply, want, err string
+	}{
+		{"refused, with ENGINE_DIR", sub, refused, sub, ""},
+		{"no such parameter, with ENGINE_DIR", sub, "*0\r\n", sub, ""},
+		{"refused, without ENGINE_DIR", "", refused, vol, ""},
+		{"answered: the engine's word wins", sub, "*2\r\n" + bulk("dir") + bulk(vol), vol, ""},
+		{"refused, ENGINE_DIR off the volume", "/elsewhere", refused, "", "keeps its files in /elsewhere"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := newRespRecorder(t, func([]string) string { return tc.reply })
+			s := &server{cfg: agentConfig{KividbAddr: rr.ln.Addr().String(), DataDir: vol, EngineDir: tc.engineDir}}
+			got, err := s.backupDir()
+			switch {
+			case tc.err != "" && (err == nil || !strings.Contains(err.Error(), tc.err)):
+				t.Fatalf("backup dir %q, %v; want an error saying %q", got, err, tc.err)
+			case tc.err == "" && (err != nil || got != tc.want):
+				t.Fatalf("backup dir %q, %v; want %q", got, err, tc.want)
+			}
+		})
 	}
 }
