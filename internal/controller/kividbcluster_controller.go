@@ -699,8 +699,34 @@ func (r *KividbClusterReconciler) reconcileStatefulSet(ctx context.Context, c *k
 }
 
 // applyStatefulSet creates or updates the StatefulSet desired, with the
-// rollout annotations on its pod template.
+// rollout annotations on its pod template. A pod template that would move
+// a pod's files, on a cluster that holds such a change, is not applied:
+// the StatefulSet keeps its current one, and says which pods are held in
+// DataDirHoldAnnotation (#112, see dataDirHold).
 func (r *KividbClusterReconciler) applyStatefulSet(ctx context.Context, c *kividbv1alpha1.KividbCluster, desired *appsv1.StatefulSet, rollout map[string]string) error {
+	template := *desired.Spec.Template.DeepCopy()
+	// A fresh map: the one on desired is c.Spec.PodAnnotations itself.
+	annotations := make(map[string]string, len(template.Annotations)+len(rollout))
+	for k, v := range template.Annotations {
+		annotations[k] = v
+	}
+	for k, v := range rollout {
+		annotations[k] = v
+	}
+	template.Annotations = annotations
+
+	var hold []dataDirMove
+	var current appsv1.StatefulSet
+	switch err := r.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: desired.Name}, &current); {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		return err
+	default:
+		if hold, err = r.dataDirHold(ctx, c, &current, &template, rollout[ConfigHashAnnotation]); err != nil {
+			return err
+		}
+	}
+
 	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: c.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
 		creating := sts.CreationTimestamp.IsZero()
@@ -713,16 +739,16 @@ func (r *KividbClusterReconciler) applyStatefulSet(ctx context.Context, c *kivid
 		}
 		sts.Labels = desired.Labels
 		sts.Spec.Replicas = desired.Spec.Replicas
-		sts.Spec.Template = desired.Spec.Template
-		// A fresh map: the one on desired is c.Spec.PodAnnotations itself.
-		annotations := make(map[string]string, len(desired.Spec.Template.Annotations)+len(rollout))
-		for k, v := range desired.Spec.Template.Annotations {
-			annotations[k] = v
+		// Held only on a StatefulSet there is, whose template is kept.
+		if len(hold) > 0 && sts.ResourceVersion != "" {
+			if sts.Annotations == nil {
+				sts.Annotations = map[string]string{}
+			}
+			sts.Annotations[DataDirHoldAnnotation] = encodeDataDirHold(hold)
+		} else {
+			delete(sts.Annotations, DataDirHoldAnnotation)
+			sts.Spec.Template = template
 		}
-		for k, v := range rollout {
-			annotations[k] = v
-		}
-		sts.Spec.Template.Annotations = annotations
 		sts.Spec.UpdateStrategy = desired.Spec.UpdateStrategy
 		if creating {
 			// Selector, ServiceName and VolumeClaimTemplates are immutable

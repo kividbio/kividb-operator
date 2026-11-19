@@ -105,6 +105,11 @@ type fakeAgents struct {
 	// roleDelay: ROLE on an address answers this late, unless the request
 	// ends first.
 	roleDelay map[string]time.Duration
+	// dirs: what CONFIG GET dir answers on an address, "/data" if unset
+	// (#112); configRefused: it answers NOPERM there instead. Neither is
+	// recorded in calls: asking does nothing.
+	dirs          map[string]string
+	configRefused map[string]bool
 }
 
 // waitDone waits, with the lock released, for ctx to end.
@@ -136,6 +141,16 @@ const pauseDidNotTakeHold = "ERR writes in progress did not finish before the pa
 func (f *fakeAgents) execReply(ip string, st *agentapi.StatusResponse, args []string) agentapi.ExecResponse {
 	ok := agentapi.ExecResponse{Type: "status", Str: "OK"}
 	cmd := strings.ToUpper(strings.Join(args, " "))
+	if cmd == "CONFIG GET DIR" {
+		if f.configRefused[ip] {
+			return agentapi.ExecResponse{Type: "error", Str: "NOPERM User default has no permissions to run the 'config|get' command"}
+		}
+		dir := "/data"
+		if d, ok := f.dirs[ip]; ok {
+			dir = d
+		}
+		return agentapi.ExecResponse{Type: "array", Array: []agentapi.ExecResponse{{Type: "bulk", Str: "dir"}, {Type: "bulk", Str: dir}}}
+	}
 	if cmd != "ROLE" {
 		f.calls = append(f.calls, "exec "+ip+" "+strings.Join(args, " "))
 	}

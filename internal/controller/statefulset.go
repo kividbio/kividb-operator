@@ -55,21 +55,123 @@ func SetDefaultAgentImage(image string) {
 // `dir` under the volume (see podTemplate).
 const dataDirContainerName = "data-dir"
 
-// podDataDir is the directory the engine of a pod with spec keeps its
-// files in, as the spec says (#112): its data-dir init container's
-// --data-dir, or DataDir without one.
+// engineDirEnv is the agent's variable for the engine's --dir (#112), set
+// on the pod templates that pass one: the directory a backup packs when
+// the engine will not say (CONFIG GET dir refused).
+const engineDirEnv = "ENGINE_DIR"
+
+// podDataDir is the directory a pod made from spec has its engine keep its
+// files in (#112): its data-dir init container's --data-dir, or the
+// engine's --dir, or DataDir with neither. For a pod template this
+// operator renders, that is its KividbConfig's `dir` (engineDataDir). For
+// a pod, specDataDir says whether its spec says so at all.
 func podDataDir(spec *corev1.PodSpec) string {
+	if dir, ok := specDataDir(spec); ok {
+		return dir
+	}
+	return DataDir
+}
+
+// specDataDir is the directory spec has its engine keep its files in, and
+// whether spec says: through the data-dir init container or the engine's
+// --dir. A pod with neither (one made by operator 0.7.1 or earlier, or one
+// whose `dir` is DataDir) has its engine take `dir` from its config file,
+// as that file was when the engine last started: spec alone does not say
+// where that is (see podEngineDir).
+func specDataDir(spec *corev1.PodSpec) (string, bool) {
 	for _, ic := range spec.InitContainers {
 		if ic.Name != dataDirContainerName {
 			continue
 		}
-		for i, a := range ic.Args {
-			if a == "--data-dir" && i+1 < len(ic.Args) {
-				return ic.Args[i+1]
-			}
+		if v, ok := argValue(ic.Args, "--data-dir"); ok {
+			return v, true
 		}
 	}
-	return DataDir
+	for _, ct := range spec.Containers {
+		if ct.Name != kividbContainerName {
+			continue
+		}
+		if v, ok := argValue(ct.Args, "--dir"); ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// argValue is the value after the last flag in args, if any.
+func argValue(args []string, flag string) (string, bool) {
+	v, ok := "", false
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			v, ok = args[i+1], true
+		}
+	}
+	return v, ok
+}
+
+// setPodDataDir has the engine of a pod made from spec keep its files in
+// dir, replacing what spec says about it (#112): `--dir dir` on the
+// engine's command line, which wins over its config file, so an engine
+// that restarts in its pod keeps it whatever the KividbConfig says by
+// then; for a dir under DataDir, the data-dir init container, which makes
+// it before the engine starts (the engine does not, and exits at once on
+// a new volume: "Can't chdir to 'sub'"), and the agent's ENGINE_DIR.
+// podTemplate calls it only for a `dir` that is a strict subdirectory of
+// the volume, so every other pod template is as before; a StatefulSet
+// held on a dir change gets it with the pods' own dir, DataDir included
+// (see dataDirHold).
+func setPodDataDir(c *kividbv1alpha1.KividbCluster, spec *corev1.PodSpec, dir string) {
+	inits := spec.InitContainers[:0:0]
+	for _, ic := range spec.InitContainers {
+		if ic.Name != dataDirContainerName {
+			inits = append(inits, ic)
+		}
+	}
+	if dir != DataDir {
+		// With the volume's group and mode, and nothing done once it is
+		// there, as on a cluster that has run with it.
+		inits = append([]corev1.Container{{
+			Name:            dataDirContainerName,
+			Image:           agentImage(c),
+			ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
+			Args:            []string{"make-data-dir", "--volume", DataDir, "--data-dir", dir},
+			Resources:       c.Spec.AgentResources,
+			// Why it failed is its termination message, in the pod's status.
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+			VolumeMounts:             []corev1.VolumeMount{{Name: "data", MountPath: DataDir}},
+		}}, inits...)
+	}
+	if len(inits) == 0 {
+		inits = nil
+	}
+	spec.InitContainers = inits
+
+	for i := range spec.Containers {
+		ct := &spec.Containers[i]
+		switch ct.Name {
+		case kividbContainerName:
+			args := make([]string, 0, len(ct.Args)+2)
+			for j := 0; j < len(ct.Args); j++ {
+				if ct.Args[j] == "--dir" && j+1 < len(ct.Args) {
+					j++
+					continue
+				}
+				args = append(args, ct.Args[j])
+			}
+			ct.Args = append(args, "--dir", dir)
+		case "agent":
+			env := make([]corev1.EnvVar, 0, len(ct.Env)+1)
+			for _, e := range ct.Env {
+				if e.Name != engineDirEnv {
+					env = append(env, e)
+				}
+			}
+			if dir != DataDir {
+				env = append(env, corev1.EnvVar{Name: engineDirEnv, Value: dir})
+			}
+			ct.Env = env
+		}
+	}
 }
 
 func agentImage(c *kividbv1alpha1.KividbCluster) string {
@@ -401,18 +503,6 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 		kividbPorts = append(kividbPorts, corev1.ContainerPort{Name: "tls", ContainerPort: tlsPort})
 	}
 
-	// A `dir` under the volume goes on the command line too, which the
-	// engine takes over its config file. The mounted config file changes
-	// with the KividbConfig, and an engine that restarts in its pod (a
-	// crash, out of memory) reads it again: with the flag, it keeps the
-	// `dir` its pod was made for until the pod is replaced (#112). Only a
-	// strict subdirectory gets it, as only it gets the init container
-	// below, so no other pod template changes.
-	dataDir := engineDataDir(kdbConfig)
-	if dataDir != DataDir {
-		kividbArgs = append(kividbArgs, "--dir", dataDir)
-	}
-
 	kividbContainer := corev1.Container{
 		Name:            "kividb",
 		Image:           resolveImage(c),
@@ -472,27 +562,6 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 	// pod network namespace, so it is equivalent to probing kividb
 	// directly.
 
-	// The engine changes into its `dir` at start and does not create it: on
-	// a new volume a `dir` under it exits at once ("Can't chdir to 'sub'").
-	// An init container from the agent image makes it first, with the
-	// volume's group and mode, and does nothing once it is there (#112).
-	// Only a `dir` that is a strict subdirectory of the volume gets one:
-	// every other pod template is as before, so an operator upgrade
-	// restarts no other cluster.
-	var initContainers []corev1.Container
-	if dataDir != DataDir {
-		initContainers = append(initContainers, corev1.Container{
-			Name:            dataDirContainerName,
-			Image:           agentImage(c),
-			ImagePullPolicy: pullPolicyOrDefault(c.Spec.ImagePullPolicy),
-			Args:            []string{"make-data-dir", "--volume", DataDir, "--data-dir", dataDir},
-			Resources:       c.Spec.AgentResources,
-			// Why it failed is its termination message, in the pod's status.
-			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
-			VolumeMounts:             []corev1.VolumeMount{{Name: "data", MountPath: DataDir}},
-		})
-	}
-
 	containers := []corev1.Container{kividbContainer, agentContainer}
 	if c.Spec.Monitoring.Enabled {
 		containers = append(containers, corev1.Container{
@@ -512,13 +581,12 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 		})
 	}
 
-	return corev1.PodTemplateSpec{
+	t := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      labels,
 			Annotations: c.Spec.PodAnnotations,
 		},
 		Spec: corev1.PodSpec{
-			InitContainers:   initContainers,
 			Containers:       containers,
 			Volumes:          volumes,
 			Tolerations:      c.Spec.Tolerations,
@@ -544,6 +612,15 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 			TerminationGracePeriodSeconds: gracePeriod(c),
 		},
 	}
+	// The engine's `dir`, when the KividbConfig puts it in a strict
+	// subdirectory of the volume (#112): on its command line, made by an
+	// init container before it starts, and told to the agent (see
+	// setPodDataDir). Every other pod template is as before, so an
+	// operator upgrade restarts no other cluster.
+	if dir := engineDataDir(kdbConfig); dir != DataDir {
+		setPodDataDir(c, &t.Spec, dir)
+	}
+	return t
 }
 
 func pullPolicyOrDefault(p corev1.PullPolicy) corev1.PullPolicy {

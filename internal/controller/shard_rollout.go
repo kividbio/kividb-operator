@@ -276,7 +276,8 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	log := logf.FromContext(ctx)
 
 	targets := map[int32]string{}
-	templates := map[int32]*corev1.PodSpec{}
+	stss := map[int32]*appsv1.StatefulSet{}
+	var heldDirs []dataDirMove
 	for s := int32(0); s < shardCount(c); s++ {
 		var sts appsv1.StatefulSet
 		if err := r.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: shardStatefulSetName(c, s)}, &sts); err != nil {
@@ -289,7 +290,16 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 			return false // the StatefulSet controller has not seen the latest template yet
 		}
 		targets[s] = sts.Status.UpdateRevision
-		templates[s] = &sts.Spec.Template.Spec
+		stss[s] = &sts
+		if moves, ok := heldDataDirMoves(&sts); ok {
+			heldDirs = append(heldDirs, moves...)
+		}
+	}
+	// A `dir` change held back from the StatefulSets (#112): nothing is
+	// replaced until it is set back.
+	if len(heldDirs) > 0 {
+		r.rolloutHeld(c, dataDirHoldMessage(c, heldDirs, true))
+		return false
 	}
 
 	var outdated []*shardPod
@@ -320,12 +330,12 @@ func (r *KividbClusterReconciler) reconcileShardedRollout(ctx context.Context, c
 	// does not cover it.
 	var moves []dataDirMove
 	for _, p := range outdated {
-		if m, ok := dataDirMoved(p.pod, templates[p.shard]); ok {
+		if m, ok := r.dataDirMoved(ctx, p.pod, stss[p.shard]); ok {
 			moves = append(moves, m)
 		}
 	}
 	if len(moves) > 0 {
-		r.rolloutHeld(c, shardedDataDirHoldMessage(moves))
+		r.rolloutHeld(c, dataDirHoldMessage(c, moves, false))
 		return false
 	}
 

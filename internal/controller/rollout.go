@@ -239,6 +239,12 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 		}
 		return
 	}
+	// A `dir` change held back from the StatefulSet (#112): nothing is
+	// replaced, stuck or not, until it is set back or a replica added.
+	if moves, held := heldDataDirMoves(&sts); held {
+		r.rolloutHeld(c, dataDirHoldMessage(c, moves, true))
+		return
+	}
 	target := sts.Status.UpdateRevision
 	if target == "" || sts.Status.ObservedGeneration < sts.Generation {
 		return // the StatefulSet controller has not seen the latest template yet
@@ -269,12 +275,12 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 	if c.Spec.Replicas == 0 {
 		var moves []dataDirMove
 		for _, p := range outdated {
-			if m, ok := dataDirMoved(p, &sts.Spec.Template.Spec); ok {
+			if m, ok := r.dataDirMoved(ctx, p, &sts); ok {
 				moves = append(moves, m)
 			}
 		}
 		if len(moves) > 0 {
-			r.rolloutHeld(c, dataDirHoldMessage(moves))
+			r.rolloutHeld(c, dataDirHoldMessage(c, moves, false))
 			return
 		}
 	}
@@ -288,7 +294,7 @@ func (r *KividbClusterReconciler) reconcileRollout(ctx context.Context, c *kivid
 		// volume, where its replacement would not look, and a master's
 		// replicas would sync from that. Below, it is replaced as a
 		// replica, once the others are healthy, and resyncs (#112).
-		if _, moves := dataDirMoved(p, &sts.Spec.Template.Spec); moves {
+		if _, moves := r.dataDirMoved(ctx, p, &sts); moves {
 			continue
 		}
 		log.Info("rollout: replacing unready pod on an outdated template", "pod", p.Name)
