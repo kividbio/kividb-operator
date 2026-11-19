@@ -399,3 +399,28 @@ func TestBootstrapRestoresIntoTheEnginesDir(t *testing.T) {
 		}
 	}
 }
+
+// A `dir` with "$(" in it is refused (#112): Kubernetes would expand it on
+// the engine's command line (sharded pods have POD_NAME) and not in the
+// init container's arguments, which would make another directory than the
+// engine looks in.
+func TestDataDirErrorRefusesAVariable(t *testing.T) {
+	for _, dir := range []string{"$(POD_NAME)", "sub/$(POD_NAME)", "/data/$(X)/a", "$$(POD_NAME)", `"a $(B)"`} {
+		cfg := dirConfig(dir)
+		err := dataDirError(cfg)
+		if err == nil || !strings.Contains(err.Error(), `"$("`) || !strings.Contains(err.Error(), "not supported") {
+			t.Errorf("dir %q: %v, want it refused, saying why", dir, err)
+		}
+		if got := engineDataDir(cfg); got != DataDir {
+			t.Errorf("dir %q: engine data dir %s, want %s: nothing is applied with it", dir, got, DataDir)
+		}
+	}
+	for _, dir := range []string{"a$b", "$HOME", "sub$"} {
+		if err := dataDirError(dirConfig(dir)); err != nil {
+			t.Errorf("dir %q: %v, want it accepted: Kubernetes expands only $(VAR)", dir, err)
+		}
+	}
+	if err := validateKividbConfig(shardedCluster("s", 2, 0), dirConfig("n/$(POD_NAME)")); err == nil {
+		t.Error("a sharded cluster's dir with $(POD_NAME): accepted")
+	}
+}

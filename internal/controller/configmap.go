@@ -187,8 +187,22 @@ func dataDirError(kdbConfig *kividbv1alpha1.KividbConfig) error {
 			return fmt.Errorf("KividbConfig %s sets %s %q, which is %s, off the pod's volume at %s: the engine would keep its snapshot and append-only file there and lose them on every restart. Set a dir under %s, or remove it (see TROUBLESHOOTING.md for a cluster already running with it)",
 				kdbConfig.Name, k, v, p, DataDir, DataDir)
 		}
+		if hasVarRef(p) {
+			return fmt.Errorf("KividbConfig %s sets %s %q: a dir with \"$(\" in it is not supported. Kubernetes would expand it as a variable on the engine's command line (sharded pods have POD_NAME) but not where the directory is made, so the engine would look for another directory than the one made. Set a dir without \"$(\"",
+				kdbConfig.Name, k, v)
+		}
 	}
 	return nil
+}
+
+// hasVarRef reports whether dir holds "$(", which Kubernetes takes in a
+// container's arguments for a variable to expand, $(POD_NAME), or with
+// "$$(" for an escaped "$(" (#112). It would do so in the engine's --dir,
+// and not in the data-dir init container's arguments, where no such
+// variable is set: the two would name different directories. Refused
+// rather than escaped: one rule for every place `dir` goes.
+func hasVarRef(dir string) bool {
+	return strings.Contains(dir, "$(")
 }
 
 // dirValue is the directory a `dir` value names, and the number of words
@@ -225,7 +239,7 @@ func engineDataDir(kdbConfig *kividbv1alpha1.KividbConfig) string {
 			continue
 		}
 		p, words, err := dirValue(kdbConfig.Spec.Directives[k])
-		if err != nil || words != 1 || !onDataVolume(p) {
+		if err != nil || words != 1 || !onDataVolume(p) || hasVarRef(p) {
 			return DataDir
 		}
 		dir = p
