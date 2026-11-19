@@ -224,6 +224,8 @@ func (s *server) streamUpload(ctx context.Context, client *minio.Client, objectK
 	info, err := client.PutObject(ctx, s.cfg.S3Bucket, objectKey, pr, -1, minio.PutObjectOptions{
 		ContentType: "application/gzip",
 	})
+	// PutObject may stop reading early; unblock the writer.
+	pr.CloseWithError(err)
 	if writeErr := <-errCh; writeErr != nil && err == nil {
 		err = writeErr
 	}
