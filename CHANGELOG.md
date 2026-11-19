@@ -62,29 +62,41 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   `dir` until the pod is replaced. Only a cluster whose `dir` is a strict subdirectory of
   `/data` gets the init container: its pods roll once on upgrade, and no
   other cluster's do. A change to `dir` that would move a running pod's
-  files is held where nothing could resync them: on a cluster with no
-  replicas, whose pod would start empty in the new directory and the
-  scheduled backups upload that, and on every sharded cluster, as not
-  supported yet (each node keeps its `nodes.conf` there too). The rollout
-  says so (`RolloutProgressing` False, `WouldLoseData`), and until the
-  hold ends the StatefulSet keeps its current pod template, all of it: a
-  pod recreated meanwhile (a node drain, an eviction, `kubectl delete
-  pod`, a `KividbDbOps` restart) comes back as it was, on its own files,
-  and other changes to the pod template, an image say, wait too. Set
-  `dir` back, or, on a replicated cluster whose pod is Ready, add a
-  replica, which syncs first. A pod whose `dir` moves is not replaced as
-  a stuck pod either, replicas or not. A pod made by an earlier operator
-  takes `dir` from its config file, and may run in one made by hand: its
-  engine is asked where its files are (`CONFIG GET dir`, through the
-  agent), and while it cannot say (not running, or `CONFIG` denied to the
-  default user) such a cluster is held the same way, and the message
-  says so. To see where a pod's files are, ask its engine with
-  `redis-cli ... CONFIG GET dir` from another pod, as a user allowed
-  `CONFIG` (TROUBLESHOOTING.md, "Where a pod keeps its files"). When
-  `CONFIG` is denied, a backup reads the directory the pod's own `--dir`
-  names, not `/data`. A `dir` with `$(` in it is refused (`InvalidSpec`):
-  Kubernetes would expand it on the engine's command line but not where
-  the directory is made.
+  files is held where nothing could resync them: on a replicated cluster
+  with no replica Ready and in sync, whose pod would start empty in the
+  new directory and the scheduled backups upload that, and on every
+  sharded cluster, as not supported yet (each node keeps its `nodes.conf`
+  there too). The rollout says so (`RolloutProgressing` False,
+  `WouldLoseData`), and until the hold ends the StatefulSet keeps its
+  current pod template, all of it, and the config file its current `dir`
+  (its other directives are updated): a pod recreated meanwhile (a node
+  drain, an eviction, `kubectl delete pod`, a `KividbDbOps` restart), or
+  an engine restarting in its pod, starts in the directory its files are
+  in. Other changes to the pod template, an image say, wait too. A
+  StatefulSet deleted with its pods orphaned is not made again while the
+  hold lasts, and one scaled to 0 is held for the pods it would make
+  again. Set `dir` back, or, on a replicated cluster whose master is
+  Ready, add a replica: it is made from the template kept, syncs in the
+  master's directory, and once it is in sync the change goes ahead,
+  replica first. A pod whose `dir` moves is not replaced as a stuck pod
+  either, replicas or not. Each StatefulSet records the `dir` it was last
+  applied for (`kividb.io/data-dir`, on the StatefulSet, so no pod rolls
+  for it). A pod made by an earlier operator takes `dir` from its config
+  file and may run in one made by hand: when a `dir` change is involved,
+  its engine is asked where its files are (`CONFIG GET dir`, through the
+  agent, in the background so that failover never waits on it), and while
+  it cannot say (not running, or `CONFIG` denied to the default user) the
+  change is held, and the message says the operator could not ask. A
+  change to any other directive is never held. To see where a pod's files
+  are, ask its engine with `redis-cli ... CONFIG GET dir` from another
+  pod, as a user allowed `CONFIG` (TROUBLESHOOTING.md, "Where a pod keeps
+  its files"). When `CONFIG` is denied, a backup reads the directory the
+  pod's own `--dir` names, not `/data`. A `dir` with `$(` in it is
+  refused (`InvalidSpec`): Kubernetes would expand it on the engine's
+  command line but not where the directory is made. A cluster already
+  running with one gets the condition on upgrade and is left as it is;
+  fixing `dir` moves its files, so follow the way out for a `dir` off the
+  volume in TROUBLESHOOTING.md.
 - **An `INFO keyspace` reply the agent could not read counted as 0 keys.**
   The agent reported a known count of 0 for any reply it found no database
   line in, the empty reply an engine gives for a section it does not have
