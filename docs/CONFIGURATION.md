@@ -976,6 +976,14 @@ spec:
 
 Merged onto every pod's metadata, in addition to the operator's own
 `app.kubernetes.io/*`, `kividb.io/cluster` and `kividb.io/role` labels.
+The operator's own labels win: a `podLabels` key that would set
+`app.kubernetes.io/name`, `app.kubernetes.io/instance`,
+`app.kubernetes.io/managed-by`, `kividb.io/cluster` or, on a sharded
+cluster, `kividb.io/shard` to another value is ignored. Most of them are
+the StatefulSet's selector, and the API server refuses a StatefulSet
+whose pods it does not match. `kividb.io/role` is ignored too: the
+operator sets each pod's role itself. A `PodLabelsIgnored` Warning Event
+names the keys ignored, once each time they change.
 
 ### Status fields (read-only, set by the operator)
 

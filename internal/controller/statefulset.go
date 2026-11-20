@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 
 	kividbv1alpha1 "github.com/kividbio/kividb-operator/api/v1alpha1"
@@ -415,11 +416,57 @@ func exporterEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.Kivi
 	return env
 }
 
-func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) corev1.PodTemplateSpec {
+// operatorPodLabels are the labels the operator gives a pod itself:
+// commonLabels, and on a shard's pods (shard non-nil) ShardLabel.
+func operatorPodLabels(c *kividbv1alpha1.KividbCluster, shard *int32) map[string]string {
 	labels := commonLabels(c)
+	if shard != nil {
+		labels[ShardLabel] = strconv.Itoa(int(*shard))
+	}
+	return labels
+}
+
+// podLabels gives the labels of a pod template, a shard's (shard
+// non-nil) or a replicated cluster's: spec.podLabels first, then the
+// operator's own (operatorPodLabels), which win, so the template always
+// matches the StatefulSet's selector (the API server refuses one that
+// does not). RoleLabel is never taken from spec.podLabels: the
+// controller sets it on each live pod (see podTemplate). Every pod
+// template's labels come from here, so that order cannot drift;
+// ignoredPodLabels names the keys it leaves out.
+func podLabels(c *kividbv1alpha1.KividbCluster, shard *int32) map[string]string {
+	labels := make(map[string]string, len(c.Spec.PodLabels)+5)
 	for k, v := range c.Spec.PodLabels {
+		if k != kividbv1alpha1.RoleLabel {
+			labels[k] = v
+		}
+	}
+	for k, v := range operatorPodLabels(c, shard) {
 		labels[k] = v
 	}
+	return labels
+}
+
+// ignoredPodLabels lists, sorted, the keys of spec.podLabels the pods do
+// not get as given: RoleLabel; one of commonLabels set to another value;
+// and, on a sharded cluster, ShardLabel, which each shard's pods get
+// their own value of. A key set to the operator's own value changes
+// nothing, and is not listed.
+func ignoredPodLabels(c *kividbv1alpha1.KividbCluster) []string {
+	own := commonLabels(c)
+	var keys []string
+	for k, v := range c.Spec.PodLabels {
+		ownV, ok := own[k]
+		if k == kividbv1alpha1.RoleLabel || (ok && ownV != v) || (k == ShardLabel && isSharded(c)) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) corev1.PodTemplateSpec {
+	labels := podLabels(c, nil)
 	// RoleLabel starts unset; the controller assigns it once the pod is
 	// Ready and a role has been decided (see internal/controller/failover.go).
 	// It is intentionally omitted from the template so StatefulSet's

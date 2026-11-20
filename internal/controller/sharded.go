@@ -210,7 +210,7 @@ func shardAntiAffinity(c *kividbv1alpha1.KividbCluster, shard int32) *corev1.Aff
 
 func shardPodTemplate(c *kividbv1alpha1.KividbCluster, shard int32, kdbConfig *kividbv1alpha1.KividbConfig, aclConfig *kividbv1alpha1.KividbAclConfig, snapCfg *kividbv1alpha1.KividbSnapshotConfig) corev1.PodTemplateSpec {
 	t := podTemplate(c, kdbConfig, aclConfig, snapCfg)
-	t.Labels[ShardLabel] = strconv.Itoa(int(shard))
+	t.Labels = podLabels(c, &shard)
 	if c.Spec.Affinity == nil {
 		t.Spec.Affinity = shardAntiAffinity(c, shard)
 	}
