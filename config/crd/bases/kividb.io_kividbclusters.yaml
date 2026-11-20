@@ -238,7 +238,7 @@ spec:
                 podLabels:
                   type: object
                   additionalProperties: {type: string}
-                  description: Labels merged onto every pod. The operator's own labels win over a key set here (app.kubernetes.io/name, app.kubernetes.io/instance, app.kubernetes.io/managed-by, kividb.io/cluster, and kividb.io/shard on a sharded cluster), and kividb.io/role is never taken from it; such a key is ignored, with a PodLabelsIgnored Warning Event.
+                  description: Labels merged onto every pod. The labels the StatefulSet selects its pods by win over a key set here (app.kubernetes.io/name, app.kubernetes.io/instance, kividb.io/cluster, and kividb.io/shard on a sharded cluster), and kividb.io/role is never taken from it; such a key is ignored, with a PodLabelsIgnored Warning Event. Any other key, app.kubernetes.io/managed-by too, is set as given.
                 terminationGracePeriodSeconds:
                   type: integer
                   format: int64

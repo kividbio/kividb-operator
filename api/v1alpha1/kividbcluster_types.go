@@ -392,11 +392,12 @@ type KividbClusterSpec struct {
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
 
 	// PodLabels merged onto every pod, in addition to the operator's own
-	// labels, which win: app.kubernetes.io/name, app.kubernetes.io/instance,
-	// app.kubernetes.io/managed-by, ClusterLabel and, on a sharded cluster,
-	// kividb.io/shard. One of them set here to another value is ignored, as
-	// is RoleLabel, which the controller sets on each pod. A
-	// PodLabelsIgnored Warning Event names what is ignored.
+	// labels. The ones the StatefulSet selects its pods by win:
+	// app.kubernetes.io/name, app.kubernetes.io/instance, ClusterLabel and,
+	// on a sharded cluster, kividb.io/shard. One of them set here to another
+	// value is ignored, as is RoleLabel, which the controller sets on each
+	// pod; a PodLabelsIgnored Warning Event names what is ignored. Any
+	// other key, app.kubernetes.io/managed-by too, is set as given.
 	// +optional
 	PodLabels map[string]string `json:"podLabels,omitempty"`
 

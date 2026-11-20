@@ -416,10 +416,12 @@ func exporterEnv(c *kividbv1alpha1.KividbCluster, aclConfig *kividbv1alpha1.Kivi
 	return env
 }
 
-// operatorPodLabels are the labels the operator gives a pod itself:
-// commonLabels, and on a shard's pods (shard non-nil) ShardLabel.
+// operatorPodLabels are the labels a pod always gets from the operator,
+// whatever spec.podLabels says: selectorLabels, and on a shard's pods
+// (shard non-nil) ShardLabel. app.kubernetes.io/managed-by is not one:
+// nothing selects pods by it, so spec.podLabels may set it.
 func operatorPodLabels(c *kividbv1alpha1.KividbCluster, shard *int32) map[string]string {
-	labels := commonLabels(c)
+	labels := selectorLabels(c)
 	if shard != nil {
 		labels[ShardLabel] = strconv.Itoa(int(*shard))
 	}
@@ -427,15 +429,15 @@ func operatorPodLabels(c *kividbv1alpha1.KividbCluster, shard *int32) map[string
 }
 
 // podLabels gives the labels of a pod template, a shard's (shard
-// non-nil) or a replicated cluster's: spec.podLabels first, then the
-// operator's own (operatorPodLabels), which win, so the template always
-// matches the StatefulSet's selector (the API server refuses one that
-// does not). RoleLabel is never taken from spec.podLabels: the
-// controller sets it on each live pod (see podTemplate). Every pod
-// template's labels come from here, so that order cannot drift;
+// non-nil) or a replicated cluster's: commonLabels, then spec.podLabels,
+// then operatorPodLabels, which win, so the template always matches the
+// StatefulSet's selector (the API server refuses one that does not).
+// RoleLabel is never taken from spec.podLabels: the controller sets it on
+// each live pod (see podTemplate). Every other key is the user's to set.
+// Every pod template's labels come from here, so that order cannot drift;
 // ignoredPodLabels names the keys it leaves out.
 func podLabels(c *kividbv1alpha1.KividbCluster, shard *int32) map[string]string {
-	labels := make(map[string]string, len(c.Spec.PodLabels)+5)
+	labels := commonLabels(c)
 	for k, v := range c.Spec.PodLabels {
 		if k != kividbv1alpha1.RoleLabel {
 			labels[k] = v
@@ -448,12 +450,12 @@ func podLabels(c *kividbv1alpha1.KividbCluster, shard *int32) map[string]string 
 }
 
 // ignoredPodLabels lists, sorted, the keys of spec.podLabels the pods do
-// not get as given: RoleLabel; one of commonLabels set to another value;
-// and, on a sharded cluster, ShardLabel, which each shard's pods get
-// their own value of. A key set to the operator's own value changes
+// not get as given: RoleLabel; one of selectorLabels set to another
+// value; and, on a sharded cluster, ShardLabel, which each shard's pods
+// get their own value of. A key set to the operator's own value changes
 // nothing, and is not listed.
 func ignoredPodLabels(c *kividbv1alpha1.KividbCluster) []string {
-	own := commonLabels(c)
+	own := selectorLabels(c)
 	var keys []string
 	for k, v := range c.Spec.PodLabels {
 		ownV, ok := own[k]

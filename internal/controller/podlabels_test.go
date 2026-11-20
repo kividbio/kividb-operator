@@ -12,10 +12,10 @@ import (
 	"k8s.io/client-go/tools/record"
 )
 
-// Issue #122: a spec.podLabels key must not take over one of the
-// operator's labels. The template has to match the StatefulSet's
-// selector, or the API server refuses the StatefulSet, and RoleLabel is
-// the controller's to set on each live pod.
+// Issue #122: a spec.podLabels key must not take over a label the
+// StatefulSet selects its pods by, or the API server refuses the
+// StatefulSet, nor RoleLabel, the controller's to set on each live pod.
+// Any other key, app.kubernetes.io/managed-by too, is the user's.
 func TestPodLabelsDoNotOverrideTheOperatorsLabels(t *testing.T) {
 	for _, tc := range []struct {
 		key, value string
@@ -27,7 +27,7 @@ func TestPodLabelsDoNotOverrideTheOperatorsLabels(t *testing.T) {
 		{kividbv1alpha1.ClusterLabel, "c1", false}, // the operator's own value
 		{"app.kubernetes.io/instance", "other", true},
 		{"app.kubernetes.io/name", "other", true},
-		{"app.kubernetes.io/managed-by", "someone-else", true},
+		{"app.kubernetes.io/managed-by", "other", false}, // not in the selector: the user's
 		{kividbv1alpha1.RoleLabel, string(kividbv1alpha1.RoleMaster), true},
 		{kividbv1alpha1.RoleLabel, string(kividbv1alpha1.RoleReplica), true},
 	} {
@@ -46,7 +46,7 @@ func TestPodLabelsDoNotOverrideTheOperatorsLabels(t *testing.T) {
 						t.Errorf("%s: template label %s=%q, the selector wants %q", name, k, got[k], v)
 					}
 				}
-				for k, v := range commonLabels(c) {
+				for k, v := range selectorLabels(c) {
 					if got[k] != v {
 						t.Errorf("%s: template label %s=%q, want the operator's %q", name, k, got[k], v)
 					}
@@ -94,15 +94,19 @@ func TestPodLabelsShardLabel(t *testing.T) {
 	}
 }
 
-// A cluster with ordinary podLabels gets a byte-identical pod template
-// after #122: nothing rolls on upgrade. The labels are all that #122
+// A cluster with ordinary podLabels, managed-by set to another value
+// among them, gets a byte-identical pod template after #122: nothing
+// rolls on upgrade. The labels are all that #122
 // changes in the template, so "before" is today's template with its
 // labels made the way they were: commonLabels, spec.podLabels over them,
 // and on a shard's template ShardLabel over those.
 func TestPodLabelsLeaveAnOrdinaryTemplateAsItWas(t *testing.T) {
 	c := testCluster("c1")
 	c.Spec.Storage.Size = "1Gi"
-	c.Spec.PodLabels = map[string]string{"team": "a", "app.kubernetes.io/part-of": "shop", kividbv1alpha1.ClusterLabel: "c1"}
+	c.Spec.PodLabels = map[string]string{
+		"team": "a", "app.kubernetes.io/part-of": "shop", kividbv1alpha1.ClusterLabel: "c1",
+		"app.kubernetes.io/managed-by": "other", // an override that worked before #122, and still does
+	}
 	oldLabels := func(extra map[string]string) map[string]string {
 		l := commonLabels(c)
 		for k, v := range c.Spec.PodLabels {

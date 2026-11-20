@@ -524,9 +524,9 @@ func (r *KividbClusterReconciler) emitVariantGuidance(c *kividbv1alpha1.KividbCl
 }
 
 // emitIgnoredPodLabels warns about the spec.podLabels keys the pods do
-// not get as given (ignoredPodLabels): the operator's own labels win, or
-// the StatefulSet's selector would no longer match its pods, and RoleLabel
-// is the controller's to set. Once per change of those keys, not on each
+// not get as given (ignoredPodLabels): the selector labels win, or the
+// StatefulSet's selector would no longer match its pods, and RoleLabel is
+// the controller's to set. Once per change of those keys, not on each
 // pass; none ignored, nothing is said, and the next one is told again.
 // An operator that restarts tells each such cluster once more.
 func (r *KividbClusterReconciler) emitIgnoredPodLabels(c *kividbv1alpha1.KividbCluster) {

@@ -46,21 +46,20 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 
 ### Fixed
 
-- **The operator's own pod labels win over `spec.podLabels`** (#122). A
-  `podLabels` key that sets `app.kubernetes.io/name`,
-  `app.kubernetes.io/instance`, `app.kubernetes.io/managed-by`,
-  `kividb.io/cluster` or, on a sharded cluster, `kividb.io/shard` to
-  another value is ignored, so the pod template always matches the
-  StatefulSet's selector and the API server accepts it: a new cluster
-  gets its pods, and a running one its updates, on every shard too.
-  `kividb.io/role` is never taken from `podLabels`; the operator sets
-  each pod's role itself. A `PodLabelsIgnored` Warning Event names the
-  keys ignored, once each time they change. A cluster with none of these
-  keys keeps its pod template, and so does one whose StatefulSet updates
-  were refused over a selector key. One that sets `kividb.io/role`, or
-  `app.kubernetes.io/managed-by` to another value, rolls once, through
-  the operator's usual rollout: one pod at a time, replicas before the
-  master.
+- **The StatefulSet's selector labels win over `spec.podLabels`** (#122).
+  A `podLabels` key that sets `app.kubernetes.io/name`,
+  `app.kubernetes.io/instance`, `kividb.io/cluster` or, on a sharded
+  cluster, `kividb.io/shard` to another value is ignored, so the pod
+  template always matches the StatefulSet's selector and the API server
+  accepts it: a new cluster gets its pods, and a running one its updates,
+  on every shard too. `kividb.io/role` is never taken from `podLabels`;
+  the operator sets each pod's role itself. A `PodLabelsIgnored` Warning
+  Event names the keys ignored, once each time they change. Every other
+  key, `app.kubernetes.io/managed-by` too, is set as given. A cluster
+  with none of the ignored keys keeps its pod template, and so does one
+  whose StatefulSet updates were refused over a selector key. One with
+  `kividb.io/role` in `podLabels` rolls once, through the operator's
+  usual rollout: one pod at a time, replicas before the master.
 - **The GUI's Take snapshot runs the backup CronJob on every cluster**
   (#120). On a replicated cluster it now starts a Job from the backup
   CronJob, as it already did for a sharded one, so the run is recorded as
