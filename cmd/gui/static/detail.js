@@ -862,13 +862,12 @@
         title: "Take a snapshot now?",
         message: sharded()
           ? "A backup run starts now: every shard is saved and uploaded under one run, with a manifest. It shows under Backups when done."
-          : "The master's data is saved and uploaded to the configured object store.",
+          : "A backup run starts now, as a Job from the backup CronJob: the configured source pod is saved and uploaded. It shows under Backups when done.",
         confirmText: "Take snapshot",
       }).then(function (ok) {
         if (ok)
           act(KV.sendJSON("POST", base() + "/snapshot", {}), function (j) {
-            if (j.job) return "Backup run started (" + j.job + ")";
-            return "Snapshot uploaded" + (j.objectKey ? ": " + j.objectKey : "");
+            return "Backup run started (" + j.job + ")";
           });
       });
     });

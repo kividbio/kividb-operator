@@ -73,7 +73,7 @@ rules:
       - get
       - list
       - watch
-  # A sharded cluster's "Take snapshot": a Job from its backup CronJob.
+  # "Take snapshot": a Job from the cluster's backup CronJob.
   - apiGroups:
       - batch
     resources:

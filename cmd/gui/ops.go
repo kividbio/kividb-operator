@@ -552,62 +552,14 @@ func (s *server) handleAPISnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("cluster has no snapshotConfigRef — configure backups first"))
 		return
 	}
-	if c.Spec.Shards != nil {
-		s.snapshotFromCronJob(w, r, c)
-		return
-	}
-	pods, err := s.clientset.CoreV1().Pods(namespace).List(r.Context(), metav1.ListOptions{
-		LabelSelector: clusterLabelSelector(name) + ",kividb.io/role=master",
-	})
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if len(pods.Items) == 0 || pods.Items[0].Status.PodIP == "" {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("no ready master pod to snapshot"))
-		return
-	}
-	out, err := postAgentJSONTimeout(r.Context(), pods.Items[0].Status.PodIP, "/backup", nil, 5*time.Minute)
-	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(out)
+	s.snapshotFromCronJob(w, r, c)
 }
 
-func postAgentJSONTimeout(ctx context.Context, podIP, path string, payload any, timeout time.Duration) ([]byte, error) {
-	var body io.Reader
-	if payload != nil {
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return nil, err
-		}
-		body = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s:8081%s", podIP, path), body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	agentapi.SetToken(req, agentToken())
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("agent %s: %s", path, string(respBody))
-	}
-	return respBody, nil
-}
-
-// snapshotFromCronJob starts a sharded cluster's backup run now: a Job
-// from the backup CronJob's template, as `kubectl create job --from`
-// does. The operator records it as a KividbSnapshot like a scheduled one.
+// snapshotFromCronJob starts the cluster's backup run now: a Job from the
+// backup CronJob's template, as `kubectl create job --from` does. The
+// Job's backup-trigger picks the pod by the KividbSnapshotConfig's source
+// when it runs, waits as long as its timeoutSeconds, and the operator
+// records the run as a KividbSnapshot like a scheduled one.
 func (s *server) snapshotFromCronJob(w http.ResponseWriter, r *http.Request, c *kividbv1alpha1.KividbCluster) {
 	cj, err := s.clientset.BatchV1().CronJobs(c.Namespace).Get(r.Context(), backupCronJobName(c.Name), metav1.GetOptions{})
 	if err != nil {

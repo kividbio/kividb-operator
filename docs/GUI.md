@@ -47,7 +47,10 @@ listing the dashboard is still one `List` of `KividbCluster`s.
   a rolling restart, delete. Each asks first, in a dialog; deleting asks for
   the cluster's name. Each rolling restart is a `KividbDbOps`; a second one
   of the same cluster stays `Pending` (condition `Queued`) and starts when
-  the one ahead completes, fails or is deleted.
+  the one ahead completes, fails or is deleted. **Take snapshot** starts a
+  backup run now: a Job from the backup CronJob, so it backs up the pod the
+  `KividbSnapshotConfig`'s `source` names, waits its `timeoutSeconds`, and
+  shows under Backups like a scheduled run.
 - **Overview**: the **topology** (the master and its replicas, with each
   one's readiness, memory, keys, replication offset and node, and how far
   each replica is behind the master), the pods (restart or promote one),
@@ -241,8 +244,8 @@ kubectl -n kividb-operator-system port-forward svc/kividb-operator-gui 8090:8090
 services, events, statefulsets, cronjobs; `get`/`list` on storageclasses
 (the new-cluster form); **`create`, `patch`, `update` and `delete` on
 `kividbclusters`**; **`create` on `kividbdbops`**; **`delete` on pods**;
-**`get` on `pods/log`**; **`create` on `jobs`** (a sharded cluster's
-snapshot); **`create` on `events`** (the `ShardSwitchover` Event of a shard
+**`get` on `pods/log`**; **`create` on `jobs`** (a snapshot, run from
+the backup CronJob); **`create` on `events`** (the `ShardSwitchover` Event of a shard
 promote). Never `secrets` via the API clients.
 
 ## Building the image
