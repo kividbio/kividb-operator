@@ -111,6 +111,11 @@ type KividbClusterReconciler struct {
 	// reconcileServiceMonitor.
 	serviceMonitorWarned sync.Map
 
+	// podLabelsWarned: the spec.podLabels keys each cluster was last told
+	// are ignored ("<ns>/<cluster>" -> the keys, comma-separated), see
+	// emitIgnoredPodLabels.
+	podLabelsWarned sync.Map
+
 	// serviceMonitorGone: the clusters, with serviceMonitor off, found to
 	// have no ServiceMonitor of their own ("<ns>/<cluster>" -> struct{}).
 	serviceMonitorGone sync.Map
@@ -152,6 +157,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if apierrors.IsNotFound(err) {
 			// A cluster made again under this name is told again.
 			r.serviceMonitorWarned.Delete(req.String())
+			r.podLabelsWarned.Delete(req.String())
 			r.serviceMonitorGone.Delete(req.String())
 			return ctrl.Result{}, nil
 		}
@@ -194,6 +200,7 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	r.emitVariantGuidance(&c, kdbConfig)
+	r.emitIgnoredPodLabels(&c)
 
 	secretValues, err := r.resolveSecretValues(ctx, &c, aclConfig)
 	if err != nil {
@@ -514,6 +521,28 @@ func (r *KividbClusterReconciler) emitVariantGuidance(c *kividbv1alpha1.KividbCl
 			"the referenced KividbConfig has spec.tls.enabled: true, but spec.variant is not \"tls\" or \"full\" -- "+
 				"set spec.variant accordingly and make sure spec.image points at a TLS-capable build, or the TLS listener will not come up.")
 	}
+}
+
+// emitIgnoredPodLabels warns about the spec.podLabels keys the pods do
+// not get as given (ignoredPodLabels): the selector labels win, or the
+// StatefulSet's selector would no longer match its pods, and RoleLabel is
+// the controller's to set. Once per change of those keys, not on each
+// pass; none ignored, nothing is said, and the next one is told again.
+// An operator that restarts tells each such cluster once more.
+func (r *KividbClusterReconciler) emitIgnoredPodLabels(c *kividbv1alpha1.KividbCluster) {
+	key := c.Namespace + "/" + c.Name
+	keys := ignoredPodLabels(c)
+	if len(keys) == 0 {
+		r.podLabelsWarned.Delete(key)
+		return
+	}
+	joined := strings.Join(keys, ", ")
+	if prev, ok := r.podLabelsWarned.Load(key); ok && prev == joined {
+		return
+	}
+	r.podLabelsWarned.Store(key, joined)
+	r.event(c, corev1.EventTypeWarning, "PodLabelsIgnored",
+		"spec.podLabels sets %s, which the operator sets on the pods itself: ignored", joined)
 }
 
 // resolveKividbConfig fetches the KividbConfig named by spec.configRef, if
