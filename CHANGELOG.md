@@ -46,15 +46,12 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 
 ### Fixed
 
-- **The GUI's Take snapshot on a replicated cluster left no
-  `KividbSnapshot`** (#120). It asked the master's agent for a backup
-  itself, so the upload never showed under Backups or in `kubectl get
-  kdbs`, the `KividbSnapshotConfig`'s `source: replica` was ignored, and
-  the GUI gave up after 5 minutes whatever its `timeoutSeconds`. The
-  upload still counted towards `retention`, so it could prune the archive
-  of the oldest recorded backup. It now starts a Job from the backup
-  CronJob, as it already did for a sharded cluster, and the run is
-  recorded like a scheduled one.
+- **The GUI's Take snapshot runs the backup CronJob on every cluster**
+  (#120). On a replicated cluster it now starts a Job from the backup
+  CronJob, as it already did for a sharded one, so the run is recorded as
+  a `KividbSnapshot`, backs up the pod the `KividbSnapshotConfig`'s
+  `source` names, waits its `timeoutSeconds`, and counts towards
+  `retention` like a scheduled run.
 - **A `KividbConfig` `dir` under `/data` was missed by backups and
   restores, and a new cluster with one did not start** (#112). The engine
   keeps its snapshot and append-only file in `dir`, but a backup packed

@@ -183,6 +183,10 @@ Either way, the next reconcile picks up the resulting Job/pod and creates
 a `KividbSnapshot` for it exactly as it would for a scheduled run — there
 is no separate "manual backup" record type.
 
+The GUI's **Take snapshot** does the same: it starts a run of the backup
+CronJob, on a replicated cluster as on a sharded one, so `source`,
+`timeoutSeconds` and `retention` apply to it like a scheduled one.
+
 ## Checking backup status
 
 ```bash
