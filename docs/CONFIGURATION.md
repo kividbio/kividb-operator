@@ -251,7 +251,7 @@ replicas anyway: [When the master restarts behind its replicas](#failover)
 for a replicated cluster, and the `MasterRestartedEmpty` check in
 [Sharded clusters](#sharded-clusters-shards).
 
-### Scheduling: `tolerations`, `nodeSelector`, `affinity`
+### Scheduling: `tolerations`, `nodeSelector`, `affinity`, `topologySpreadConstraints`, `priorityClassName`
 
 ```yaml
 spec:
@@ -270,6 +270,28 @@ injects a *preferred* (not required) pod anti-affinity rule spreading the
 cluster's pods across distinct nodes by `kubernetes.io/hostname` — set
 your own `affinity` to override this entirely (there is no way to keep the
 default and add to it; an explicit `affinity` replaces it).
+
+`topologySpreadConstraints` (standard `TopologySpreadConstraint[]`) and
+`priorityClassName` are applied verbatim to every pod as well, with no
+default. Spread constraints add to `affinity` (or the default
+anti-affinity) rather than replace it; select the cluster's pods by the
+`kividb.io/cluster` label, and a shard's by `kividb.io/shard` too. For
+example, to spread across zones and keep the pods from being preempted by
+lower-priority workloads:
+
+```yaml
+spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway   # DoNotSchedule to require it
+      labelSelector:
+        matchLabels:
+          kividb.io/cluster: my-cluster
+  priorityClassName: kividb-high        # a PriorityClass you created
+```
+
+Changing either rolls the cluster's pods, as any pod template change does.
 
 ### `resources` / `agentResources` / `exporterResources`
 

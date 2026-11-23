@@ -635,12 +635,14 @@ func podTemplate(c *kividbv1alpha1.KividbCluster, kdbConfig *kividbv1alpha1.Kivi
 			Annotations: c.Spec.PodAnnotations,
 		},
 		Spec: corev1.PodSpec{
-			Containers:       containers,
-			Volumes:          volumes,
-			Tolerations:      c.Spec.Tolerations,
-			NodeSelector:     c.Spec.NodeSelector,
-			Affinity:         affinity,
-			ImagePullSecrets: c.Spec.ImagePullSecrets,
+			Containers:                containers,
+			Volumes:                   volumes,
+			Tolerations:               c.Spec.Tolerations,
+			NodeSelector:              c.Spec.NodeSelector,
+			Affinity:                  affinity,
+			TopologySpreadConstraints: c.Spec.TopologySpreadConstraints,
+			PriorityClassName:         c.Spec.PriorityClassName,
+			ImagePullSecrets:          c.Spec.ImagePullSecrets,
 			// kividb's own image runs as a non-root "kividb" user (see its
 			// Dockerfile: `useradd -ms /bin/bash kividb`), whose UID is
 			// whatever useradd happened to assign -- not something this
