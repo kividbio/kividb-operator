@@ -74,8 +74,12 @@ releases can run side by side, one per team namespace, each with its own
 KividbClusters in other namespaces are ignored. If you restrict an existing
 install, the clusters outside `team-a` keep running but are no longer
 reconciled: no failover, no backups, no spec changes. Deleting one still
-works (the operator sets no finalizers), and its owned objects are removed
-by garbage collection.
+works (the operator sets no finalizers on clusters), and its owned objects
+are removed by garbage collection. A `KividbConfig`, `KividbAclConfig` or
+`KividbSnapshotConfig` there that was in use when the namespace stopped
+being watched keeps its `kividb.io/in-use` finalizer, and a delete of it
+stays Terminating: clear the finalizer by hand, as in
+[Uninstalling](#uninstalling).
 
 Without Helm, set `WATCH_NAMESPACE` on the manager to one namespace or a
 comma-separated list (OLM does this for an OperatorGroup's target
@@ -134,6 +138,24 @@ kubectl delete crd kividbclusters.kividb.io kividbconfigs.kividb.io \
   kividbaclconfigs.kividb.io kividbsnapshotconfigs.kividb.io kividbsnapshots.kividb.io
 ```
 
+A `KividbConfig`, `KividbAclConfig` or `KividbSnapshotConfig` that a
+cluster references carries the `kividb.io/in-use` finalizer, which the
+operator removes once nothing references it. Delete the clusters while the
+operator is still running and it clears them itself. If you uninstalled the
+operator first, a config that still had the finalizer stays Terminating
+(and so does `kubectl delete crd` for its kind, and a namespace delete).
+Clear the finalizer by hand:
+
+```bash
+for kind in kividbconfig kividbaclconfig kividbsnapshotconfig; do
+  kubectl get "$kind" -A -o jsonpath='{range .items[*]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' |
+  while read -r ns name; do
+    kubectl patch "$kind" "$name" -n "$ns" --type=json \
+      -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+  done
+done
+```
+
 **`kubectl delete crd` deletes every object of that kind across every
 namespace in the cluster** — for `kividbclusters.kividb.io` specifically,
 that cascades to their PVCs' reclaim policy. Double-check you mean
@@ -181,6 +203,11 @@ kubectl apply -f config/manager/manager.yaml
 kubectl apply -k config/default      # upgrade: re-applies everything, including the CRD this time
 kubectl delete -k config/default     # uninstall: removes CRD, RBAC and the manager Deployment
 ```
+
+`kubectl delete -k config/default` removes the manager before the CRDs, so
+delete your clusters first, or clear the configs' `kividb.io/in-use`
+finalizer as in [Uninstalling](#uninstalling); otherwise the deletion of a
+config CRD waits on the configs that still hold it.
 
 Unlike the Helm path, `kubectl apply -k config/default` **does** update
 the CRD on every apply, since there's no Helm `crds/`-style special

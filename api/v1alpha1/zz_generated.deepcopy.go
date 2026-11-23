@@ -544,6 +544,12 @@ func (in *KividbConfigStatus) DeepCopyInto(out *KividbConfigStatus) {
 		out.UsedBy = make([]string, len(in.UsedBy))
 		copy(out.UsedBy, in.UsedBy)
 	}
+	if in.Conditions != nil {
+		out.Conditions = make([]metav1.Condition, len(in.Conditions))
+		for i := range in.Conditions {
+			in.Conditions[i].DeepCopyInto(&out.Conditions[i])
+		}
+	}
 }
 
 func (in *KividbConfigStatus) DeepCopy() *KividbConfigStatus {
@@ -637,6 +643,12 @@ func (in *KividbAclConfigStatus) DeepCopyInto(out *KividbAclConfigStatus) {
 	if in.UsedBy != nil {
 		out.UsedBy = make([]string, len(in.UsedBy))
 		copy(out.UsedBy, in.UsedBy)
+	}
+	if in.Conditions != nil {
+		out.Conditions = make([]metav1.Condition, len(in.Conditions))
+		for i := range in.Conditions {
+			in.Conditions[i].DeepCopyInto(&out.Conditions[i])
+		}
 	}
 }
 
@@ -754,6 +766,12 @@ func (in *KividbSnapshotConfigStatus) DeepCopyInto(out *KividbSnapshotConfigStat
 	if in.UsedBy != nil {
 		out.UsedBy = make([]string, len(in.UsedBy))
 		copy(out.UsedBy, in.UsedBy)
+	}
+	if in.Conditions != nil {
+		out.Conditions = make([]metav1.Condition, len(in.Conditions))
+		for i := range in.Conditions {
+			in.Conditions[i].DeepCopyInto(&out.Conditions[i])
+		}
 	}
 }
 

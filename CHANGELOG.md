@@ -9,7 +9,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 **Apply the new CRDs before `helm upgrade`:** Helm does not upgrade them.
 The `kividbclusters` CRD spec gains `failover.restartWaitSeconds`.
 The `kividbconfigs`, `kividbaclconfigs`, and `kividbsnapshotconfigs` CRDs gain
-a `status` subresource with `status.usedBy` tracking referencing clusters.
+a `status` subresource with `status.usedBy` tracking referencing clusters,
+and `status.conditions`.
 Until they are applied, the API server drops these fields.
 
 **Read before upgrading:** the pods of every sharded cluster roll once,
@@ -43,9 +44,20 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 - **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
   Tracks which `KividbCluster`s in the namespace reference each shared config object,
   displayed in `kubectl get -o wide` via a printer column.
+- **Delete guard on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
+  A config that clusters reference holds the `kividb.io/in-use` finalizer.
+  Deleting it leaves it Terminating, with the condition `DeletionBlocked`
+  and a Warning Event naming the clusters, until none references it; then
+  it goes away by itself. A cluster being deleted no longer counts, so
+  deleting a namespace does not hang. If you uninstall the operator while
+  configs still hold the finalizer, clear it by hand (docs/INSTALL.md,
+  "Uninstalling"). The operator's role gains `update`/`patch` on the
+  configs and `update` on their `finalizers`.
 
 ### Fixed
 
+- **The chart's `kubeVersion` is `>=1.27.0-0`**, the minimum README and
+  docs/INSTALL.md state; it said `>=1.25.0-0`.
 - **The StatefulSet's selector labels win over `spec.podLabels`** (#122).
   A `podLabels` key that sets `app.kubernetes.io/name`,
   `app.kubernetes.io/instance`, `kividb.io/cluster` or, on a sharded

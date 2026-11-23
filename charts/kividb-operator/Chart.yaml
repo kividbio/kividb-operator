@@ -17,7 +17,7 @@ description: |
 type: application
 version: 0.7.1
 appVersion: "0.7.1"
-kubeVersion: ">=1.25.0-0"
+kubeVersion: ">=1.27.0-0"
 home: https://github.com/kividbio/kividb-operator
 icon: https://raw.githubusercontent.com/kividbio/kividb-operator/master/cmd/gui/static/kividb-logo.png
 sources:
