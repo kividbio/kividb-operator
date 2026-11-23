@@ -138,7 +138,9 @@ moved under 0.3.0 / Before 1.0.0.
 - **`KividbCluster` horizontal read scaling helpers**
 - **Multi-cluster / cross-region replication** — out of scope
 - **Admission webhooks** for stricter validation
-- **PVC online expansion automation**
+- **PVC online expansion automation** — today a larger `spec.storage.size`
+  is reported (`StorageResizePending`) and a smaller one refused; growing the
+  PVCs and recreating the StatefulSet is still by hand.
 
 ## Before 1.0.0
 

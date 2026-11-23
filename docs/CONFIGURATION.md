@@ -182,9 +182,13 @@ spec:
 
 One PVC per pod, mounted at `/data` (kividb's working directory — see
 [ARCHITECTURE.md](ARCHITECTURE.md) for why). **Changing `size` after
-creation is not currently propagated** — `VolumeClaimTemplates` are
-immutable on an existing StatefulSet; see TROUBLESHOOTING.md for the
-manual resize procedure.
+creation is not applied to the volumes** — `VolumeClaimTemplates` are
+immutable on an existing StatefulSet. A larger `size` sets the condition
+`StorageResizePending`, with an Event, until the volumes are grown by hand;
+a smaller one is refused (`Ready` False, reason `InvalidSpec`), since a
+volume cannot shrink. See
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md#storage-pvc-wont-resize-after-changing-specstoragesize)
+for the manual resize procedure.
 
 ### Persistence: the append-only file
 

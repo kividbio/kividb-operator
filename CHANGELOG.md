@@ -40,6 +40,13 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 
 ### Added
 
+- **A change of `spec.storage.size` on a running cluster is no longer
+  silently ignored.** A larger size sets the condition `StorageResizePending`
+  and a Warning Event naming the StatefulSets whose volumes are smaller, with
+  the manual steps (docs/TROUBLESHOOTING.md, which now includes recreating
+  the StatefulSet with `--cascade=orphan`). A smaller size is refused as an
+  invalid spec, since a volume cannot shrink: `Ready` says why and no other
+  change is applied until it is set back. Failover keeps running.
 - **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
   Tracks which `KividbCluster`s in the namespace reference each shared config object,
   displayed in `kubectl get -o wide` via a printer column.

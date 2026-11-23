@@ -198,6 +198,13 @@ func (r *KividbClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := validateSnapshotConfig(snapCfg); err != nil {
 		return r.reconcileHeld(ctx, &c, heldBack("InvalidSpec", err))
 	}
+	// A smaller spec.storage.size is refused; a larger one is reported, for
+	// the volumes to be grown by hand (see checkStorageSize).
+	if shrunk, err := r.checkStorageSize(ctx, &c); err != nil {
+		return r.reconcileHeld(ctx, &c, heldBack("ReconcileError", err))
+	} else if shrunk != nil {
+		return r.reconcileHeld(ctx, &c, heldBack("InvalidSpec", shrunk))
+	}
 
 	r.emitVariantGuidance(&c, kdbConfig)
 	r.emitIgnoredPodLabels(&c)
