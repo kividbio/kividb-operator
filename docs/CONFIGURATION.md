@@ -1271,9 +1271,13 @@ A `KividbConfig` is standalone: create it once, reference it from as many
 `KividbCluster`s as share the same tuning/TLS needs via `spec.configRef`.
 Its `status.usedBy` list tracks the names of `KividbCluster`s currently referencing it
 (also visible via `kubectl get kdbc -o wide`).
-Deleting one while a cluster still references it surfaces as a reconcile
-error on that cluster, which keeps failing over but is not applied until
-the KividbConfig is back.
+Deleting one while a cluster still references it does not remove it: it
+holds the `kividb.io/in-use` finalizer while `status.usedBy` is non-empty,
+stays Terminating with the condition `DeletionBlocked` and a Warning Event
+(reason `InUse`) naming the clusters, and goes away by itself once none
+references it. The same holds for `KividbAclConfig` and
+`KividbSnapshotConfig`. See [INSTALL.md](INSTALL.md#uninstalling) for
+uninstalling the operator while configs still hold the finalizer.
 
 ## KividbAclConfig
 

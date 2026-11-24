@@ -55,6 +55,16 @@ rules:
       - get
       - list
       - watch
+      - update
+      - patch
+  - apiGroups:
+      - kividb.io
+    resources:
+      - kividbconfigs/finalizers
+      - kividbaclconfigs/finalizers
+      - kividbsnapshotconfigs/finalizers
+    verbs:
+      - update
   - apiGroups:
       - kividb.io
     resources:

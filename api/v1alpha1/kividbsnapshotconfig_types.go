@@ -116,6 +116,17 @@ type KividbSnapshotConfigStatus struct {
 	// Maintained by the operator from the KividbClusters that reference this config.
 	// +optional
 	UsedBy []string `json:"usedBy,omitempty"`
+
+	// Conditions follow the standard Kubernetes conditions convention.
+	// DeletionBlocked is True while the config is being deleted and
+	// KividbClusters still reference it (see usedBy): it stays Terminating
+	// until none do.
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
