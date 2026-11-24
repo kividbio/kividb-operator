@@ -232,6 +232,17 @@ spec:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
                   description: Standard Kubernetes Affinity. If unset, a default preferred anti-affinity is injected.
+                topologySpreadConstraints:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  description: >-
+                    Standard Kubernetes TopologySpreadConstraints applied to the database pods,
+                    in addition to affinity (or the default anti-affinity).
+                priorityClassName:
+                  type: string
+                  description: PriorityClassName of the database pods and of the backup and restore Jobs' pods. The PriorityClass must exist.
                 podAnnotations:
                   type: object
                   additionalProperties: {type: string}

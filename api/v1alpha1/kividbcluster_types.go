@@ -387,6 +387,19 @@ type KividbClusterSpec struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
+	// TopologySpreadConstraints applied verbatim to the database pods, e.g. to
+	// spread a cluster's pods across zones. They add to affinity (or the
+	// default anti-affinity), not replace it. Select the cluster's pods by
+	// the kividb.io/cluster label (and kividb.io/shard for one shard).
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// PriorityClassName of the database pods and of the backup CronJob's and
+	// restore Job's pods, e.g. to keep them from being preempted. The
+	// PriorityClass must exist. Unset: the cluster's default.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
 	// PodAnnotations merged onto every pod.
 	// +optional
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`

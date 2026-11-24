@@ -63,6 +63,20 @@ spec:
   nodeSelector:
     workload-class: database
 
+  # Spread across zones as well as nodes; ScheduleAnyway keeps a
+  # single-zone cluster schedulable.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          kividb.io/cluster: kividb-full
+
+  # A PriorityClass you have created, to keep database pods from being
+  # preempted:
+  # priorityClassName: kividb-high
+
   podAnnotations:
     prometheus.io/scrape: "true"
 

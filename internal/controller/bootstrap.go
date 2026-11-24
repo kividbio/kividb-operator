@@ -567,6 +567,10 @@ func (r *KividbClusterReconciler) ensureBootstrapJob(ctx context.Context, c *kiv
 					ImagePullSecrets: c.Spec.ImagePullSecrets,
 					Tolerations:      c.Spec.Tolerations,
 					NodeSelector:     c.Spec.NodeSelector,
+					// As the database pods': the cluster does not start until
+					// its restore is done, so a preempted restore is worse
+					// than a preempted database pod.
+					PriorityClassName: c.Spec.PriorityClassName,
 					Containers: []corev1.Container{{
 						Name:            "restore",
 						Image:           agentImage(c),

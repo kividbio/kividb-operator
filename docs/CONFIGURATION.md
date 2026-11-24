@@ -251,7 +251,7 @@ replicas anyway: [When the master restarts behind its replicas](#failover)
 for a replicated cluster, and the `MasterRestartedEmpty` check in
 [Sharded clusters](#sharded-clusters-shards).
 
-### Scheduling: `tolerations`, `nodeSelector`, `affinity`
+### Scheduling: `tolerations`, `nodeSelector`, `affinity`, `topologySpreadConstraints`, `priorityClassName`
 
 ```yaml
 spec:
@@ -270,6 +270,52 @@ injects a *preferred* (not required) pod anti-affinity rule spreading the
 cluster's pods across distinct nodes by `kubernetes.io/hostname` — set
 your own `affinity` to override this entirely (there is no way to keep the
 default and add to it; an explicit `affinity` replaces it).
+
+`topologySpreadConstraints` (standard `TopologySpreadConstraint[]`) is
+applied verbatim to the database pods, and `priorityClassName` to them and
+to the pods of the backup CronJob and the restore Job, with no default.
+Spread constraints add to `affinity` (or the default anti-affinity) rather
+than replace it. A constraint with no `labelSelector` selects no pods, so it
+spreads nothing: select the cluster's pods by the `kividb.io/cluster`
+label. For example, to spread across zones and keep the pods from being
+preempted by lower-priority workloads:
+
+```yaml
+spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway   # DoNotSchedule to require it
+      labelSelector:
+        matchLabels:
+          kividb.io/cluster: my-cluster
+  priorityClassName: kividb-high        # a PriorityClass you created
+```
+
+To spread each shard's pods apart rather than the cluster's as a whole,
+add `matchLabelKeys` (Kubernetes 1.27 and later), which narrows the selector
+to the pods with the same `kividb.io/shard` as the pod being placed:
+
+```yaml
+spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          kividb.io/cluster: my-cluster
+      matchLabelKeys: [kividb.io/shard]
+```
+
+A `priorityClassName` that names no PriorityClass is refused when a pod is
+admitted, not when the cluster is applied: partway through a roll, the
+StatefulSet deletes a pod to replace it and cannot create the new one, and
+that pod stays gone (a `FailedCreate` event on the StatefulSet) until the
+PriorityClass exists or the field is changed back. Create the PriorityClass
+first.
+
+Changing either rolls the cluster's pods, as any pod template change does.
 
 ### `resources` / `agentResources` / `exporterResources`
 

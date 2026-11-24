@@ -331,6 +331,12 @@ func (in *KividbClusterSpec) DeepCopyInto(out *KividbClusterSpec) {
 	if in.Affinity != nil {
 		out.Affinity = in.Affinity.DeepCopy()
 	}
+	if in.TopologySpreadConstraints != nil {
+		out.TopologySpreadConstraints = make([]corev1.TopologySpreadConstraint, len(in.TopologySpreadConstraints))
+		for i := range in.TopologySpreadConstraints {
+			in.TopologySpreadConstraints[i].DeepCopyInto(&out.TopologySpreadConstraints[i])
+		}
+	}
 	if in.PodAnnotations != nil {
 		out.PodAnnotations = make(map[string]string, len(in.PodAnnotations))
 		for k, v := range in.PodAnnotations {

@@ -7,7 +7,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 **Apply the new CRDs before `helm upgrade`:** Helm does not upgrade them.
-The `kividbclusters` CRD spec gains `failover.restartWaitSeconds`.
+The `kividbclusters` CRD spec gains `failover.restartWaitSeconds`,
+`topologySpreadConstraints` and `priorityClassName`.
 The `kividbconfigs`, `kividbaclconfigs`, and `kividbsnapshotconfigs` CRDs gain
 a `status` subresource with `status.usedBy` tracking referencing clusters,
 and `status.conditions`.
@@ -48,6 +49,12 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 
 ### Added
 
+- **`topologySpreadConstraints` and `priorityClassName` on `KividbCluster`.**
+  Both pass through to the database pods, as `affinity` and `tolerations`
+  do, with no default: spread a cluster across zones, or keep its pods from
+  being preempted. `priorityClassName` also reaches the backup CronJob's
+  pods and the restore Job's, as `tolerations` and `nodeSelector` do.
+  Spread constraints add to the default anti-affinity.
 - **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
   Tracks which `KividbCluster`s in the namespace reference each shared config object,
   displayed in `kubectl get -o wide` via a printer column.
