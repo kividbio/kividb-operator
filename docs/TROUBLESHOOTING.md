@@ -506,18 +506,36 @@ helm upgrade --install kividb-operator charts/kividb-operator \
 
 ## Storage: PVC won't resize after changing `spec.storage.size`
 
-This is a known limitation, not a bug to report: `VolumeClaimTemplates`
-are immutable on an existing `StatefulSet`, so the operator cannot
-propagate a `spec.storage.size` change automatically. If your
-StorageClass supports volume expansion (`allowVolumeExpansion: true`):
+`VolumeClaimTemplates` are immutable on an existing `StatefulSet`, so the
+operator does not grow the volumes itself. What it does:
+
+- **A larger size** sets the condition `StorageResizePending` (reason
+  `StorageSizeIncreased`) and a Warning Event of the same reason, naming the
+  StatefulSets whose volumes are smaller, with the steps below. The
+  condition goes once every StatefulSet asks for the new size.
+- **A smaller size** is refused: a volume cannot shrink. `Ready` is False
+  with reason `InvalidSpec`, a Warning Event says so, and the operator
+  applies no other change until `spec.storage.size` is set back to the
+  current size or more. Failover keeps running meanwhile.
+
+To grow the volumes, if your StorageClass supports volume expansion
+(`allowVolumeExpansion: true`):
 
 ```bash
+# 1. Ask each PVC of the cluster for the new size.
 for pvc in $(kubectl get pvc -l kividb.io/cluster=my-cluster -o name); do
   kubectl patch "$pvc" -p '{"spec":{"resources":{"requests":{"storage":"20Gi"}}}}'
 done
-# Depending on your CSI driver, pods may need a restart to see the new size:
-kubectl rollout restart statefulset my-cluster
+# 2. Wait until each reports it (CAPACITY); some CSI drivers grow the
+#    filesystem only when the pod restarts.
+kubectl get pvc -l kividb.io/cluster=my-cluster
+# 3. Delete the StatefulSet(s) without their pods; the operator recreates
+#    them with the new volume claim template, and the pods keep running.
+kubectl delete statefulset -l kividb.io/cluster=my-cluster --cascade=orphan
 ```
+
+Until step 3, a pod added by scaling up would get a volume of the old size,
+and `StorageResizePending` stays True.
 
 If your StorageClass doesn't support expansion, you'll need to provision
 larger PVCs and restore from backup (see BACKUP_RESTORE.md) instead.
