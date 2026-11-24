@@ -22,6 +22,20 @@ keys (#108): give the cluster a replica first, turn the append-only file
 on, or, once the hold shows, set
 `kividb.io/allow-restart-without-persistence` to restart it anyway.
 
+**Read before upgrading: a cluster whose `spec.storage.size` is below its
+volumes' size stops reconciling.** The operator now refuses a smaller size
+(a volume cannot shrink): such a cluster goes `Ready=False` with
+`InvalidSpec`, and its rollouts, ACL reloads, password changes and backup
+CronJob wait until the size is raised (failover goes on). Until now the
+operator ignored the size after the StatefulSet was made, so a cluster can
+be in that state today without anyone knowing. List them before upgrading:
+
+```bash
+kubectl get kividbclusters,statefulsets -A -o json | jq -r 'def b: capture("^(?<n>[0-9.]+)(?<u>[KMGTPE]i?)?$") | (.n|tonumber) * ({"":1,K:1e3,M:1e6,G:1e9,T:1e12,P:1e15,E:1e18,Ki:1024,Mi:1048576,Gi:1073741824,Ti:1099511627776,Pi:1125899906842624,Ei:1152921504606846976}[.u // ""]); (.items | map(select(.kind == "KividbCluster") | {key: "\(.metadata.namespace)/\(.metadata.name)", value: .spec.storage.size}) | from_entries) as $spec | .items[] | select(.kind == "StatefulSet") | "\(.metadata.namespace)/\(.metadata.labels["kividb.io/cluster"] // "")" as $c | select($spec[$c]) | .metadata.name as $sts | .spec.volumeClaimTemplates[]? | select(.metadata.name == "data") | .spec.resources.requests.storage as $made | select(($spec[$c] | b) < ($made | b)) | "\($c): spec.storage.size \($spec[$c]) < \($made) (StatefulSet \($sts))"'
+```
+
+and set each one's `spec.storage.size` to at least the size it prints.
+
 **TLS with a CA: client certificates are verified only when `caKey` is
 set** (#106). Until now the `caKey` description and the TLS example in
 `CONFIGURATION.md` said it defaulted to `ca.crt`. That was wrong, and the
