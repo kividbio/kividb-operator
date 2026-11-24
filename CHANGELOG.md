@@ -23,6 +23,13 @@ keys (#108): give the cluster a replica first, turn the append-only file
 on, or, once the hold shows, set
 `kividb.io/allow-restart-without-persistence` to restart it anyway.
 
+**Going back to 0.7.1 leaves configs with a finalizer it does not know.**
+This release puts `kividb.io/in-use` on every `KividbConfig`,
+`KividbAclConfig` and `KividbSnapshotConfig` a cluster uses; 0.7.1 never
+removes it, so after a rollback a delete of such a config stays
+Terminating. Remove the finalizer by hand, before or after rolling back
+(docs/INSTALL.md, "Going back to 0.7.1").
+
 **TLS with a CA: client certificates are verified only when `caKey` is
 set** (#106). Until now the `caKey` description and the TLS example in
 `CONFIGURATION.md` said it defaulted to `ca.crt`. That was wrong, and the
@@ -56,8 +63,6 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 
 ### Fixed
 
-- **The chart's `kubeVersion` is `>=1.27.0-0`**, the minimum README and
-  docs/INSTALL.md state; it said `>=1.25.0-0`.
 - **The StatefulSet's selector labels win over `spec.podLabels`** (#122).
   A `podLabels` key that sets `app.kubernetes.io/name`,
   `app.kubernetes.io/instance`, `kividb.io/cluster` or, on a sharded

@@ -81,6 +81,21 @@ being watched keeps its `kividb.io/in-use` finalizer, and a delete of it
 stays Terminating: clear the finalizer by hand, as in
 [Uninstalling](#uninstalling).
 
+**Deleting a namespace the operator runs in.** With `watchNamespace` set to
+the release's own namespace, `kubectl delete namespace` removes the
+operator along with the clusters, and it can go first. A config it had not
+yet released then keeps its `kividb.io/in-use` finalizer, and the namespace
+stays Terminating. Delete the clusters before the namespace, or release a
+config by hand:
+
+```bash
+kubectl patch kividbconfig <name> -n <namespace> --type=json \
+  -p='[{"op":"remove","path":"/metadata/finalizers"}]'
+```
+
+(the same for `kividbaclconfig` and `kividbsnapshotconfig`; the loop in
+[Uninstalling](#uninstalling) does every one).
+
 Without Helm, set `WATCH_NAMESPACE` on the manager to one namespace or a
 comma-separated list (OLM does this for an OperatorGroup's target
 namespaces). The GUI takes one namespace only.
@@ -119,6 +134,14 @@ it keeps only what its shutdown snapshot saved. Before upgrading, give it
 a replica, or keep the append-only file on, or pin both images to put the
 restart off. The CHANGELOG's "Read before upgrading" says what a given
 release changes.
+
+### Going back to 0.7.1
+
+0.7.1 does not know the `kividb.io/in-use` finalizer that later releases
+put on configs in use, and never removes it: after a rollback, deleting
+such a `KividbConfig`, `KividbAclConfig` or `KividbSnapshotConfig` leaves it
+Terminating. Remove the finalizer from every config, before or after
+rolling back, with the loop in [Uninstalling](#uninstalling).
 
 ### Uninstalling
 
