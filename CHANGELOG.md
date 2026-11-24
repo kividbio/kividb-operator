@@ -42,9 +42,11 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 ### Added
 
 - **`topologySpreadConstraints` and `priorityClassName` on `KividbCluster`.**
-  Both pass through to every pod, as `affinity` and `tolerations` do, with
-  no default: spread a cluster across zones, or keep its pods from being
-  preempted. Spread constraints add to the default anti-affinity.
+  Both pass through to the database pods, as `affinity` and `tolerations`
+  do, with no default: spread a cluster across zones, or keep its pods from
+  being preempted. `priorityClassName` also reaches the backup CronJob's
+  pods and the restore Job's, as `tolerations` and `nodeSelector` do.
+  Spread constraints add to the default anti-affinity.
 - **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
   Tracks which `KividbCluster`s in the namespace reference each shared config object,
   displayed in `kubectl get -o wide` via a printer column.

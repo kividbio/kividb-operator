@@ -131,6 +131,9 @@ func desiredBackupCronJob(c *kividbv1alpha1.KividbCluster, snapCfg *kividbv1alph
 							ImagePullSecrets: c.Spec.ImagePullSecrets,
 							Tolerations:      c.Spec.Tolerations,
 							NodeSelector:     c.Spec.NodeSelector,
+							// As the database pods': a backup that is
+							// preempted is a backup missed.
+							PriorityClassName: c.Spec.PriorityClassName,
 							Containers: []corev1.Container{
 								{
 									Name:            "backup-trigger",

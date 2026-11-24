@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -9,9 +10,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// topologySpreadConstraints and priorityClassName reach every pod verbatim,
-// on a replicated cluster and on each shard, beside the default
-// anti-affinity; unset, the pod has neither.
+// topologySpreadConstraints and priorityClassName reach the database pods
+// verbatim, on a replicated cluster and on each shard, beside the default
+// anti-affinity, and priorityClassName the backup and restore pods; unset,
+// no pod has either.
 func TestTopologySpreadAndPriorityClassPassThrough(t *testing.T) {
 	t.Parallel()
 	spread := []corev1.TopologySpreadConstraint{{
@@ -45,6 +47,30 @@ func TestTopologySpreadAndPriorityClassPassThrough(t *testing.T) {
 		if tmpl.Spec.Affinity == nil || tmpl.Spec.Affinity.PodAntiAffinity == nil {
 			t.Errorf("%s: the default anti-affinity was dropped", name)
 		}
+	}
+
+	// The backup CronJob's pods and the restore Job's get the priority
+	// class too (not the spread: one pod each, placed beside the data).
+	snapCfg := &kividbv1alpha1.KividbSnapshotConfig{ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: "default"}}
+	snapCfg.Spec.Schedule = "0 * * * *"
+	backup := desiredBackupCronJob(c, snapCfg).Spec.JobTemplate.Spec.Template.Spec
+	if backup.PriorityClassName != "kividb-high" {
+		t.Errorf("backup pods: priority class %q, want kividb-high", backup.PriorityClassName)
+	}
+	if unset := desiredBackupCronJob(testCluster("c2"), snapCfg).Spec.JobTemplate.Spec.Template.Spec; unset.PriorityClassName != "" {
+		t.Errorf("backup pods, unset: priority class %q, want none", unset.PriorityClassName)
+	}
+	snap := &kividbv1alpha1.KividbSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "default"},
+		Status:     kividbv1alpha1.KividbSnapshotStatus{Phase: kividbv1alpha1.SnapshotSucceeded, ObjectKey: "k"},
+	}
+	c.Spec.Storage = kividbv1alpha1.StorageSpec{Size: "1Gi"}
+	job, err := shardedReconciler(t, c).ensureBootstrapJob(context.Background(), c, nil, snap, snapCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := job.Spec.Template.Spec.PriorityClassName; got != "kividb-high" {
+		t.Errorf("restore Job: priority class %q, want kividb-high", got)
 	}
 
 	// A copy of the cluster carries its own copy of the constraints.
