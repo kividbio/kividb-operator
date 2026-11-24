@@ -107,3 +107,11 @@ spec:
                     Maintained by the operator from the KividbClusters that reference this config.
                   items:
                     type: string
+                conditions:
+                  type: array
+                  description: >-
+                    Standard Kubernetes conditions. DeletionBlocked is True while
+                    this config is being deleted and KividbClusters still reference it.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true

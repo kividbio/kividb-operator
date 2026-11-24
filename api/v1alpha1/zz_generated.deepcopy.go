@@ -331,6 +331,12 @@ func (in *KividbClusterSpec) DeepCopyInto(out *KividbClusterSpec) {
 	if in.Affinity != nil {
 		out.Affinity = in.Affinity.DeepCopy()
 	}
+	if in.TopologySpreadConstraints != nil {
+		out.TopologySpreadConstraints = make([]corev1.TopologySpreadConstraint, len(in.TopologySpreadConstraints))
+		for i := range in.TopologySpreadConstraints {
+			in.TopologySpreadConstraints[i].DeepCopyInto(&out.TopologySpreadConstraints[i])
+		}
+	}
 	if in.PodAnnotations != nil {
 		out.PodAnnotations = make(map[string]string, len(in.PodAnnotations))
 		for k, v := range in.PodAnnotations {
@@ -544,6 +550,12 @@ func (in *KividbConfigStatus) DeepCopyInto(out *KividbConfigStatus) {
 		out.UsedBy = make([]string, len(in.UsedBy))
 		copy(out.UsedBy, in.UsedBy)
 	}
+	if in.Conditions != nil {
+		out.Conditions = make([]metav1.Condition, len(in.Conditions))
+		for i := range in.Conditions {
+			in.Conditions[i].DeepCopyInto(&out.Conditions[i])
+		}
+	}
 }
 
 func (in *KividbConfigStatus) DeepCopy() *KividbConfigStatus {
@@ -637,6 +649,12 @@ func (in *KividbAclConfigStatus) DeepCopyInto(out *KividbAclConfigStatus) {
 	if in.UsedBy != nil {
 		out.UsedBy = make([]string, len(in.UsedBy))
 		copy(out.UsedBy, in.UsedBy)
+	}
+	if in.Conditions != nil {
+		out.Conditions = make([]metav1.Condition, len(in.Conditions))
+		for i := range in.Conditions {
+			in.Conditions[i].DeepCopyInto(&out.Conditions[i])
+		}
 	}
 }
 
@@ -754,6 +772,12 @@ func (in *KividbSnapshotConfigStatus) DeepCopyInto(out *KividbSnapshotConfigStat
 	if in.UsedBy != nil {
 		out.UsedBy = make([]string, len(in.UsedBy))
 		copy(out.UsedBy, in.UsedBy)
+	}
+	if in.Conditions != nil {
+		out.Conditions = make([]metav1.Condition, len(in.Conditions))
+		for i := range in.Conditions {
+			in.Conditions[i].DeepCopyInto(&out.Conditions[i])
+		}
 	}
 }
 

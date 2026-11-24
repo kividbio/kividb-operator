@@ -82,10 +82,10 @@ moved under 0.3.0 / Before 1.0.0.
   for `KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig` themselves --
   useful once clusters start sharing them.
 - **`KividbConfig`/`KividbAclConfig`/`KividbSnapshotConfig` delete guard.**
-  While `status.usedBy` tracks referencing clusters, deleting a config out
-  from under a referencing `KividbCluster` still surfaces as a reconcile error
-  on the cluster (no admission webhook or finalizer blocking the delete while
-  `status.usedBy` is non-empty).
+  Done: a config with a non-empty `status.usedBy` holds the
+  `kividb.io/in-use` finalizer, and deleting it leaves it Terminating with a
+  `DeletionBlocked` condition and an Event naming the clusters until none
+  references it.
 - **Chart signing.** `values.schema.json` is shipped; GPG-signed
   provenance (`helm package --sign`) is documented in RELEASING.md but not
   wired into the release pipeline -- needs a real, verifiable signing
