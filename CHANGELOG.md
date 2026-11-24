@@ -9,7 +9,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 **Apply the new CRDs before `helm upgrade`:** Helm does not upgrade them.
 The `kividbclusters` CRD spec gains `failover.restartWaitSeconds`.
 The `kividbconfigs`, `kividbaclconfigs`, and `kividbsnapshotconfigs` CRDs gain
-a `status` subresource with `status.usedBy` tracking referencing clusters.
+a `status` subresource with `status.usedBy` tracking referencing clusters,
+and `status.conditions`.
 Until they are applied, the API server drops these fields.
 
 **Read before upgrading:** the pods of every sharded cluster roll once,
@@ -21,6 +22,13 @@ With persistence off, the rollout now holds such a master instead
 keys (#108): give the cluster a replica first, turn the append-only file
 on, or, once the hold shows, set
 `kividb.io/allow-restart-without-persistence` to restart it anyway.
+
+**Going back to 0.7.1 leaves configs with a finalizer it does not know.**
+This release puts `kividb.io/in-use` on every `KividbConfig`,
+`KividbAclConfig` and `KividbSnapshotConfig` a cluster uses; 0.7.1 never
+removes it, so after a rollback a delete of such a config stays
+Terminating. Remove the finalizer by hand, before or after rolling back
+(docs/INSTALL.md, "Going back to 0.7.1").
 
 **TLS with a CA: client certificates are verified only when `caKey` is
 set** (#106). Until now the `caKey` description and the TLS example in
@@ -43,6 +51,15 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
 - **`status.usedBy` on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
   Tracks which `KividbCluster`s in the namespace reference each shared config object,
   displayed in `kubectl get -o wide` via a printer column.
+- **Delete guard on `KividbConfig`, `KividbAclConfig`, and `KividbSnapshotConfig`.**
+  A config that clusters reference holds the `kividb.io/in-use` finalizer.
+  Deleting it leaves it Terminating, with the condition `DeletionBlocked`
+  and a Warning Event naming the clusters, until none references it; then
+  it goes away by itself. A cluster being deleted no longer counts, so
+  deleting a namespace does not hang. If you uninstall the operator while
+  configs still hold the finalizer, clear it by hand (docs/INSTALL.md,
+  "Uninstalling"). The operator's role gains `update`/`patch` on the
+  configs and `update` on their `finalizers`.
 
 ### Fixed
 

@@ -74,8 +74,27 @@ releases can run side by side, one per team namespace, each with its own
 KividbClusters in other namespaces are ignored. If you restrict an existing
 install, the clusters outside `team-a` keep running but are no longer
 reconciled: no failover, no backups, no spec changes. Deleting one still
-works (the operator sets no finalizers), and its owned objects are removed
-by garbage collection.
+works (the operator sets no finalizers on clusters), and its owned objects
+are removed by garbage collection. A `KividbConfig`, `KividbAclConfig` or
+`KividbSnapshotConfig` there that was in use when the namespace stopped
+being watched keeps its `kividb.io/in-use` finalizer, and a delete of it
+stays Terminating: clear the finalizer by hand, as in
+[Uninstalling](#uninstalling).
+
+**Deleting a namespace the operator runs in.** With `watchNamespace` set to
+the release's own namespace, `kubectl delete namespace` removes the
+operator along with the clusters, and it can go first. A config it had not
+yet released then keeps its `kividb.io/in-use` finalizer, and the namespace
+stays Terminating. Delete the clusters before the namespace, or release a
+config by hand:
+
+```bash
+kubectl patch kividbconfig <name> -n <namespace> --type=json \
+  -p='[{"op":"remove","path":"/metadata/finalizers"}]'
+```
+
+(the same for `kividbaclconfig` and `kividbsnapshotconfig`; the loop in
+[Uninstalling](#uninstalling) does every one).
 
 Without Helm, set `WATCH_NAMESPACE` on the manager to one namespace or a
 comma-separated list (OLM does this for an OperatorGroup's target
@@ -116,6 +135,14 @@ a replica, or keep the append-only file on, or pin both images to put the
 restart off. The CHANGELOG's "Read before upgrading" says what a given
 release changes.
 
+### Going back to 0.7.1
+
+0.7.1 does not know the `kividb.io/in-use` finalizer that later releases
+put on configs in use, and never removes it: after a rollback, deleting
+such a `KividbConfig`, `KividbAclConfig` or `KividbSnapshotConfig` leaves it
+Terminating. Remove the finalizer from every config, before or after
+rolling back, with the loop in [Uninstalling](#uninstalling).
+
 ### Uninstalling
 
 ```bash
@@ -132,6 +159,24 @@ everything, including all data:
 kubectl delete kividbcluster --all -A     # deletes every managed StatefulSet/Service/etc. via ownerReferences
 kubectl delete crd kividbclusters.kividb.io kividbconfigs.kividb.io \
   kividbaclconfigs.kividb.io kividbsnapshotconfigs.kividb.io kividbsnapshots.kividb.io
+```
+
+A `KividbConfig`, `KividbAclConfig` or `KividbSnapshotConfig` that a
+cluster references carries the `kividb.io/in-use` finalizer, which the
+operator removes once nothing references it. Delete the clusters while the
+operator is still running and it clears them itself. If you uninstalled the
+operator first, a config that still had the finalizer stays Terminating
+(and so does `kubectl delete crd` for its kind, and a namespace delete).
+Clear the finalizer by hand:
+
+```bash
+for kind in kividbconfig kividbaclconfig kividbsnapshotconfig; do
+  kubectl get "$kind" -A -o jsonpath='{range .items[*]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' |
+  while read -r ns name; do
+    kubectl patch "$kind" "$name" -n "$ns" --type=json \
+      -p='[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true
+  done
+done
 ```
 
 **`kubectl delete crd` deletes every object of that kind across every
@@ -181,6 +226,11 @@ kubectl apply -f config/manager/manager.yaml
 kubectl apply -k config/default      # upgrade: re-applies everything, including the CRD this time
 kubectl delete -k config/default     # uninstall: removes CRD, RBAC and the manager Deployment
 ```
+
+`kubectl delete -k config/default` removes the manager before the CRDs, so
+delete your clusters first, or clear the configs' `kividb.io/in-use`
+finalizer as in [Uninstalling](#uninstalling); otherwise the deletion of a
+config CRD waits on the configs that still hold it.
 
 Unlike the Helm path, `kubectl apply -k config/default` **does** update
 the CRD on every apply, since there's no Helm `crds/`-style special
