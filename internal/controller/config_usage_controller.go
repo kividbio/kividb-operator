@@ -60,6 +60,12 @@ type ConfigUsageReconciler[T client.Object] struct {
 	ConditionsOf func(T) *[]metav1.Condition
 	// Recorder emits the Warning Event of a blocked deletion. Optional.
 	Recorder record.EventRecorder
+	// BootstrapUsers, for KividbSnapshotConfig, also counts as a user each
+	// cluster whose bootstrap is not done and whose snapshot this config
+	// made: the restore Job is made from the snapshot's config, not from
+	// the cluster's spec.snapshotConfigRef, and every pass of the
+	// bootstrap reads it until the restore is recorded.
+	BootstrapUsers bool
 }
 
 //+kubebuilder:rbac:groups=kividb.io,resources=kividbconfigs;kividbaclconfigs;kividbsnapshotconfigs,verbs=get;list;watch;update;patch
@@ -89,6 +95,17 @@ func (r *ConfigUsageReconciler[T]) Reconcile(ctx context.Context, req ctrl.Reque
 	for _, c := range clusters.Items {
 		if c.DeletionTimestamp == nil {
 			usedBy = append(usedBy, c.Name)
+		}
+	}
+	if r.BootstrapUsers {
+		restoring, err := r.bootstrapUsers(ctx, req.Namespace, req.Name)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		for _, name := range restoring {
+			if !slices.Contains(usedBy, name) {
+				usedBy = append(usedBy, name)
+			}
 		}
 	}
 	sort.Strings(usedBy)
@@ -161,9 +178,73 @@ func (r *ConfigUsageReconciler[T]) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{}, nil
 }
 
-// blockedMessage names the clusters a config's deletion waits for.
+// bootstrapUsers names the clusters in namespace, not being deleted, whose
+// bootstrap is not done and restores a snapshot that the
+// KividbSnapshotConfig name made. A snapshot not found is no user: the
+// bootstrap fails on it before it reads any config.
+func (r *ConfigUsageReconciler[T]) bootstrapUsers(ctx context.Context, namespace, name string) ([]string, error) {
+	var clusters kividbv1alpha1.KividbClusterList
+	if err := r.List(ctx, &clusters, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("listing clusters bootstrapping from a snapshot of %s: %w", name, err)
+	}
+	var users []string
+	for i := range clusters.Items {
+		c := &clusters.Items[i]
+		if c.DeletionTimestamp != nil {
+			continue
+		}
+		cfg, err := bootstrapSnapshotConfigName(ctx, r.Client, c)
+		if err != nil {
+			return nil, err
+		}
+		if cfg == name {
+			users = append(users, c.Name)
+		}
+	}
+	return users, nil
+}
+
+// bootstrapSnapshotConfigName is the KividbSnapshotConfig that made the
+// snapshot a bootstrap not yet done restores, or "" when there is no such
+// bootstrap or its snapshot is not found.
+func bootstrapSnapshotConfigName(ctx context.Context, rd client.Reader, c *kividbv1alpha1.KividbCluster) (string, error) {
+	if !bootstrapPending(c) {
+		return "", nil
+	}
+	var snap kividbv1alpha1.KividbSnapshot
+	err := rd.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: c.Spec.BootstrapFromSnapshot.SnapshotRef.Name}, &snap)
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading snapshot %s of cluster %s's bootstrap: %w", c.Spec.BootstrapFromSnapshot.SnapshotRef.Name, c.Name, err)
+	}
+	return snap.Spec.SnapshotConfigRef.Name, nil
+}
+
+// clusterRefs are the configs of this kind that c uses: its own
+// references and, with BootstrapUsers, the config of its bootstrap's
+// snapshot.
+func (r *ConfigUsageReconciler[T]) clusterRefs(ctx context.Context, c *kividbv1alpha1.KividbCluster) []string {
+	refs := r.ExtractClusterRefs(c)
+	if !r.BootstrapUsers {
+		return refs
+	}
+	cfg, err := bootstrapSnapshotConfigName(ctx, r.Client, c)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "finding the snapshot config of a bootstrap", "cluster", c.Name)
+	}
+	if cfg != "" && !slices.Contains(refs, cfg) {
+		refs = append(refs, cfg)
+	}
+	return refs
+}
+
+// blockedMessage names the clusters a config's deletion waits for: those
+// that reference it and, for a KividbSnapshotConfig, those still
+// bootstrapping from a snapshot it made.
 func blockedMessage(usedBy []string) string {
-	return fmt.Sprintf("deletion waits until no KividbCluster references this config; still referenced by: %s",
+	return fmt.Sprintf("deletion waits until no KividbCluster uses this config; still used by: %s",
 		strings.Join(usedBy, ", "))
 }
 
@@ -203,7 +284,7 @@ func (r *ConfigUsageReconciler[T]) mapClusterEvents() handler.EventHandler {
 			if !ok {
 				return
 			}
-			for _, ref := range r.ExtractClusterRefs(c) {
+			for _, ref := range r.clusterRefs(ctx, c) {
 				q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: c.Namespace, Name: ref}})
 			}
 		},
@@ -214,7 +295,7 @@ func (r *ConfigUsageReconciler[T]) mapClusterEvents() handler.EventHandler {
 				return
 			}
 			seen := make(map[string]bool)
-			for _, ref := range append(r.ExtractClusterRefs(oldC), r.ExtractClusterRefs(newC)...) {
+			for _, ref := range append(r.clusterRefs(ctx, oldC), r.clusterRefs(ctx, newC)...) {
 				if !seen[ref] {
 					seen[ref] = true
 					q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: newC.Namespace, Name: ref}})
@@ -226,7 +307,7 @@ func (r *ConfigUsageReconciler[T]) mapClusterEvents() handler.EventHandler {
 			if !ok {
 				return
 			}
-			for _, ref := range r.ExtractClusterRefs(c) {
+			for _, ref := range r.clusterRefs(ctx, c) {
 				q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: c.Namespace, Name: ref}})
 			}
 		},
@@ -239,6 +320,18 @@ func (r *ConfigUsageReconciler[T]) SetupWithManager(mgr ctrl.Manager) error {
 		For(r.NewObject()).
 		Watches(&kividbv1alpha1.KividbCluster{}, r.mapClusterEvents())
 
+	if r.BootstrapUsers {
+		// A cluster can be made before the snapshot it restores: once the
+		// snapshot is, its config gains the cluster.
+		builder = builder.Watches(&kividbv1alpha1.KividbSnapshot{},
+			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+				snap, ok := obj.(*kividbv1alpha1.KividbSnapshot)
+				if !ok || snap.Spec.SnapshotConfigRef.Name == "" {
+					return nil
+				}
+				return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: snap.Namespace, Name: snap.Spec.SnapshotConfigRef.Name}}}
+			}))
+	}
 	if r.ControllerName != "" {
 		builder = builder.Named(r.ControllerName)
 	}
@@ -316,7 +409,8 @@ func SetupConfigUsageControllers(mgr ctrl.Manager) error {
 		ConditionsOf: func(s *kividbv1alpha1.KividbSnapshotConfig) *[]metav1.Condition {
 			return &s.Status.Conditions
 		},
-		Recorder: mgr.GetEventRecorderFor("kividbsnapshotconfig-usage"),
+		Recorder:       mgr.GetEventRecorderFor("kividbsnapshotconfig-usage"),
+		BootstrapUsers: true,
 		ExtractClusterRefs: func(c *kividbv1alpha1.KividbCluster) []string {
 			if c.Spec.SnapshotConfigRef != nil && c.Spec.SnapshotConfigRef.Name != "" {
 				return []string{c.Spec.SnapshotConfigRef.Name}

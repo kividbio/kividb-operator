@@ -103,15 +103,16 @@ spec:
                 usedBy:
                   type: array
                   description: >-
-                    KividbCluster names in this namespace that reference this config.
-                    Maintained by the operator from the KividbClusters that reference this config.
+                    KividbCluster names in this namespace that reference this config,
+                    and those whose bootstrap restores a snapshot this config made, until it is done.
+                    Maintained by the operator from those KividbClusters.
                   items:
                     type: string
                 conditions:
                   type: array
                   description: >-
                     Standard Kubernetes conditions. DeletionBlocked is True while
-                    this config is being deleted and KividbClusters still reference it.
+                    this config is being deleted and KividbClusters still use it.
                   items:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true

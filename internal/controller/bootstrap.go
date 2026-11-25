@@ -53,7 +53,7 @@ func (e *heldBootstrapError) Unwrap() error { return e.err }
 // Job of a bootstrap not yet done reads: the snapshot's own, which need
 // not be the cluster's spec.snapshotConfigRef. nil if there is none.
 func (r *KividbClusterReconciler) bootstrapSnapshotConfig(ctx context.Context, c *kividbv1alpha1.KividbCluster) *kividbv1alpha1.KividbSnapshotConfig {
-	if c.Spec.BootstrapFromSnapshot == nil || (c.Status.Bootstrap != nil && c.Status.Bootstrap.Completed) {
+	if !bootstrapPending(c) {
 		return nil
 	}
 	var snap kividbv1alpha1.KividbSnapshot
@@ -65,6 +65,12 @@ func (r *KividbClusterReconciler) bootstrapSnapshotConfig(ctx context.Context, c
 		return nil
 	}
 	return &snapCfg
+}
+
+// bootstrapPending reports whether c asks for a bootstrap that is not done:
+// spec.bootstrapFromSnapshot is set and status.bootstrap.completed is not.
+func bootstrapPending(c *kividbv1alpha1.KividbCluster) bool {
+	return c.Spec.BootstrapFromSnapshot != nil && (c.Status.Bootstrap == nil || !c.Status.Bootstrap.Completed)
 }
 
 // reconcileBootstrap seeds pod-0's PVC from spec.bootstrapFromSnapshot

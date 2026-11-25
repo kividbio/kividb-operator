@@ -112,14 +112,15 @@ type KividbSnapshotConfigSpec struct {
 
 // KividbSnapshotConfigStatus defines the observed state of a KividbSnapshotConfig.
 type KividbSnapshotConfigStatus struct {
-	// UsedBy lists the names of KividbClusters in the same namespace referencing this config.
-	// Maintained by the operator from the KividbClusters that reference this config.
+	// UsedBy lists the names of KividbClusters in the same namespace referencing this config,
+	// and of those whose bootstrap restores a snapshot this config made, until it is done.
+	// Maintained by the operator from those KividbClusters.
 	// +optional
 	UsedBy []string `json:"usedBy,omitempty"`
 
 	// Conditions follow the standard Kubernetes conditions convention.
 	// DeletionBlocked is True while the config is being deleted and
-	// KividbClusters still reference it (see usedBy): it stays Terminating
+	// KividbClusters still use it (see usedBy): it stays Terminating
 	// until none do.
 	// +optional
 	// +patchMergeKey=type
