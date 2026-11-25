@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
@@ -161,11 +162,15 @@ func TestPodLabelsEnvtest(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventually("the running cluster's StatefulSet is made", func() bool { return stsLabels("run") != nil })
-	if err := c.Get(ctx, client.ObjectKeyFromObject(run), run); err != nil {
-		t.Fatal(err)
-	}
-	run.Spec.PodLabels = map[string]string{"team": "b", "app.kubernetes.io/instance": "other"}
-	if err := c.Update(ctx, run); err != nil {
+	// The controller writes the cluster too (its finalizer, its status), so
+	// the update is made on the latest copy, and again on a conflict.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(run), run); err != nil {
+			return err
+		}
+		run.Spec.PodLabels = map[string]string{"team": "b", "app.kubernetes.io/instance": "other"}
+		return c.Update(ctx, run)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	eventually("the StatefulSet's template takes team=b", func() bool { return stsLabels("run")["team"] == "b" })
