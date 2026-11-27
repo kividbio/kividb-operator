@@ -276,7 +276,10 @@ The restore Job reads the S3 credentials of the snapshot's own
 restore Job is made: the bootstrap waits in `Pending` (reason
 `ReconcileError`) with `status.bootstrap.error` naming the Secret and the
 key, and `Ready` is `False` with the same reason and message. Creating or
-fixing the Secret starts the restore.
+fixing the Secret starts the restore. Until the bootstrap completes, that
+`KividbSnapshotConfig` lists the cluster in `status.usedBy` and holds the
+`kividb.io/in-use` finalizer: deleting it leaves it Terminating with
+`DeletionBlocked` until the restore is done.
 
 **Re-creating a deleted cluster with the same name.** The StatefulSet
 keeps its PVCs when the cluster is deleted, so the new cluster finds

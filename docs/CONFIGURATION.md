@@ -1425,7 +1425,11 @@ time.
 A `KividbSnapshotConfig` is standalone: create once, reference from any
 number of `KividbCluster`s via `spec.snapshotConfigRef`.
 Its `status.usedBy` list tracks the names of `KividbCluster`s currently referencing it
-(visible via `kubectl get kdbsc -o wide`). See
+(visible via `kubectl get kdbsc -o wide`). It also names each cluster
+whose `bootstrapFromSnapshot` restores a snapshot this config made, until
+that bootstrap completes: the restore Job reads this config, not the
+cluster's own `snapshotConfigRef`, so a delete waits for the restore as
+it does for a cluster that references the config. See
 [BACKUP_RESTORE.md](BACKUP_RESTORE.md) for the manual restore procedure
 and how to trigger an out-of-schedule backup.
 

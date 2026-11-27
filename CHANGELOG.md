@@ -85,7 +85,11 @@ keeps `kividb-operator-manager-role`; only its binding is renamed.
   Deleting it leaves it Terminating, with the condition `DeletionBlocked`
   and a Warning Event naming the clusters, until none references it; then
   it goes away by itself. A cluster being deleted no longer counts, so
-  deleting a namespace does not hang. If you uninstall the operator while
+  deleting a namespace does not hang. A `KividbSnapshotConfig` is also
+  held by each cluster whose `bootstrapFromSnapshot` restores a snapshot
+  it made, until that bootstrap completes: the restore reads that config,
+  and without it the bootstrap would fail on every pass (#129). If you
+  uninstall the operator while
   configs still hold the finalizer, clear it by hand (docs/INSTALL.md,
   "Uninstalling"). The operator's role gains `update`/`patch` on the
   configs and `update` on their `finalizers`.
