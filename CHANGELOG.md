@@ -466,6 +466,12 @@ are attached to the GitHub Release. Coming from 0.6.x, read 0.7.0's
   kividb-operator-system kividb-operator-manager`) before applying the new
   manifests.
   (#88, by [SaiPisey2](https://github.com/SaiPisey2))
+- **The docs counted five CRDs and left `kividbdbops` out (#87),** so the
+  uninstall step in `docs/INSTALL.md` left that CRD, and every
+  `KividbDbOps`, behind. The chart's Artifact Hub CRD list and
+  INSTALL, CONFIGURATION, ARCHITECTURE, TROUBLESHOOTING and ROADMAP now
+  name six, and `docs/CONFIGURATION.md` has a `KividbDbOps` section.
+  (#89, by [SaiPisey2](https://github.com/SaiPisey2))
 - **`docs/INSTALL.md`'s install without kustomize exited 1 (#67).**
   `kubectl apply -f config/rbac/` applied the RBAC and then failed on
   `config/rbac/kustomization.yaml`, and on a new cluster the namespace did
